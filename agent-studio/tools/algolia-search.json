@@ -1,0 +1,229 @@
+{
+  "type": "algolia_search_index",
+  "name": "personal_data_search",
+  "indices": [
+    {
+      "index": "devcon_assistant_todos",
+      "description": "Work the local devcon-demo user intends to do: todos and subtasks with canonical status, priority, category, life area, parent, due, and reminder fields. Use for outstanding tasks, what is on the list, and deadlines. Do not use for background knowledge the user asked to be remembered, which lives in the memory index even when it involves dates or meetings.",
+      "searchParameters": {
+        "filters": "userId:\"devcon-demo\"",
+        "hitsPerPage": 20,
+        "attributesToRetrieve": [
+          "objectID",
+          "title",
+          "notes",
+          "status",
+          "priority",
+          "category_id",
+          "category_name",
+          "life_area_id",
+          "life_area_name",
+          "life_area_slug",
+          "parent_id",
+          "due_at",
+          "reminder_at",
+          "extra_reminders"
+        ],
+        "attributesToHighlight": [],
+        "facets": ["status", "priority"],
+        "maxValuesPerFacet": 20,
+        "analytics": true
+      },
+      "searchControls": {
+        "hitsPerPage": {
+          "exposed": true,
+          "default": 20,
+          "constraint": {
+            "min": 1,
+            "max": 50
+          }
+        },
+        "page": {
+          "exposed": true,
+          "default": 0,
+          "constraint": {
+            "min": 0,
+            "max": 10
+          }
+        },
+        "attributesToRetrieve": {
+          "exposed": false,
+          "default": [
+            "objectID",
+            "title",
+            "notes",
+            "status",
+            "priority",
+            "category_id",
+            "category_name",
+            "life_area_id",
+            "life_area_name",
+            "life_area_slug",
+            "parent_id",
+            "due_at",
+            "reminder_at",
+            "extra_reminders"
+          ],
+          "constraint": {
+            "values": [
+              "objectID",
+              "title",
+              "notes",
+              "status",
+              "priority",
+              "category_id",
+              "category_name",
+              "life_area_id",
+              "life_area_name",
+              "life_area_slug",
+              "parent_id",
+              "due_at",
+              "reminder_at",
+              "extra_reminders"
+            ]
+          }
+        },
+        "facets": {
+          "exposed": false,
+          "default": ["status", "priority"]
+        }
+      }
+    },
+    {
+      "index": "devcon_assistant_memories",
+      "description": "Durable knowledge the local devcon-demo user asked to be remembered: fact, note, and journal memories with title, content, kind, mood, category, life area, and tags. Use for anything the user said to remember, including people, relationships, recurring meetings, schedules, dates, preferences, and habits, even when the wording sounds like a task. Search here before answering that something is not stored.",
+      "searchParameters": {
+        "filters": "userId:\"devcon-demo\"",
+        "hitsPerPage": 10,
+        "attributesToRetrieve": [
+          "objectID",
+          "kind",
+          "title",
+          "content",
+          "mood_label",
+          "mood_score",
+          "category_id",
+          "category_name",
+          "life_area_id",
+          "life_area_name",
+          "life_area_slug",
+          "occurred_at",
+          "review_worthy",
+          "tags"
+        ],
+        "attributesToHighlight": [],
+        "facets": ["kind", "mood_label"],
+        "maxValuesPerFacet": 20,
+        "analytics": true
+      },
+      "searchControls": {
+        "hitsPerPage": {
+          "exposed": true,
+          "default": 10,
+          "constraint": {
+            "min": 1,
+            "max": 50
+          }
+        },
+        "page": {
+          "exposed": true,
+          "default": 0,
+          "constraint": {
+            "min": 0,
+            "max": 10
+          }
+        },
+        "attributesToRetrieve": {
+          "exposed": false,
+          "default": [
+            "objectID",
+            "kind",
+            "title",
+            "content",
+            "mood_label",
+            "mood_score",
+            "category_id",
+            "category_name",
+            "life_area_id",
+            "life_area_name",
+            "life_area_slug",
+            "occurred_at",
+            "review_worthy",
+            "tags"
+          ],
+          "constraint": {
+            "values": [
+              "objectID",
+              "kind",
+              "title",
+              "content",
+              "mood_label",
+              "mood_score",
+              "category_id",
+              "category_name",
+              "life_area_id",
+              "life_area_name",
+              "life_area_slug",
+              "occurred_at",
+              "review_worthy",
+              "tags"
+            ]
+          }
+        },
+        "facets": {
+          "exposed": false,
+          "default": ["kind", "mood_label"]
+        }
+      }
+    },
+    {
+      "index": "devcon_assistant_messages",
+      "description": "Redacted user and assistant messages from Web and SMS conversations. Use for semantic recall of what was said earlier when the recent thread context is insufficient. This is conversation transcript, not durable user data: facts live in the memory index and tasks in the todo index.",
+      "searchParameters": {
+        "filters": "userId:\"devcon-demo\"",
+        "hitsPerPage": 10,
+        "attributesToRetrieve": [
+          "objectID",
+          "threadId",
+          "channel",
+          "role",
+          "content",
+          "created_at"
+        ],
+        "attributesToHighlight": [],
+        "facets": ["channel", "role"],
+        "maxValuesPerFacet": 20,
+        "analytics": true
+      },
+      "searchControls": {
+        "hitsPerPage": {
+          "exposed": true,
+          "default": 10,
+          "constraint": {
+            "min": 1,
+            "max": 30
+          }
+        },
+        "page": {
+          "exposed": true,
+          "default": 0,
+          "constraint": {
+            "min": 0,
+            "max": 10
+          }
+        },
+        "attributesToRetrieve": {
+          "exposed": false,
+          "default": ["objectID", "threadId", "channel", "role", "content", "created_at"],
+          "constraint": {
+            "values": ["objectID", "threadId", "channel", "role", "content", "created_at"]
+          }
+        },
+        "facets": {
+          "exposed": false,
+          "default": ["channel", "role"]
+        }
+      }
+    }
+  ]
+}

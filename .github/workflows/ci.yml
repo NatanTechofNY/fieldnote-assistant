@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Coverage runs the same suites as `npm test` and additionally fails when
+      # either side drops below its recorded floor.
+      - name: Test with coverage
+        run: npm run test:coverage
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: ignore
+
+      - name: Build
+        run: npm run build
+
+  docker:
+    name: Container builds and serves
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: fieldnote:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is the whole deployment, so prove it actually boots and
+      # serves rather than only that it compiles.
+      - name: Start container
+        run: |
+          docker run -d --name fieldnote -p 4174:4174 \
+            -e APP_ADMIN_PASSWORD=ci-smoke-test \
+            fieldnote:ci
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4174/api/health > /dev/null; then
+              echo "healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container never became healthy"
+          docker logs fieldnote
+          exit 1
+
+      - name: Verify auth and static bundle
+        run: |
+          anon=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4174/)
+          test "$anon" = "302" || { echo "expected a redirect to the login page, got $anon"; exit 1; }
+
+          api=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4174/api/todos)
+          test "$api" = "401" || { echo "expected 401 on the API, got $api"; exit 1; }
+
+          login=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4174/login)
+          test "$login" = "200" || { echo "expected the login page to render, got $login"; exit 1; }
+
+          authed=$(curl -s -o /dev/null -w '%{http_code}' -u admin:ci-smoke-test http://127.0.0.1:4174/)
+          test "$authed" = "200" || { echo "expected 200 with credentials, got $authed"; exit 1; }
+
+      - name: Verify the container refuses to start unauthenticated
+        run: |
+          docker rm -f fieldnote-open > /dev/null 2>&1 || true
+          if docker run --name fieldnote-open fieldnote:ci > /tmp/open.log 2>&1; then
+            echo "container started with no password configured"; cat /tmp/open.log; exit 1
+          fi
+          grep -q "APP_ADMIN_PASSWORD is not set" /tmp/open.log \
+            || { echo "missing the expected refusal message"; cat /tmp/open.log; exit 1; }
+
+      - name: Container logs
+        if: always()
+        run: docker logs fieldnote

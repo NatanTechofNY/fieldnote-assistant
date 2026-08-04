@@ -1,0 +1,39 @@
+{
+  "searchableAttributes": [
+    "unordered(title)",
+    "unordered(notes)"
+  ],
+  "attributesForFaceting": [
+    "filterOnly(userId)",
+    "status",
+    "priority",
+    "category_id",
+    "life_area_id",
+    "parent_id"
+  ],
+  "customRanking": [
+    "desc(updated_at)"
+  ],
+  "attributesToRetrieve": [
+    "objectID",
+    "userId",
+    "title",
+    "notes",
+    "status",
+    "priority",
+    "category_id",
+    "category_name",
+    "life_area_id",
+    "life_area_name",
+    "life_area_slug",
+    "parent_id",
+    "due_at",
+    "reminder_at",
+    "extra_reminders"
+  ],
+  "attributesToHighlight": [],
+  "attributesToSnippet": [],
+  "typoTolerance": true,
+  "removeStopWords": true,
+  "removeWordsIfNoResults": "allOptional"
+}

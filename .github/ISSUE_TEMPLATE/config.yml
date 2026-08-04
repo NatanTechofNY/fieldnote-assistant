@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💡 Feature idea
+    url: https://github.com/NatanTechofNY/fieldnote-assistant/discussions/new?category=ideas
+    about: Suggest an addition to Fieldnote.
+  - name: 💬 Ask a question
+    url: https://github.com/NatanTechofNY/fieldnote-assistant/discussions/new?category=q-a
+    about: Ask about setup, Algolia configuration, or Agent Studio.
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/NatanTechofNY/fieldnote-assistant/security/advisories/new
+    about: Report privately. Never open a public issue for a vulnerability.
+  - name: 📚 Algolia documentation
+    url: https://www.algolia.com/doc/
+    about: Questions about Algolia itself belong with Algolia, not this demo.

@@ -1,0 +1,24 @@
+node_modules
+dist
+coverage
+*.log
+.DS_Store
+
+# Throwaway user-data-dirs from headless Chrome runs against the deck
+.chrome-profile/
+
+# Internal-only: talk deck, findings, integration notes. Never published.
+internal/
+
+# Secrets: keep every dotenv variant local except the checked-in template
+.env
+.env.*
+!.env.example
+
+# Local databases; SQLite is never committed
+data/
+server/data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3

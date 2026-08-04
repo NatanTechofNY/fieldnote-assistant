@@ -1,0 +1,105 @@
+name: 🐛 Bug report
+description: Report something in Fieldnote that does not work as described
+title: "[bug]: "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a report.
+
+        > [!WARNING]
+        > Never paste real credentials, Twilio SIDs, phone numbers, or database contents into this form. Redact them first.
+
+        Found a security vulnerability? Do not file it here — follow [SECURITY.md](https://github.com/NatanTechofNY/fieldnote-assistant/blob/main/SECURITY.md).
+
+        Have a question or an idea rather than a bug? Please use [Discussions](https://github.com/NatanTechofNY/fieldnote-assistant/discussions).
+
+  - type: textarea
+    id: current
+    attributes:
+      label: 🐛 Current behavior
+      description: What happens today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 🔍 Steps to reproduce
+      placeholder: |
+        1. Run `npm run dev`
+        2. Open http://localhost:4173
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 💭 Expected behavior
+      description: What did you expect instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Web UI
+        - API / server
+        - SQLite and data model
+        - Algolia search or indexing
+        - Agent Studio / agent tools
+        - SMS, reminders, or Twilio
+        - Granola integration
+        - Deployment (Docker, Railway, Cloudflare Tunnel)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How are you running it?
+      options:
+        - Local (`npm run dev`)
+        - Local production build (`npm start`)
+        - Docker container
+        - Railway
+        - Other host
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "output of `node -v`"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15.3, Ubuntu 24.04, ..."
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Server output or browser console errors. These are automatically formatted as code.
+      render: shell
+
+  - type: checkboxes
+    id: coc
+    attributes:
+      label: Code of Conduct
+      description: By submitting this issue, you agree to follow this project's [Code of Conduct](https://github.com/NatanTechofNY/fieldnote-assistant/blob/main/CODE_OF_CONDUCT.md).
+      options:
+        - label: I agree to follow this project's Code of Conduct
+          required: true
+        - label: I have removed all credentials and personal data from this report
+          required: true

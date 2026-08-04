@@ -1,0 +1,1026 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "get_todo",
+      "description": "Gets one canonical todo by exact ID. Use after search and before ambiguous or destructive actions.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact todo ID"
+          }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_reflection_evidence",
+      "description": "Returns canonical memories and completed todos for a grounded personal reflection over a daily, weekly, monthly, or custom date range.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "preset": {
+            "type": "string",
+            "enum": ["today", "week", "month", "custom"]
+          },
+          "start_date": {
+            "type": ["string", "null"],
+            "description": "Inclusive YYYY-MM-DD start date for custom ranges, otherwise null"
+          },
+          "end_date": {
+            "type": ["string", "null"],
+            "description": "Inclusive YYYY-MM-DD end date for custom ranges, otherwise null"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "life_area_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Life areas to include; empty means all"
+          },
+          "category_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Categories to include; empty means all"
+          },
+          "sources": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["memories", "todos"] },
+            "minItems": 1
+          }
+        },
+        "required": ["preset", "start_date", "end_date", "timezone", "life_area_ids", "category_ids", "sources"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_conversation_context",
+      "description": "Reads canonical user and assistant messages surrounding a conversation search hit. Use the threadId and objectID returned by personal_data_search; tool traces and provider metadata are never returned.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "description": "Thread ID returned by a conversation search hit"
+          },
+          "message_id": {
+            "type": ["string", "null"],
+            "description": "Message objectID to center the context around, or null for the latest messages"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 40,
+            "description": "Maximum number of canonical messages to return"
+          }
+        },
+        "required": ["thread_id", "message_id", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_life_areas",
+      "description": "Lists the current user-defined life-area classifications and their IDs. Use this before assigning a non-default classification.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_todos",
+      "description": "Never the first tool in a turn. Search the todo index first, including for status questions and full listings, and use this only when that search already ran and left the answer incomplete.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": ["string", "null"],
+            "enum": ["pending", "in_progress", "blocked", "done", "cancelled", null],
+            "description": "Status filter or null"
+          },
+          "priority": {
+            "type": ["string", "null"],
+            "enum": ["low", "normal", "high", "urgent", null],
+            "description": "Priority filter or null"
+          },
+          "category_id": {
+            "type": ["string", "null"],
+            "description": "Category ID filter or null"
+          },
+          "life_area_id": {
+            "type": ["string", "null"],
+            "enum": ["area_work", "area_personal", "area_side_project", null],
+            "description": "Life area filter or null"
+          },
+          "parent_id": {
+            "type": ["string", "null"],
+            "description": "Parent todo ID for listing subtasks, or null"
+          },
+          "due_from": {
+            "type": ["string", "null"],
+            "description": "Inclusive RFC 3339 lower bound or null"
+          },
+          "due_to": {
+            "type": ["string", "null"],
+            "description": "Inclusive RFC 3339 upper bound or null"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Maximum records"
+          }
+        },
+        "required": ["status", "priority", "category_id", "life_area_id", "parent_id", "due_from", "due_to", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_todo",
+      "description": "Creates a todo and optional subtasks. Call only after an Algolia semantic duplicate check found no matching existing todo.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Short outcome-oriented title"
+          },
+          "notes": {
+            "type": ["string", "null"],
+            "maxLength": 5000,
+            "description": "Supporting notes or null"
+          },
+          "priority": {
+            "type": ["string", "null"],
+            "enum": ["low", "normal", "high", "urgent", null],
+            "description": "Priority or null"
+          },
+          "category_id": {
+            "type": ["string", "null"],
+            "description": "Category ID or null"
+          },
+          "life_area_id": {
+            "type": ["string", "null"],
+            "enum": ["area_work", "area_personal", "area_side_project", null],
+            "description": "Work, Personal, Side Project, or null only when genuinely ambiguous"
+          },
+          "parent_id": {
+            "type": ["string", "null"],
+            "description": "Parent todo ID when directly creating a subtask, otherwise null"
+          },
+          "due_at": {
+            "type": ["string", "null"],
+            "description": "RFC 3339 due date-time or null"
+          },
+          "reminder_at": {
+            "type": ["string", "null"],
+            "description": "Primary RFC 3339 reminder time or null"
+          },
+          "extra_reminders": {
+            "type": ["array", "null"],
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional RFC 3339 reminder times or null"
+          },
+          "subtasks": {
+            "type": ["array", "null"],
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "description": "Specific executable step"
+                },
+                "notes": {
+                  "type": ["string", "null"],
+                  "maxLength": 5000,
+                  "description": "Subtask notes or null"
+                },
+                "priority": {
+                  "type": ["string", "null"],
+                  "enum": ["low", "normal", "high", "urgent", null],
+                  "description": "Subtask priority or null"
+                },
+                "due_at": {
+                  "type": ["string", "null"],
+                  "description": "Subtask RFC 3339 due time or null"
+                }
+              },
+              "required": ["title", "notes", "priority", "due_at"],
+              "additionalProperties": false
+            },
+            "description": "Executable child todos or null"
+          }
+        },
+        "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "subtasks"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_todo",
+      "description": "Updates one unambiguous todo using an ID and patch. Read current state first when the ID came from search. Null patch values mean unchanged; clear_fields explicitly clears nullable fields.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact todo ID"
+          },
+          "patch": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": ["string", "null"],
+                "maxLength": 200,
+                "description": "New title or null for unchanged"
+              },
+              "notes": {
+                "type": ["string", "null"],
+                "maxLength": 5000,
+                "description": "New notes or null for unchanged"
+              },
+              "priority": {
+                "type": ["string", "null"],
+                "enum": ["low", "normal", "high", "urgent", null],
+                "description": "New priority or null for unchanged"
+              },
+              "category_id": {
+                "type": ["string", "null"],
+                "description": "New category ID or null for unchanged"
+              },
+              "life_area_id": {
+                "type": ["string", "null"],
+                "enum": ["area_work", "area_personal", "area_side_project", null],
+                "description": "New life area ID or null for unchanged"
+              },
+              "parent_id": {
+                "type": ["string", "null"],
+                "description": "New parent ID or null for unchanged"
+              },
+              "due_at": {
+                "type": ["string", "null"],
+                "description": "New RFC 3339 due time or null for unchanged"
+              },
+              "reminder_at": {
+                "type": ["string", "null"],
+                "description": "New RFC 3339 primary reminder or null for unchanged"
+              },
+              "extra_reminders": {
+                "type": ["array", "null"],
+                "maxItems": 20,
+                "items": {
+                  "type": "string"
+                },
+                "description": "Full replacement additional reminders or null for unchanged"
+              },
+              "clear_fields": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": ["notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders"]
+                },
+                "description": "Nullable fields to set to null; empty when none"
+              }
+            },
+            "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "clear_fields"],
+            "additionalProperties": false
+          },
+          "override_user_classification": {
+            "type": "boolean",
+            "description": "True only when the user explicitly asked to replace a user-selected life area"
+          }
+        },
+        "required": ["id", "patch", "override_user_classification"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "set_todo_status",
+      "description": "Sets only a todo's canonical status.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact todo ID"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "in_progress", "blocked", "done", "cancelled"],
+            "description": "New canonical status"
+          }
+        },
+        "required": ["id", "status"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "delete_todo",
+      "description": "Deletes one exact todo. Call only after resolving ambiguity and receiving explicit user confirmation.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact todo ID"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "True only after explicit confirmation"
+          }
+        },
+        "required": ["id", "confirmed"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_memory",
+      "description": "Gets one canonical memory by exact ID. Use after retrieval and before update or delete.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact memory ID"
+          }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_memory",
+      "description": "Creates one non-sensitive fact, note, or journal memory. Call only after an Algolia semantic duplicate check found no matching memory.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["fact", "note", "journal"],
+            "description": "Canonical memory kind"
+          },
+          "title": {
+            "type": ["string", "null"],
+            "maxLength": 200,
+            "description": "Memory title or null"
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10000,
+            "description": "Memory content"
+          },
+          "mood_label": {
+            "type": ["string", "null"],
+            "maxLength": 100,
+            "description": "Mood label or null"
+          },
+          "mood_score": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 5,
+            "description": "Mood score from 1 to 5 or null"
+          },
+          "category_id": {
+            "type": ["string", "null"],
+            "description": "Category ID or null"
+          },
+          "life_area_id": {
+            "type": ["string", "null"],
+            "enum": ["area_work", "area_personal", "area_side_project", null],
+            "description": "Work, Personal, Side Project, or null only when genuinely ambiguous"
+          },
+          "occurred_at": {
+            "type": ["string", "null"],
+            "description": "When the remembered event happened as RFC 3339, or null"
+          },
+          "review_worthy": {
+            "type": "boolean",
+            "description": "Whether this Work memory should be evidence for a performance review"
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 50
+            },
+            "description": "Memory tags; empty when none"
+          }
+        },
+        "required": ["kind", "title", "content", "mood_label", "mood_score", "category_id", "life_area_id", "occurred_at", "review_worthy", "tags"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_memory",
+      "description": "Updates one unambiguous memory using an ID and patch. Null patch values mean unchanged; clear_fields explicitly clears nullable fields.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact memory ID"
+          },
+          "patch": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": ["string", "null"],
+                "enum": ["fact", "note", "journal", null],
+                "description": "New kind or null for unchanged"
+              },
+              "title": {
+                "type": ["string", "null"],
+                "maxLength": 200,
+                "description": "New title or null for unchanged"
+              },
+              "content": {
+                "type": ["string", "null"],
+                "maxLength": 10000,
+                "description": "New content or null for unchanged"
+              },
+              "mood_label": {
+                "type": ["string", "null"],
+                "maxLength": 100,
+                "description": "New mood label or null for unchanged"
+              },
+              "mood_score": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "maximum": 5,
+                "description": "New mood score or null for unchanged"
+              },
+              "category_id": {
+                "type": ["string", "null"],
+                "description": "New category ID or null for unchanged"
+              },
+              "life_area_id": {
+                "type": ["string", "null"],
+                "enum": ["area_work", "area_personal", "area_side_project", null],
+                "description": "New life area ID or null for unchanged"
+              },
+              "occurred_at": {
+                "type": ["string", "null"],
+                "description": "New RFC 3339 occurrence time or null for unchanged"
+              },
+              "review_worthy": {
+                "type": ["boolean", "null"],
+                "description": "Whether this is review evidence, or null for unchanged"
+              },
+              "tags": {
+                "type": ["array", "null"],
+                "maxItems": 20,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 50
+                },
+                "description": "Full replacement tags or null for unchanged"
+              },
+              "clear_fields": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": ["title", "mood_label", "mood_score", "category_id", "life_area_id", "occurred_at", "tags"]
+                },
+                "description": "Nullable fields to clear; empty when none"
+              }
+            },
+            "required": ["kind", "title", "content", "mood_label", "mood_score", "category_id", "life_area_id", "occurred_at", "review_worthy", "tags", "clear_fields"],
+            "additionalProperties": false
+          },
+          "override_user_classification": {
+            "type": "boolean",
+            "description": "True only when the user explicitly asked to replace a user-selected life area"
+          }
+        },
+        "required": ["id", "patch", "override_user_classification"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "delete_memory",
+      "description": "Deletes one exact memory. Call only after resolving ambiguity and receiving explicit user confirmation.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact memory ID"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "True only after explicit confirmation"
+          }
+        },
+        "required": ["id", "confirmed"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_review_evidence",
+      "description": "Returns all Work memories/notes and completed Work todos for one Algolia-style fiscal quarter, plus candidates that can be included. Q1 begins February 1.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "year": {
+            "type": "integer",
+            "minimum": 2000,
+            "maximum": 2100,
+            "description": "Calendar year in which the fiscal quarter starts"
+          },
+          "quarter": {
+            "type": "integer",
+            "enum": [1, 2, 3, 4],
+            "description": "Algolia fiscal quarter"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "description": "IANA timezone for quarter boundaries"
+          }
+        },
+        "required": ["year", "quarter", "timezone"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_agenda",
+      "description": "Gets todos and reminders for an inclusive local date range.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "start_date": {
+            "type": "string",
+            "description": "Inclusive YYYY-MM-DD local date"
+          },
+          "end_date": {
+            "type": "string",
+            "description": "Inclusive YYYY-MM-DD local date"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "description": "IANA timezone"
+          }
+        },
+        "required": ["start_date", "end_date", "timezone"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_reminder",
+      "description": "Creates a primary or additional reminder for an exact todo. Resolve the date-time before calling.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "todo_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact todo ID"
+          },
+          "reminder_at": {
+            "type": "string",
+            "description": "RFC 3339 reminder time with explicit offset"
+          },
+          "slot": {
+            "type": "string",
+            "enum": ["primary", "extra"],
+            "description": "Whether to use reminder_at or append to extra_reminders"
+          }
+        },
+        "required": ["todo_id", "reminder_at", "slot"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_reminders",
+      "description": "Lists todo reminders in an inclusive RFC 3339 interval.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "Inclusive RFC 3339 lower bound"
+          },
+          "to": {
+            "type": "string",
+            "description": "Inclusive RFC 3339 upper bound"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Maximum records"
+          }
+        },
+        "required": ["from", "to", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_reminder",
+      "description": "Moves one exact reminder to a new time after resolving which reminder the user means.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Reminder ID returned by list_reminders"
+          },
+          "reminder_at": {
+            "type": "string",
+            "description": "New RFC 3339 reminder time with explicit offset"
+          }
+        },
+        "required": ["id", "reminder_at"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "delete_reminder",
+      "description": "Deletes one exact reminder after explicit user confirmation.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Reminder ID returned by list_reminders"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "True only after explicit confirmation"
+          }
+        },
+        "required": ["id", "confirmed"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_jira_boards",
+      "description": "Lists Jira boards on the connected site. Read-only. Set include_columns to also get each board's real column names and the status IDs behind them, so a phrase like \"in review\" becomes a filter.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name_filter": {
+            "type": ["string", "null"],
+            "maxLength": 200,
+            "description": "Partial board name to match, or null for all boards"
+          },
+          "project_key": {
+            "type": ["string", "null"],
+            "description": "Restrict to boards of one Jira project key, or null"
+          },
+          "include_columns": {
+            "type": "boolean",
+            "description": "True to resolve each board's columns and the status IDs in them; costs one extra request per board"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Maximum boards"
+          }
+        },
+        "required": ["name_filter", "project_key", "include_columns", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_jira_issues",
+      "description": "Lists Jira issues matching exact filters. Read-only. Pass board_id from list_jira_boards, status_ids from that board's columns, and \"me\" or an accountId for assignee. Jira issues are not local todos.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "board_id": {
+            "type": ["integer", "null"],
+            "description": "Board ID from list_jira_boards, or null to search the whole site"
+          },
+          "assignee": {
+            "type": ["string", "null"],
+            "description": "\"me\" for the connected account, otherwise an accountId from list_jira_users. Usernames and email addresses are rejected by Jira"
+          },
+          "project_key": {
+            "type": ["string", "null"],
+            "description": "Jira project key such as PLATFORM, or null"
+          },
+          "status_ids": {
+            "type": ["array", "null"],
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            },
+            "description": "Numeric status IDs from a board's columns, or null. Status names are not unique across workflows, so always filter by ID"
+          },
+          "text": {
+            "type": ["string", "null"],
+            "maxLength": 300,
+            "description": "Free text to match in summary, description, and comments, or null"
+          },
+          "updated_within_days": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 365,
+            "description": "Only issues updated within this many days, or null"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Maximum issues"
+          }
+        },
+        "required": ["board_id", "assignee", "project_key", "status_ids", "text", "updated_within_days", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_jira_issue",
+      "description": "Gets one Jira issue by its key, such as ABC-123, including its description as plain text. Read-only. Set include_recent_changes when the question is what moved rather than what is open.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 3,
+            "description": "Jira issue key such as ABC-123"
+          },
+          "include_recent_changes": {
+            "type": "boolean",
+            "description": "True to include recent status, assignee, priority, and resolution transitions"
+          }
+        },
+        "required": ["key", "include_recent_changes"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_jira_users",
+      "description": "Resolves a name or email to a Jira accountId, the only form Jira accepts. Read-only. An empty result means the lookup could not be confirmed, not that the person does not exist.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 150,
+            "description": "Display name or email address to match"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Maximum people"
+          }
+        },
+        "required": ["query", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_confluence_spaces",
+      "description": "Lists Confluence spaces with their keys. Read-only. Call this before filtering pages or comments by space, rather than guessing a space key from its display name.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": ["array", "null"],
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            },
+            "description": "Specific space keys to fetch, or null for all spaces"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Maximum spaces"
+          }
+        },
+        "required": ["keys", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_confluence_pages",
+      "description": "Searches Confluence pages by space, text, and recency. Read-only. Returns titles, authors, excerpts, and links, not bodies; follow up with get_confluence_page. Set mine_only for the user's own pages.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "space_keys": {
+            "type": ["array", "null"],
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            },
+            "description": "Space keys from list_confluence_spaces, or null for all spaces"
+          },
+          "text": {
+            "type": ["string", "null"],
+            "maxLength": 300,
+            "description": "Free text to match in title and body, or null"
+          },
+          "modified_within_days": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 365,
+            "description": "Only pages modified within this many days, or null"
+          },
+          "mine_only": {
+            "type": "boolean",
+            "description": "True to keep only pages the connected account created or owns"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Maximum pages"
+          }
+        },
+        "required": ["space_keys", "text", "modified_within_days", "mine_only", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_confluence_page",
+      "description": "Reads one Confluence page's body as plain text. Read-only. Use the numeric page ID returned by list_confluence_pages or list_confluence_comments; long pages are truncated.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Numeric Confluence page ID"
+          }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_confluence_comments",
+      "description": "Lists recent Confluence comments with author, timestamp, excerpt, and a link that opens the comment in place. Read-only. Set only_my_pages for \"comments on my docs\": pages the user wrote or owns.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "space_keys": {
+            "type": ["array", "null"],
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            },
+            "description": "Space keys from list_confluence_spaces, or null for all spaces"
+          },
+          "within_days": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 30,
+            "description": "How many days back to look, or null for the last day"
+          },
+          "only_my_pages": {
+            "type": "boolean",
+            "description": "True to keep only comments on pages the connected account created or owns"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Maximum comments"
+          }
+        },
+        "required": ["space_keys", "within_days", "only_my_pages", "limit"],
+        "additionalProperties": false
+      }
+    }
+  }
+]

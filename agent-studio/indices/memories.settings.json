@@ -1,0 +1,42 @@
+{
+  "searchableAttributes": [
+    "unordered(title)",
+    "unordered(content)",
+    "unordered(mood_label)",
+    "unordered(tags)"
+  ],
+  "attributesForFaceting": [
+    "filterOnly(userId)",
+    "kind",
+    "mood_label",
+    "category_id",
+    "life_area_id",
+    "review_worthy",
+    "searchable(tags)"
+  ],
+  "customRanking": [
+    "desc(updated_at)"
+  ],
+  "attributesToRetrieve": [
+    "objectID",
+    "userId",
+    "kind",
+    "title",
+    "content",
+    "mood_label",
+    "mood_score",
+    "category_id",
+    "category_name",
+    "life_area_id",
+    "life_area_name",
+    "life_area_slug",
+    "occurred_at",
+    "review_worthy",
+    "tags"
+  ],
+  "attributesToHighlight": [],
+  "attributesToSnippet": [],
+  "typoTolerance": true,
+  "removeStopWords": true,
+  "removeWordsIfNoResults": "allOptional"
+}

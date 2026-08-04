@@ -1,0 +1,28 @@
+{
+  "searchableAttributes": [
+    "unordered(content)"
+  ],
+  "attributesForFaceting": [
+    "filterOnly(userId)",
+    "channel",
+    "role",
+    "filterOnly(threadId)"
+  ],
+  "customRanking": [
+    "desc(created_at)"
+  ],
+  "attributesToRetrieve": [
+    "objectID",
+    "userId",
+    "threadId",
+    "channel",
+    "role",
+    "content",
+    "created_at"
+  ],
+  "attributesToHighlight": [],
+  "attributesToSnippet": [],
+  "typoTolerance": true,
+  "removeStopWords": true,
+  "removeWordsIfNoResults": "allOptional"
+}
