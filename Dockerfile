@@ -57,4 +57,8 @@ EXPOSE 4174
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4174)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["npm", "start"]
+# Invoked directly rather than through `npm start`, which nested the server four
+# processes deep behind npm and sh. SIGTERM never reached the shutdown handler
+# there, so the container exited 1 and closed SQLite by dying rather than by
+# draining requests and checkpointing the WAL. NODE_ENV is already set above.
+CMD ["node", "--import", "tsx", "server/index.ts"]

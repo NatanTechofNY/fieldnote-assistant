@@ -13,7 +13,7 @@ There is no separate frontend host, database service, or cron service to deploy.
 
 Schema migrations are not a deploy step. `openDatabase()` applies the canonical schema and every incremental migration each time the database is opened, which includes every server start and every CLI command.
 
-The `Dockerfile` is multi-stage on `node:22-bookworm-slim`: the build stage installs `python3`, `make`, and `g++` to compile `better-sqlite3`, runs `npm ci` and `npm run build`, then prunes dev dependencies; the runtime stage copies `dist/`, `server/`, `agent-studio/`, and the tsconfigs, exposes `4174`, declares `VOLUME ["/data"]`, and runs `npm start`.
+The `Dockerfile` is multi-stage on `node:22-bookworm-slim`: the build stage installs `python3`, `make`, and `g++` to compile `better-sqlite3`, runs `npm ci` and `npm run build`, then prunes dev dependencies; the runtime stage copies `dist/`, `server/`, `agent-studio/`, and the tsconfigs, exposes `4174`, declares `VOLUME ["/data"]`, and starts the server with `node --import tsx server/index.ts`. That is the same process `npm start` runs, invoked directly so that the platform's `SIGTERM` reaches the shutdown handler instead of being absorbed by npm.
 
 External dependencies are all outbound HTTPS, so nothing else needs to be deployed or exposed. The container calls Algolia, whichever message provider is selected (Twilio or Sendblue), Granola, and — once Atlassian is connected — your Atlassian site. A host that restricts egress needs `*.atlassian.net` allowed alongside the Algolia and message provider endpoints; digest briefs make those calls from the worker, so a blocked egress rule surfaces as a failed brief rather than a failed request.
 
