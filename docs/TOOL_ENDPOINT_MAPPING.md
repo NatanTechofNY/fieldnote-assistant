@@ -72,6 +72,8 @@ Two limits differ between the tool schema and the server, and the tighter one wi
 
 `kind` is exactly `fact`, `note`, or `journal`. `mood_score` is null or an integer 1–5.
 
+`create_memory.title` is a required non-empty string in the tool schema, even though the column, the Zod schema, and `POST /api/memories` all accept null. The narrower tool contract is deliberate: the agent writes a title from the content instead of leaving one out, and the UI keeps the freedom to save an untitled memory.
+
 ## Life areas and reflections
 
 - `life_area_id` is shared by todos and memories. The seeded IDs are `area_work`, `area_personal`, `area_side_project`, and **only those three are in the tool schema's enum** — the agent cannot assign a custom life area, though the UI can create them.

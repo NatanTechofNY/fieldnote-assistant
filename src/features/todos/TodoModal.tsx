@@ -12,12 +12,14 @@ import { invalidateContent } from "../../lib/invalidate";
 import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck } from "./SubtaskCheck";
 
-export function TodoModal({ todo, subtasks, allTodos, lifeAreas, onClose }: { todo?: Todo; subtasks: Todo[]; allTodos: Todo[]; lifeAreas: LifeArea[]; onClose: () => void }) {
+export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, onClose }: { todo?: Todo; defaultDueAt?: string; subtasks: Todo[]; allTodos: Todo[]; lifeAreas: LifeArea[]; onClose: () => void }) {
   const timezone = useTimezone();
   const queryClient = useQueryClient();
   const [title, setTitle] = useState(todo?.title || "");
   const [notes, setNotes] = useState(todo?.notes || "");
-  const [dueAt, setDueAt] = useState(toZonedDateTimeLocal(todo?.due_at, timezone));
+  // A task captured from an empty calendar slot opens on the time that was
+  // clicked, already in the wall-clock spelling the input holds.
+  const [dueAt, setDueAt] = useState(todo ? toZonedDateTimeLocal(todo.due_at, timezone) : defaultDueAt || "");
   const [reminderAt, setReminderAt] = useState(toZonedDateTimeLocal(todo?.reminder_at, timezone));
   const [extraReminders, setExtraReminders] = useState(
     () => (todo?.extra_reminders || []).map(value => toZonedDateTimeLocal(value, timezone)),

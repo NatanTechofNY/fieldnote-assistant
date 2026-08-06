@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type DragEndEvent, DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
-import { Archive, BellRing, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus } from "lucide-react";
+import { Archive, BellRing, CalendarDays, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus } from "lucide-react";
 import { api } from "../../api";
 import type {
   Todo, TodoStatus,
@@ -13,19 +13,27 @@ import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck } from "./SubtaskCheck";
 import { TodoModal } from "./TodoModal";
+import { CalendarView } from "./calendar/CalendarView";
 import { friendlyDate, friendlyDueDate, useTimezone } from "../../lib/timezone";
 import { boardStatuses, statusMeta } from "../../lib/todo-meta";
 import { todoAttachment } from "../../lib/agent-attachments";
 import { useDeepLinkTarget } from "../../lib/use-deep-link-target";
+import { BOOLEAN, usePreference } from "../../lib/preference";
 
-type TodoView = "table" | "board";
+type TodoView = "table" | "board" | "calendar";
+
+const TODO_VIEWS: readonly TodoView[] = ["table", "board", "calendar"];
 
 export function TodosPage() {
   const queryClient = useQueryClient();
-  const [showDone, setShowDone] = useState(true);
-  const [view, setView] = useState<TodoView>("table");
+  // How you like to look at the board is a habit rather than a choice you want
+  // to make again every morning.
+  const [showDone, setShowDone] = usePreference("todos:show-done", true, BOOLEAN);
+  const [view, setView] = usePreference<TodoView>("todos:view", "table", TODO_VIEWS);
   const [lifeAreaId, setLifeAreaId] = useState("");
   const [editor, setEditor] = useState<Todo | "new" | null>(null);
+  // A task captured from the calendar opens on the slot that was clicked.
+  const [capturedAt, setCapturedAt] = useState("");
   const { data: lifeAreas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
   const { data: todos = [], isLoading, error } = useQuery({
     queryKey: ["todos", showDone, lifeAreaId],
@@ -35,7 +43,7 @@ export function TodosPage() {
   // from the URL keeps the deep link working on a refresh.
   const deepLink = useDeepLinkTarget(todos);
   const editing = editor ?? deepLink.target ?? null;
-  const closeEditor = () => { setEditor(null); deepLink.clear(); };
+  const closeEditor = () => { setEditor(null); setCapturedAt(""); deepLink.clear(); };
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["todos"] });
     void queryClient.invalidateQueries({ queryKey: ["overview"] });
@@ -84,20 +92,29 @@ export function TodosPage() {
         <div className="view-toggle" role="group" aria-label="Task view">
           <button type="button" className={view === "table" ? "active" : ""} aria-pressed={view === "table"} onClick={() => setView("table")}><List size={13}/>List</button>
           <button type="button" className={view === "board" ? "active" : ""} aria-pressed={view === "board"} onClick={() => setView("board")}><Columns3 size={13}/>Board</button>
+          <button type="button" className={view === "calendar" ? "active" : ""} aria-pressed={view === "calendar"} onClick={() => setView("calendar")}><CalendarDays size={13}/>Calendar</button>
         </div>
-        <button className="button ghost" onClick={() => setShowDone(v => !v)}><Archive size={15}/>{showDone ? "Hide done" : "Show done"}</button>
+        <button className="button ghost" onClick={() => setShowDone(!showDone)}><Archive size={15}/>{showDone ? "Hide done" : "Show done"}</button>
         <button className="button primary" onClick={() => setEditor("new")}><Plus size={15}/>New task</button>
       </div>
     </div>
-    {view === "table"
-      ? <TodoTable todos={top} children={children} onOpen={setEditor} onStatus={setStatus}/>
-      : <DndContext sensors={sensors} onDragEnd={onDragEnd}>
-        <div className="board">
-          {boardStatuses.filter(s => showDone || s !== "done").map(status => <TodoColumn key={status} status={status} todos={top.filter(t => t.status === status)} children={children} onOpen={setEditor} onStatus={setStatus} />)}
-        </div>
-      </DndContext>}
+    {view === "table" && <TodoTable todos={top} children={children} onOpen={setEditor} onStatus={setStatus}/>}
+    {view === "board" && <DndContext sensors={sensors} onDragEnd={onDragEnd}>
+      <div className="board">
+        {boardStatuses.filter(s => showDone || s !== "done").map(status => <TodoColumn key={status} status={status} todos={top.filter(t => t.status === status)} children={children} onOpen={setEditor} onStatus={setStatus} />)}
+      </div>
+    </DndContext>}
+    {/* The calendar is given every task rather than only the top-level ones:
+        a step with a date of its own is a real thing on a real day. */}
+    {view === "calendar" && <CalendarView
+      todos={todos}
+      lifeAreas={lifeAreas}
+      onOpen={setEditor}
+      onCreate={local => { setCapturedAt(local); setEditor("new"); }}
+    />}
     {editing && <TodoModal
       todo={editing === "new" ? undefined : editing}
+      defaultDueAt={editing === "new" ? capturedAt : undefined}
       subtasks={editing === "new" ? [] : children.get(editing.id) || []}
       allTodos={top}
       lifeAreas={lifeAreas}

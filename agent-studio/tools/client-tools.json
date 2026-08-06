@@ -418,9 +418,10 @@
             "description": "Canonical memory kind"
           },
           "title": {
-            "type": ["string", "null"],
+            "type": "string",
+            "minLength": 1,
             "maxLength": 200,
-            "description": "Memory title or null"
+            "description": "Short title naming the subject, written from the content and never empty"
           },
           "content": {
             "type": "string",
@@ -431,13 +432,13 @@
           "mood_label": {
             "type": ["string", "null"],
             "maxLength": 100,
-            "description": "Mood label or null"
+            "description": "Mood in the user's own words, or null when they were asked and gave none"
           },
           "mood_score": {
             "type": ["integer", "null"],
             "minimum": 1,
             "maximum": 5,
-            "description": "Mood score from 1 to 5 or null"
+            "description": "Mood score from 1 to 5, or null when the user was asked and gave none"
           },
           "category_id": {
             "type": ["string", "null"],

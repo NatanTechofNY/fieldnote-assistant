@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, vi } from "vitest";
@@ -22,6 +22,9 @@ beforeEach(() => {
   // The chat widget parks a finished conversation in sessionStorage and restores
   // it on the next mount, which would carry one test's messages into the next.
   window.sessionStorage.clear();
+  // Views and filters are remembered between visits, which would otherwise make
+  // each test open in whatever state the one before it left behind.
+  window.localStorage.clear();
 });
 
 const health = {
@@ -1776,6 +1779,202 @@ it("filters the board by life area and opens the task editor", async () => {
 
   await userEvent.click(screen.getByRole("button", { name: /New task/ }));
   expect(await screen.findByRole("dialog")).toBeInTheDocument();
+});
+
+/** Writes only: a reschedule is followed by the refetch it invalidated. */
+const todoWriteUrls = () => requestedUrls.filter(url => /^\/api\/todos\/[^/?]+$/.test(url));
+
+/** Opens the third view and hands back the chip named by its accessible label. */
+async function openCalendar() {
+  renderAt("/todos");
+  expect(await screen.findByText("The board.")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+  return await screen.findByRole("heading", { name: "July 2026" });
+}
+
+/**
+ * Moving a chip is a pointer gesture the layout drives, and jsdom lays nothing
+ * out. The keyboard path reaches the same code by date arithmetic instead, so
+ * it is what the reschedules are asserted through.
+ */
+async function moveChip(name: string, keys: string) {
+  const chip = screen.getByRole("button", { name });
+  chip.focus();
+  await userEvent.keyboard("m");
+  await userEvent.keyboard(keys);
+}
+
+it("places every due date and reminder on the month grid", async () => {
+  await openCalendar();
+
+  // A due date sitting on midnight is the all-day convention the list view
+  // prints as a bare day, and its two reminders are cards of their own.
+  const wednesday = screen.getByLabelText("Wednesday, July 29");
+  await userEvent.click(within(wednesday).getByRole("button", { name: /^\+\d+ more$/ }));
+  expect(within(wednesday).getByRole("button", { name: "Due · Review RFC for Alex · Jul 29" })).toBeInTheDocument();
+  expect(within(wednesday).getByRole("button", { name: "Reminder · Review RFC for Alex · Jul 29 · 9:00 AM" })).toBeInTheDocument();
+  expect(within(wednesday).getByRole("button", { name: "Extra reminder · Review RFC for Alex · Jul 29 · 2:00 PM" })).toBeInTheDocument();
+
+  // A step keeps its own date and says whose step it is, which is the same
+  // relationship the connector lines draw.
+  const august = screen.getByLabelText("Saturday, August 1");
+  await userEvent.click(within(august).getByRole("button", { name: /^\+\d+ more$/ }));
+  expect(within(august).getByRole("button", {
+    name: "Due · Write the outline, step of Prepare the DevCon demo · Aug 1 · 12:00 PM",
+  })).toBeInTheDocument();
+  expect(screen.getByText("Part of Prepare the DevCon demo, which has 1 step.")).toBeInTheDocument();
+
+  // Anything with no deadline waits beside the grid instead of going missing,
+  // with the steps filed under the task they belong to.
+  const rail = screen.getByLabelText("Unscheduled tasks");
+  const parent = within(rail).getByRole("button", { name: "Due · Wrap the sprint · no date yet" });
+  expect(within(rail).getByRole("button", {
+    name: "Due · Send the recap, step of Wrap the sprint · no date yet",
+  })).toBeInTheDocument();
+  expect(within(rail).getByText("Steps of Wrap the sprint")).toBeInTheDocument();
+  // The count is what says a chain is there before anything has been hovered.
+  expect(within(parent).getByText("1")).toBeInTheDocument();
+  // Which date is missing is said on the card, not left to the column heading.
+  expect(within(parent).getByText("No due date")).toBeInTheDocument();
+});
+
+it("reschedules a due date by moving its chip to another day", async () => {
+  await openCalendar();
+  const writes = todoWrites.length;
+
+  await moveChip("Due · Review RFC for Alex · Jul 29", "{ArrowRight}{Enter}");
+
+  await waitFor(() => expect(todoWrites.length).toBe(writes + 1));
+  // The day changes and the time of day does not, so an all-day task stays one.
+  expect(todoWrites.at(-1)).toMatchObject({ method: "PATCH", body: { due_at: "2026-07-30T04:00:00.000Z" } });
+  expect(todoWriteUrls().at(-1)).toBe("/api/todos/todo_reminder");
+});
+
+/** The API refuses a reminder in the past, so the drop is refused before it. */
+it("refuses to move a reminder into the past", async () => {
+  await openCalendar();
+  const writes = todoWrites.length;
+
+  await moveChip("Reminder · Review RFC for Alex · Jul 29 · 9:00 AM", "{ArrowLeft>6/}{Enter}");
+
+  expect(await screen.findByText("A reminder has to be in the future.")).toBeInTheDocument();
+  expect(todoWrites.length).toBe(writes);
+});
+
+it("moves a step on its own, and with its task when Shift is held", async () => {
+  await openCalendar();
+  const august = screen.getByLabelText("Saturday, August 1");
+  await userEvent.click(within(august).getByRole("button", { name: /^\+\d+ more$/ }));
+
+  const alone = todoWrites.length;
+  await moveChip("Due · Write the outline, step of Prepare the DevCon demo · Aug 1 · 12:00 PM", "{ArrowRight}{Enter}");
+  await waitFor(() => expect(todoWrites.length).toBe(alone + 1));
+  expect(todoWriteUrls().at(-1)).toBe("/api/todos/todo_sub");
+
+  // The parent moving with Shift down carries every dated step by the same
+  // offset, so a project that slips a day does not leave its work behind.
+  const chain = todoWrites.length;
+  await moveChip("Due · Prepare the DevCon demo · Aug 1 · 12:00 PM", "{ArrowRight}{Shift>}{Enter}{/Shift}");
+  await waitFor(() => expect(todoWrites.length).toBe(chain + 2));
+  expect(todoWrites.slice(chain)).toEqual([
+    { method: "PATCH", body: { due_at: "2026-08-02T16:00:00.000Z" } },
+    { method: "PATCH", body: { due_at: "2026-08-02T16:00:00.000Z" } },
+  ]);
+  expect(todoWriteUrls().slice(-2)).toEqual(["/api/todos/todo_1", "/api/todos/todo_sub"]);
+});
+
+it("switches to a week of half-hour slots and captures a task from an empty one", async () => {
+  await openCalendar();
+  await userEvent.click(screen.getByRole("button", { name: "Week" }));
+  await userEvent.click(screen.getByRole("button", { name: "Next week" }));
+  expect(screen.getByRole("heading", { name: "Jul 26 – Aug 1, 2026" })).toBeInTheDocument();
+
+  // A due date with no hour on it sits above the timed grid; a reminder lands
+  // in the slot that holds its time.
+  await userEvent.click(screen.getByRole("button", { name: "Expand tasks due at any time" }));
+  const anyTime = screen.getByLabelText("Any time, Wednesday, July 29");
+  const due = within(anyTime).getByRole("button", { name: "Due · Review RFC for Alex · Jul 29" });
+  const reminder = screen.getByRole("button", { name: "Reminder · Review RFC for Alex · Jul 29 · 9:00 AM" });
+  expect(reminder.closest("[data-time]")).toHaveAttribute("data-time", "09:00");
+  // The two dates one task holds are told apart on the cards themselves, not
+  // just by where they landed.
+  expect(within(due).getByText("Due · any time")).toBeInTheDocument();
+  expect(within(reminder).getByText("Reminder · 9:00 AM")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Add a task on Friday, July 31" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByLabelText(/^Due/)).toHaveValue("2026-07-31T09:00");
+});
+
+it("comes back to the view and filters the last visit left set", async () => {
+  const first = await openCalendar();
+  expect(first).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Week" }));
+  await userEvent.click(screen.getByRole("button", { name: /Hide done/ }));
+  cleanup();
+
+  // A second visit opens where the first one stopped rather than back on the
+  // list, and still has the finished work put away.
+  renderAt("/todos");
+  expect(await screen.findByRole("heading", { name: "Jul 19 – 25, 2026" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Show done/ })).toBeInTheDocument();
+});
+
+it("folds the any-time row down to one line a task until it is opened", async () => {
+  await openCalendar();
+  await userEvent.click(screen.getByRole("button", { name: "Week" }));
+  await userEvent.click(screen.getByRole("button", { name: "Next week" }));
+
+  // Folded, a card is a title and nothing else, so a row of undated work does
+  // not push the hours off the screen.
+  const anyTime = screen.getByLabelText("Any time, Wednesday, July 29");
+  const due = within(anyTime).getByRole("button", { name: "Due · Review RFC for Alex · Jul 29" });
+  expect(due).toHaveClass("dense");
+  expect(within(due).queryByText("Due · any time")).not.toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Expand tasks due at any time" }));
+  expect(within(anyTime).getByRole("button", { name: "Due · Review RFC for Alex · Jul 29" }))
+    .not.toHaveClass("dense");
+  expect(within(anyTime).getByText("Due · any time")).toBeInTheDocument();
+});
+
+it("puts the undated rail and its steps away on request", async () => {
+  await openCalendar();
+  const rail = screen.getByLabelText("Unscheduled tasks");
+  expect(within(rail).getByRole("button", {
+    name: "Due · Send the recap, step of Wrap the sprint · no date yet",
+  })).toBeInTheDocument();
+
+  // Steps are undated on purpose, being the checklist under something already
+  // scheduled, so the rail can list only work that has no home at all.
+  await userEvent.click(within(rail).getByRole("button", { name: /Hide 1 undated step/ }));
+  expect(within(rail).queryByText("Steps of Wrap the sprint")).not.toBeInTheDocument();
+  expect(within(rail).getByRole("button", { name: "Due · Wrap the sprint · no date yet" })).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "No due date" }));
+  expect(screen.queryByLabelText("Unscheduled tasks")).not.toBeInTheDocument();
+});
+
+it("says how many links it has to draw and goes quiet when it has none", async () => {
+  await openCalendar();
+  // One dated task on this month has a step with a date of its own.
+  expect(screen.getByRole("button", { name: "Links (1)" })).toBeEnabled();
+
+  await userEvent.click(screen.getByRole("button", { name: "Week" }));
+  const idle = screen.getByRole("button", { name: "Links" });
+  expect(idle).toBeDisabled();
+  expect(idle).toHaveAttribute("title", "No task on this range has a step with a date of its own");
+});
+
+it("keeps the hidden-done filter when the calendar takes over the page", async () => {
+  renderAt("/todos");
+  expect(await screen.findByText("The board.")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: /Hide done/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+
+  expect(await screen.findByRole("heading", { name: "July 2026" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Due · Prepare the DevCon demo · Aug 1 · 12:00 PM" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Book the flight/ })).not.toBeInTheDocument();
 });
 
 it("edits the reminder and its extras from the task editor", async () => {
