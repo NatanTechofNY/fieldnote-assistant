@@ -8,18 +8,20 @@ Do not work around a missing entitlement by placing provider or Admin API keys i
 
 ## NeuralSearch is unavailable
 
-NeuralSearch requires an eligible plan, a populated index, and enough interaction events to train on. Confirm:
+NeuralSearch requires an eligible plan, a populated index, and a completed training run on that index. Confirm:
 
 1. the index contains records;
 2. searchable attributes are configured;
 3. the NeuralSearch tab is available for the selected application/index;
-4. the index has 1,000 click events or 100 conversion events in the last 30 days — without them `setSettings({ mode: "neuralSearch" })` fails with `SemanticSearch: no events`, which this demo's traffic cannot satisfy;
-5. activation completed on *this* index, since it is per index rather than per application — `GET /1/indexes/{index}/semanticSearch/settings` reports `neuralSearchMode` as `preview` or `active`;
+4. training completed on *this* index, since it is per index rather than per application — `GET /1/indexes/{index}/semanticSearch/settings` reports a real `vectorModelId` on a trained index and an empty one on an untrained index;
+5. training was not discarded by a rebuild — `npm run reindex` swaps in a new index through `replaceAllObjects`, and we have seen training lost across it;
 6. the query is suitable for semantic retrieval rather than only exact IDs.
+
+**If you get `412 SemanticSearch: no events`,** the index has not been trained, and there is no way to fix it from application code. The error appears on both `setSettings({ mode: "neuralSearch" })` and `PUT /1/indexes/{index}/semanticSearch/settings`, on indices of every size we have tried, and it names events even though Algolia's guide says events are not required for training. Training in the dashboard is the documented remedy, but on an application that sends no Insights events that path is refused too, so there is currently nothing to configure your way out of; see NEURAL-1 in the findings. The app keeps working on keyword search.
 
 Do not trust the Under the hood panel here: it reports the saved preference rather than the applied mode. Read `getSettings({ indexName }).mode` per index instead.
 
-The app can continue with keyword search while entitlement or training is resolved. CRUD correctness must not depend on NeuralSearch.
+The app can continue with keyword search while entitlement or training is resolved. CRUD correctness must not depend on NeuralSearch. Note that the `neuralSearch: "unavailable_for_plan"` label the setup path reports is misleading: in practice the cause is an untrained index rather than the plan.
 
 ## Tool does not trigger
 

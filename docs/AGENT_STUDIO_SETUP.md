@@ -81,16 +81,18 @@ NeuralSearch combines semantic/vector retrieval with keyword ranking. It improve
 
 To turn it on:
 
-1. **Activate NeuralSearch on each index.** In the dashboard, open Search, select the index, then Configure > NeuralSearch > Configure NeuralSearch, and activate it. Repeat per index: activation is per index, not per application, so activating it on one index leaves the others on keyword search. Wait for the build to finish.
+1. **Train NeuralSearch on each index.** In the dashboard, open Search, select the index, then the NeuralSearch tab > Configure NeuralSearch > Train NeuralSearch. Repeat per index: training is per index, not per application, so training one index leaves the others on keyword search. Wait for the build to finish.
 2. **Flip the toggle.** Settings > Under the hood > *Use Algolia NeuralSearch*. That persists the choice and immediately reapplies index settings, switching each index's `mode` between `neuralSearch` and `keywordSearch`. `ALGOLIA_NEURAL_SEARCH=true` sets the initial value for a fresh database, and `npm run setup:algolia` honours whatever the toggle currently says.
 
 `mode` is the one setting the JSON files do not carry, precisely because the toggle owns it.
 
-**Activation requires event volume this demo cannot produce.** Algolia requires 1,000 click events or 100 conversion events within 30 days before an index can be activated, and `setSettings({ mode: "neuralSearch" })` on an index that has not met it fails with `SemanticSearch: no events`. A single-user assistant whose search results are consumed by a model rather than clicked by a person does not accumulate those events, so expect to run on keyword search.
+**Expect step 1 to fail on an application that sends no Insights events, and expect to run on keyword search.** `mode` only takes effect on an index NeuralSearch has been trained on, and on our indices no activation path works. Both `setSettings({ mode: "neuralSearch" })` and `PUT /1/indexes/{index}/semanticSearch/settings` with `{"neuralSearchMode":"active"}` return `412 SemanticSearch: no events`, whatever the index size, and the dashboard flow in step 1 is refused as well. Algolia's own guide says click and conversion events are *not* required for training, so this is an open question with Algolia rather than something you can configure your way out of — see NEURAL-1 in our findings. If you are following this guide on an application that already sends Insights events, step 1 should work normally.
 
-If the toggle is on and an index cannot take the mode, setup reapplies that index's settings in `keywordSearch` mode and leaves search working, reporting `neuralSearch: "unavailable_for_plan"` — a label that predates our knowing the real reason, and which is inaccurate for the per-index case. NeuralSearch is an enhancement, not the source of truth or a prerequisite for correct CRUD.
+If the toggle is on and an index cannot take the mode, setup reapplies that index's settings in `keywordSearch` mode and leaves search working, reporting `neuralSearch: "unavailable_for_plan"` — a label that predates our knowing the real reason, and which is inaccurate: the cause is untrained indices, not the plan. NeuralSearch is an enhancement, not the source of truth or a prerequisite for correct CRUD.
 
-To check what is actually applied rather than what was requested, read the indices directly: `getSettings({ indexName })` returns the live `mode`, and `GET /1/indexes/{index}/semanticSearch/settings` returns `neuralSearchMode` as `preview` or `active`.
+To check what is actually applied rather than what was requested, read the indices directly: `getSettings({ indexName })` returns the live `mode`, and `GET /1/indexes/{index}/semanticSearch/settings` returns `neuralSearchMode` plus `vectorModelId`. An index that was never trained reports `neuralSearchMode: "preview"` with an empty `vectorModelId`; a trained one carries a real model id.
+
+**Retrain after a full reindex.** `npm run reindex` rebuilds each index through `replaceAllObjects`, which swaps in a freshly built index. We have seen a trained index come back untrained after this, so treat NeuralSearch training as something to re-check whenever you rebuild.
 
 ## 5. Create the agent
 
