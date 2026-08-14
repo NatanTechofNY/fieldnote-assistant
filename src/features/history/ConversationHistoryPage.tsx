@@ -17,6 +17,7 @@ import { friendlyDate, historyTimestamp, useTimezone } from "../../lib/timezone"
 import { searchTerms, snippetAround } from "../../lib/highlight";
 import { useDebounced } from "../../lib/use-debounced";
 import { useAgentPanel } from "../../lib/agent-panel";
+import { useRedact } from "../../lib/demo-mode";
 
 function ReflectionGenerationBlock({ message }: { message: ChannelMessage }) {
   const label = typeof message.metadata.label === "string"
@@ -139,6 +140,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
   initialQuery: string | null;
 }) {
   const timezone = useTimezone();
+  const redact = useRedact();
   const [selectedId, setSelectedId] = useState(
     () => conversations.some(item => item.id === initialThreadId)
       ? initialThreadId as string
@@ -218,7 +220,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
           {searchGroups.map(([threadId, hits]) => {
             const thread = conversations.find(item => item.id === threadId);
             return <section className="history-result-group" key={threadId}>
-              <header>{thread?.channel === "sms" ? <Phone size={11}/> : <MessageSquareText size={11}/>}<span>{thread?.channel === "sms" ? 'Text Messages (' + thread.address + ')' : "Web Agent"}</span></header>
+              <header>{thread?.channel === "sms" ? <Phone size={11}/> : <MessageSquareText size={11}/>}<span>{thread?.channel === "sms" ? 'Text Messages (' + redact.phone(thread.address) + ')' : "Web Agent"}</span></header>
               {hits.map(hit => <button
                 key={hit.objectID}
                 className={jump?.messageId === hit.objectID ? "opened" : ""}
@@ -245,7 +247,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
                 {workflow ? <Sparkles size={13}/> : thread.channel === "sms" ? <Phone size={13}/> : <MessageSquareText size={13}/>}
               </span>
               <span className="history-thread-copy">
-                <strong>{workflow?.title ?? (thread.channel === "sms" ? 'Text Messages (Phone Number: ' + thread.address + ')' : "Web Agent")}</strong>
+                <strong>{workflow?.title ?? (thread.channel === "sms" ? 'Text Messages (Phone Number: ' + redact.phone(thread.address) + ')' : "Web Agent")}</strong>
                 <small>{workflow?.subtitle ?? (thread.lastMessage || "No messages")}</small>
               </span>
               <span className="history-count">{thread.messageCount}</span>
@@ -257,7 +259,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
         <header className="history-header">
           <div>
             <div className="eyebrow">{selectedWorkflow?.eyebrow ?? `${selected.channel} conversation`}</div>
-            <strong>{selectedWorkflow?.title ?? (selected.channel === "sms" ? 'Text Messages (' + selected.address + ')' : "Fieldnote web agent")}</strong>
+            <strong>{selectedWorkflow?.title ?? (selected.channel === "sms" ? 'Text Messages (' + redact.phone(selected.address) + ')' : "Fieldnote web agent")}</strong>
           </div>
           <span>{selected.messageCount} messages</span>
         </header>

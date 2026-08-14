@@ -3,10 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, Bot, ChevronDown, Database, LoaderCircle, RefreshCw, Search, Settings2, Trash2, TriangleAlert, Zap } from "lucide-react";
 import { api } from "../../api";
 import { ErrorState, Field, HealthCard, Loading, Modal } from "../../components/ui";
+import { useRedact } from "../../lib/demo-mode";
 import { SettingsSection } from "./SettingsSection";
 
 export function UnderHoodSettings({ notify }: { notify: (message: string) => void }) {
   const queryClient = useQueryClient();
+  const redact = useRedact();
   const { data: health, isLoading, error } = useQuery({ queryKey: ["health"], queryFn: api.health });
   const [dangerAction, setDangerAction] = useState<"seed" | "reset" | null>(null);
   type SetupAction = "seed" | "reset" | "reindex" | "setup" | "tools";
@@ -39,7 +41,7 @@ export function UnderHoodSettings({ notify }: { notify: (message: string) => voi
       <section className="health-grid">
         <HealthCard title="SQLite" ok={health.sqlite.ok} icon={Database} detail={`${health.sqlite.records ?? 0} authoritative records`} />
         <HealthCard title={health.neuralSearch.enabled ? "Algolia NeuralSearch" : "Algolia keyword search"} ok={health.algolia.ok} icon={Search} detail={health.algolia.configured ? `${health.algolia.todoRecords ?? 0} todos · ${health.algolia.memoryRecords ?? 0} memories` : health.algolia.error || "Credentials not configured"} />
-        <HealthCard title="Agent Studio" ok={health.agentStudio.configured} icon={Bot} detail={health.agentStudio.configured ? `Agent ${health.agentStudio.agentId}` : "Add your published agent ID"} />
+        <HealthCard title="Agent Studio" ok={health.agentStudio.configured} icon={Bot} detail={health.agentStudio.configured ? `Agent ${redact.text(health.agentStudio.agentId, 18)}` : "Add your published agent ID"} />
       </section>
       {/* One panel holds the search mode and the actions that apply it, rather
           than stacking a toggle, a callout, and a button row in three boxes. */}

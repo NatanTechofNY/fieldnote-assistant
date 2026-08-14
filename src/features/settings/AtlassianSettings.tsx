@@ -7,6 +7,7 @@ import {
 import { api } from "../../api";
 import type { DigestBrief, DigestBriefResource, IntegrationState } from "../../types";
 import { Field } from "../../components/ui";
+import { useRedact } from "../../lib/demo-mode";
 import { humanTime, withinQuietHours } from "../../lib/timezone";
 
 export function AtlassianSettings({
@@ -20,6 +21,7 @@ export function AtlassianSettings({
   notify: (message: string) => void;
   refresh: () => void;
 }) {
+  const redact = useRedact();
   const [siteUrl, setSiteUrl] = useState(config.siteUrl || "");
   const [email, setEmail] = useState(config.email || "");
   const [apiToken, setApiToken] = useState("");
@@ -41,7 +43,7 @@ export function AtlassianSettings({
     </p>
     <div className="integration-status">
       <span className={`dot ${config.configured ? "ok" : ""}`}/>
-      {config.configured ? `Connected · ${config.displayName || config.email}` : "Not connected"}
+      {config.configured ? `Connected · ${redact.text(config.displayName || config.email, 12)}` : "Not connected"}
     </div>
     {config.configured && <div className="atlassian-products">
       {/* Licensed separately, so a token can be perfectly valid for one and not the other. */}
@@ -53,10 +55,10 @@ export function AtlassianSettings({
         label="Site URL"
         hint="A classic API token authenticates against this host. Scoped tokens work only against api.atlassian.com."
       >
-        <input className="input" value={siteUrl} onChange={event => setSiteUrl(event.target.value)} placeholder="https://your-team.atlassian.net"/>
+        <input className="input" type={redact.inputType("url")} value={siteUrl} onChange={event => setSiteUrl(event.target.value)} placeholder="https://your-team.atlassian.net"/>
       </Field>
       <Field label="Atlassian account email">
-        <input className="input" value={email} onChange={event => setEmail(event.target.value)} placeholder="you@company.com"/>
+        <input className="input" type={redact.inputType()} value={email} onChange={event => setEmail(event.target.value)} placeholder="you@company.com"/>
       </Field>
     </div>
     <Field

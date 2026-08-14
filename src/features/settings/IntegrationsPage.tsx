@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { Archive, Check, Circle, Clock3, Database, History, ListChecks, LoaderCircle, MessageSquare, Newspaper, Pause, Phone, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Zap } from "lucide-react";
+import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Newspaper, Pause, Phone, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Zap } from "lucide-react";
 import { api } from "../../api";
 import type {
   ExternalEvent, IntegrationState, SmsProvider,
 } from "../../types";
 import { PageHead } from "../../components/layout/PageHead";
 import { ErrorState, Field, Loading, ThemeToggle, Toast } from "../../components/ui";
+import { useDemoMode, useRedact } from "../../lib/demo-mode";
 import { type ThemePreference, useTheme } from "../../lib/theme";
 import { AtlassianSettings, DigestBriefsSettings } from "./AtlassianSettings";
 import { LifeAreasSettings } from "./LifeAreasSettings";
@@ -32,6 +33,8 @@ export function IntegrationsPage() {
 
 function IntegrationsContent({ initialData }: { initialData: IntegrationState }) {
   const queryClient = useQueryClient();
+  const demoMode = useDemoMode();
+  const redact = useRedact();
   const { data = initialData } = useQuery({
     queryKey: ["integrations"],
     queryFn: api.integrations,
@@ -169,12 +172,23 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
         sectionId="appearance"
         title="Appearance"
         description="Match your system, or pin the interface to light or dark."
-        status={themeStatus[preference]}
+        status={demoMode.enabled ? "Demo mode · on" : themeStatus[preference]}
         icon={SunMoon}
       >
         <div className="card-title"><h3>Theme</h3><SunMoon size={18}/></div>
         <p className="integration-copy">Applies to this browser only. System follows your operating system setting as it changes.</p>
         <ThemeToggle/>
+        <div className="card-title"><h3>Demo mode</h3><EyeOff size={18}/></div>
+        <p className="integration-copy">
+          Hides the values that identify this installation — phone numbers, account identifiers, the
+          public tunnel URL, and the agent id — so the app can be screen-recorded as it is. Nothing is
+          changed on the server, and a masked field still saves the real value underneath.
+          Toggle it from anywhere with <kbd>⌘⇧D</kbd>.
+        </p>
+        <label className="toggle-row compact">
+          <input type="checkbox" checked={demoMode.enabled} onChange={event => demoMode.setEnabled(event.target.checked)}/>
+          <span>Mask identifying values on screen</span>
+        </label>
       </SettingsSection>
       <SettingsSection
         sectionId="classifications"
@@ -213,7 +227,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
         title="Message provider"
         description="Send through Twilio SMS or Sendblue iMessage, and switch between them whenever you like."
         status={activeConnection.configured
-          ? `${providerLabel[activeProvider]} · ${activeConnection.fromPhone}`
+          ? `${providerLabel[activeProvider]} · ${redact.phone(activeConnection.fromPhone)}`
           : `${providerLabel[activeProvider]} · not connected`}
         icon={Phone}
       >
@@ -242,13 +256,13 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
         {providerTab === "twilio" ? <div className="provider-panel">
           <div className="card-title"><h3>Twilio SMS</h3><Phone size={18}/></div>
           <p className="integration-copy">Inbound texts become Agent Studio conversations. Outbound texts deliver reminders and daily summaries.</p>
-          <div className="integration-status"><span className={`dot ${data.twilio.configured ? "ok" : ""}`}/>{data.twilio.configured ? `Connected · ${data.twilio.fromPhone}` : "Not connected"}</div>
-          <Field label="Account SID"><input className="input" value={accountSid} onChange={e => setAccountSid(e.target.value)} placeholder="AC…" /></Field>
+          <div className="integration-status"><span className={`dot ${data.twilio.configured ? "ok" : ""}`}/>{data.twilio.configured ? `Connected · ${redact.phone(data.twilio.fromPhone)}` : "Not connected"}</div>
+          <Field label="Account SID"><input className="input" type={redact.inputType()} value={accountSid} onChange={e => setAccountSid(e.target.value)} placeholder="AC…" /></Field>
           <Field label={data.twilio.configured ? "New auth token (only to rotate)" : "Auth token"}><input className="input" type="password" value={authToken} onChange={e => setAuthToken(e.target.value)} placeholder="Stored encrypted" /></Field>
           <div className="form-grid">
-            <Field label="Twilio number"><input className="input" value={fromPhone} onChange={e => setFromPhone(e.target.value)} placeholder="+17185551234" /></Field>
+            <Field label="Twilio number"><input className="input" type={redact.inputType("tel")} value={fromPhone} onChange={e => setFromPhone(e.target.value)} placeholder="+17185551234" /></Field>
             <Field label="Public HTTPS URL">
-              <input className="input" value={webhookBaseUrl} onChange={e => setWebhookBaseUrl(e.target.value)} placeholder="https://your-tunnel.ngrok-free.app" />
+              <input className="input" type={redact.inputType("url")} value={webhookBaseUrl} onChange={e => setWebhookBaseUrl(e.target.value)} placeholder="https://your-tunnel.ngrok-free.app" />
               <small className="field-hint">Localhost cannot receive Twilio webhooks. Use ngrok, Cloudflare Tunnel, or your deployed URL.</small>
             </Field>
           </div>
@@ -269,14 +283,14 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
         </div> : <div className="provider-panel">
           <div className="card-title"><h3>Sendblue iMessage</h3><MessageSquare size={18}/></div>
           <p className="integration-copy">Messages send as iMessage and fall back to RCS, then SMS, on their own. Run <code>sendblue show-keys</code> and <code>sendblue lines</code> in your terminal to read the values below.</p>
-          <div className="integration-status"><span className={`dot ${data.sendblue.configured ? "ok" : ""}`}/>{data.sendblue.configured ? `Connected · ${data.sendblue.fromPhone}` : "Not connected"}</div>
+          <div className="integration-status"><span className={`dot ${data.sendblue.configured ? "ok" : ""}`}/>{data.sendblue.configured ? `Connected · ${redact.phone(data.sendblue.fromPhone)}` : "Not connected"}</div>
           {data.sendblue.lastError && <div className="inline-error"><TriangleAlert size={14}/><span>{data.sendblue.lastError}</span></div>}
-          <Field label="API key ID"><input className="input" value={sendblueKeyId} onChange={e => setSendblueKeyId(e.target.value)} placeholder="From sendblue show-keys" /></Field>
+          <Field label="API key ID"><input className="input" type={redact.inputType()} value={sendblueKeyId} onChange={e => setSendblueKeyId(e.target.value)} placeholder="From sendblue show-keys" /></Field>
           <Field label={data.sendblue.configured ? "New API secret (only to rotate)" : "API secret"}><input className="input" type="password" value={sendblueSecret} onChange={e => setSendblueSecret(e.target.value)} placeholder="Stored encrypted" /></Field>
           <div className="form-grid">
-            <Field label="Sendblue number"><input className="input" value={sendbluePhone} onChange={e => setSendbluePhone(e.target.value)} placeholder="+15551234567" /></Field>
+            <Field label="Sendblue number"><input className="input" type={redact.inputType("tel")} value={sendbluePhone} onChange={e => setSendbluePhone(e.target.value)} placeholder="+15551234567" /></Field>
             <Field label="Public HTTPS URL">
-              <input className="input" value={sendblueWebhookBaseUrl} onChange={e => setSendblueWebhookBaseUrl(e.target.value)} placeholder="https://your-tunnel.ngrok-free.app" />
+              <input className="input" type={redact.inputType("url")} value={sendblueWebhookBaseUrl} onChange={e => setSendblueWebhookBaseUrl(e.target.value)} placeholder="https://your-tunnel.ngrok-free.app" />
               <small className="field-hint">Registers <code>{data.webhookPaths.sendblueInbound}</code> plus the blocked-line and reassigned-line webhooks, each with a generated secret. Sendblue webhooks are account-wide, so this replaces those URLs for every line.</small>
             </Field>
           </div>
@@ -362,7 +376,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
         </div>
 
         <div className="form-grid delivery-destination">
-          <Field label="Send messages to"><input className="input" value={recipientPhone} onChange={e => setRecipientPhone(e.target.value)} placeholder="+17185551234" /></Field>
+          <Field label="Send messages to"><input className="input" type={redact.inputType("tel")} value={recipientPhone} onChange={e => setRecipientPhone(e.target.value)} placeholder="+17185551234" /></Field>
           <Field label="Schedule timezone">
             <select className="select" value={timezone} onChange={e => setTimezone(e.target.value)}>
               {timezoneNames.map(name => <option key={name} value={name}>{timezoneLabel(name)}</option>)}

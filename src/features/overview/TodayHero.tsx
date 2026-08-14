@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Bot, Brain, Check, Copy, ListTodo, MessageSquareText } from "lucide-react";
 import { api } from "../../api";
 import { useAgentPanel } from "../../lib/agent-panel";
+import { useRedact } from "../../lib/demo-mode";
 
 /**
  * Deliberately unfinished: the point is that the agent takes the rest of the
@@ -20,6 +21,7 @@ const drafts = {
  */
 export function TodayHero() {
   const panel = useAgentPanel();
+  const redact = useRedact();
   const { data: integrations } = useQuery({ queryKey: ["integrations"], queryFn: api.integrations });
   const [copied, setCopied] = useState(false);
   /*
@@ -61,7 +63,9 @@ export function TodayHero() {
       </button>
       {phone && <div className="today-hero-sms">
         <span>or text</span>
-        <a href={`sms:${phone}`}><MessageSquareText size={14}/>{phone}</a>
+        {/* Dropping the href with the digits keeps the number out of the
+            browser's own hover preview, which a screen recording would catch. */}
+        <a href={redact.enabled ? undefined : `sms:${phone}`}><MessageSquareText size={14}/>{redact.phone(phone)}</a>
         <button type="button" className="today-hero-copy-number" aria-label="Copy the number" onClick={copy}>
           {copied ? <Check size={13}/> : <Copy size={13}/>}
         </button>

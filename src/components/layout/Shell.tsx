@@ -6,6 +6,7 @@ import { api } from "../../api";
 import { AskLauncher } from "../search/AskLauncher";
 import { CommandPalette } from "../search/CommandPalette";
 import { AgentPanelContext, useAgentPanel, useAgentPanelState } from "../../lib/agent-panel";
+import { useDemoMode } from "../../lib/demo-mode";
 import { useGlobalShortcuts } from "../../lib/use-global-shortcuts";
 import { ReminderWatcher } from "../ReminderWatcher";
 import { ThemeToggle } from "../ui";
@@ -32,9 +33,10 @@ function ShellBody() {
   const timezone = integrations?.notifications.timezone || browserTimezone;
   const agentPanel = useAgentPanel();
   const rail = useNavRail();
+  const demoMode = useDemoMode();
   const [searchOpen, setSearchOpen] = useState(false);
   const openSearch = useCallback(() => setSearchOpen(true), []);
-  useGlobalShortcuts({ onSearch: openSearch, onAgent: agentPanel.toggle });
+  useGlobalShortcuts({ onSearch: openSearch, onAgent: agentPanel.toggle, onDemoMode: demoMode.toggle });
   return (
     <TimezoneContext.Provider value={timezone}>
     <div className="app-shell" data-rail={rail.isCollapsed ? "collapsed" : "full"}>

@@ -21,7 +21,15 @@ export function threadLabel(address: string): { title: string; subtitle: string;
   return null;
 }
 
-/** What to call a thread in a list, where there is room for one line. */
-export function threadTitle(thread: Pick<ChannelConversation, "address" | "channel">) {
-  return threadLabel(thread.address)?.title ?? (thread.channel === "sms" ? 'Text Messages (' + thread.address + ')' : "Web agent");
+/**
+ * What to call a thread in a list, where there is room for one line. The address
+ * passes through `formatAddress` so demo mode can mask the number without this
+ * having to know the setting exists.
+ */
+export function threadTitle(
+  thread: Pick<ChannelConversation, "address" | "channel">,
+  formatAddress: (address: string) => string = address => address,
+) {
+  return threadLabel(thread.address)?.title
+    ?? (thread.channel === "sms" ? 'Text Messages (' + formatAddress(thread.address) + ')' : "Web agent");
 }

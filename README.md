@@ -58,6 +58,8 @@ Open [http://localhost:4173](http://localhost:4173). The API runs on port `4174`
 
 Press `⌘K` (`Ctrl+K`) for universal search across memories, todos, and conversation history, and `⌘I` (`Ctrl+I`) to open the agent panel from any page.
 
+`⌘⇧D` (`Ctrl+Shift+D`) toggles demo mode, which masks the values that identify one installation — phone numbers, provider account identifiers, the public webhook URL, the Atlassian account, and the agent id — so the app can be screen-shared or recorded as it is. It is a browser-local display setting, also available under Settings > Appearance. Masked inputs keep their real value, so saving a card while it is on writes the stored value rather than the mask.
+
 Without Algolia credentials the app still runs: todos, memories, reminders, and conversation history all work against SQLite, and universal search, memory search, and conversation search each fall back to a SQLite `LIKE` scan. The agent panel serves a small deterministic fallback assistant rather than Agent Studio. To enable semantic search and the real agent, fill in the Algolia values in `.env` and run:
 
 ```bash

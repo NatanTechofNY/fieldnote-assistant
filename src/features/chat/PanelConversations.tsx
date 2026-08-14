@@ -9,6 +9,7 @@ import type {
 import { Loading, MarkdownContent } from "../../components/ui";
 import { friendlyDate, historyTimestamp, useTimezone } from "../../lib/timezone";
 import { useAgentPanel } from "../../lib/agent-panel";
+import { useRedact } from "../../lib/demo-mode";
 import { threadTitle } from "../history/thread-label";
 
 /**
@@ -19,6 +20,7 @@ import { threadTitle } from "../history/thread-label";
  * conversation search — is the History page's job, one link away at the bottom.
  */
 export function PanelConversations() {
+  const redact = useRedact();
   const panel = useAgentPanel();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const { data: threads = [], isLoading } = useQuery({
@@ -35,7 +37,7 @@ export function PanelConversations() {
         </button>
         : <span className="agent-panel-mark"><MessagesSquare size={13}/></span>}
       <div>
-        <strong>{selected ? threadTitle(selected) : "Conversations"}</strong>
+        <strong>{selected ? threadTitle(selected, redact.phone) : "Conversations"}</strong>
         <div className="eyebrow">{selected
           ? `${selected.messageCount} message${selected.messageCount === 1 ? "" : "s"}`
           : "Web and SMS, kept on this machine"}</div>
@@ -58,11 +60,12 @@ export function PanelConversations() {
 
 function ThreadList({ threads, onSelect }: { threads: ChannelConversation[]; onSelect: (id: string) => void }) {
   const timezone = useTimezone();
+  const redact = useRedact();
   return <div className="panel-thread-list">
     {threads.map(thread => <button key={thread.id} type="button" className="panel-thread" onClick={() => onSelect(thread.id)}>
       <span className="panel-thread-mark">{thread.channel === "sms" ? <Phone size={13}/> : <Bot size={13}/>}</span>
       <span className="panel-thread-body">
-        <strong>{threadTitle(thread)}</strong>
+        <strong>{threadTitle(thread, redact.phone)}</strong>
         <small>{thread.lastMessage || "No messages yet"}</small>
       </span>
       <span className="panel-thread-meta">
