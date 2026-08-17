@@ -43,6 +43,33 @@ const RETRIEVED_ATTRIBUTES: Record<SearchEntityType, string[]> = {
   message: ["objectID", "threadId", "channel", "role", "content", "created_at"],
 };
 
+/**
+ * NeuralSearch activation is refused with `412 SemanticSearch: no events` unless
+ * the request also names a vector model and the attributes to vectorize. Naming
+ * them is what removes the need for click and conversion events: the events gate
+ * guards Algolia's *automatic* attribute selection, not NeuralSearch itself.
+ */
+const VECTOR_MODEL_ID = "external://algolia-large-multilang-generic-v2410";
+
+/**
+ * `neuralExpression` weights the attributes that get vectorized, so it is
+ * derived from the same `searchableAttributes` the index already ranks on
+ * instead of being a second list to keep in sync. Modifiers and comma-grouped
+ * equivalents are unwrapped: `unordered(title)` weights `title`.
+ */
+function neuralExpressionFor(searchableAttributes: unknown): Record<string, number> {
+  const attributes = Array.isArray(searchableAttributes) ? searchableAttributes : [];
+  const expression: Record<string, number> = {};
+  for (const entry of attributes) {
+    if (typeof entry !== "string") continue;
+    for (const part of entry.split(",")) {
+      const name = part.trim().replace(/^\w+\((.*)\)$/, "$1").trim();
+      if (name) expression[name] = 1;
+    }
+  }
+  return expression;
+}
+
 export interface MemorySearchFilters {
   kind?: string;
   category_id?: string;
@@ -374,17 +401,15 @@ export class AlgoliaSync {
    * the files that get pasted into the dashboard are the same ones this applies.
    * Previously they were separate and had already drifted apart.
    *
-   * `mode` is the one setting the files do not own: it is driven by the
-   * NeuralSearch toggle so an application without the entitlement still gets a
-   * working keyword index.
+   * `mode` is absent by design. It is owned by the semantic settings endpoint,
+   * which flips it as a side effect of activation; writing it here is refused
+   * even when the index is already in the mode being written.
    */
   async indexSettings(): Promise<Array<{ indexName: string; indexSettings: Record<string, unknown> }>> {
     const directory = this.settingsDirectory;
-    const mode = this.neuralSearchEnabled() ? "neuralSearch" : "keywordSearch";
-    const read = async (file: string) => ({
-      ...JSON.parse(await readFile(resolve(directory, file), "utf8")) as Record<string, unknown>,
-      mode,
-    });
+    const read = async (file: string) => (
+      JSON.parse(await readFile(resolve(directory, file), "utf8")) as Record<string, unknown>
+    );
     const [todos, memories, messages] = await Promise.all([
       read("todos.settings.json"),
       read("memories.settings.json"),
@@ -398,42 +423,60 @@ export class AlgoliaSync {
   }
 
   /**
-   * Applies one index's settings, falling back to keyword mode if NeuralSearch
-   * is not entitled on the plan. Returns the warning so the caller can report
-   * degraded relevance rather than failing the whole setup.
+   * Switches one index between semantic and keyword retrieval. The API clients
+   * do not model this endpoint, so it goes through `customPut`; activation is
+   * asynchronous, and the read-back can lag the write by several seconds.
+   *
+   * `path` must not start with a slash. A leading one fails as "Unreachable
+   * hosts - your application id may be incorrect", which reads as a credentials
+   * problem rather than the string formatting mistake it is.
    */
-  private async applySettings(
+  private async applySemanticSearch(
     entry: { indexName: string; indexSettings: Record<string, unknown> },
-  ): Promise<{ taskID: number; warning?: string }> {
-    const client = this.client!;
-    try {
-      const task = await client.setSettings(entry);
-      return { taskID: task.taskID };
-    } catch (error) {
-      if (entry.indexSettings.mode !== "neuralSearch") throw error;
-      const task = await client.setSettings({
-        indexName: entry.indexName,
-        indexSettings: { ...entry.indexSettings, mode: "keywordSearch" },
-      });
-      return { taskID: task.taskID, warning: errorText(error).slice(0, 300) };
-    }
+  ): Promise<void> {
+    const path = `1/indexes/${encodeURIComponent(entry.indexName)}/semanticSearch/settings`;
+    const wanted = this.neuralSearchEnabled();
+    // Neural operations are capped at 10 per hour per application, which a few
+    // toggle flips would exhaust, so an index already in the requested state is
+    // left alone rather than rewritten. Activation needs a vector model to have
+    // been accepted, not just the mode to read back.
+    const current = await this.client!.customGet({ path }) as Record<string, unknown>;
+    const active = current.neuralSearchMode === "active" && Boolean(current.vectorModelId);
+    if (active === wanted) return;
+    await this.client!.customPut({
+      path,
+      body: wanted
+        ? {
+          neuralSearchMode: "active",
+          vectorModelId: VECTOR_MODEL_ID,
+          neuralExpression: neuralExpressionFor(entry.indexSettings.searchableAttributes),
+        }
+        : { neuralSearchMode: "inactive" },
+    });
   }
 
   async setup(): Promise<{ configured: boolean; details?: Record<string, unknown> }> {
     if (!this.client) return { configured: false, details: { reason: "Missing server-side Algolia credentials" } };
     const requested = this.neuralSearchEnabled();
     const configured = await this.indexSettings();
-    const results = await Promise.all(configured.map(entry => this.applySettings(entry)));
+    const results = await Promise.all(configured.map(entry => this.client!.setSettings(entry)));
     await Promise.all(results.map((result, index) =>
       this.client!.waitForTask({ indexName: configured[index].indexName, taskID: result.taskID })
     ));
     for (const entry of configured) this.userFilterConfigured.set(entry.indexName, true);
-    const warning = results.find(result => result.warning)?.warning;
-    // `mode: neuralSearch` only takes effect once NeuralSearch is enabled for
-    // the application in the dashboard; the index setting alone cannot do it.
+    // Retrieval mode is a separate endpoint from index settings, and a refusal
+    // there has to leave a working keyword index rather than fail the setup.
+    let warning: string | undefined;
+    for (const entry of configured) {
+      try {
+        await this.applySemanticSearch(entry);
+      } catch (error) {
+        warning ??= errorText(error).slice(0, 300);
+      }
+    }
     if (!requested) return { configured: true, details: { search: "keyword" } };
     return warning
-      ? { configured: true, details: { search: "keyword", neuralSearch: "unavailable_for_plan", warning } }
+      ? { configured: true, details: { search: "keyword", neuralSearch: "unavailable", warning } }
       : { configured: true, details: { search: "neural" } };
   }
 

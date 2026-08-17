@@ -79,20 +79,29 @@ NeuralSearch combines semantic/vector retrieval with keyword ranking. It improve
 
 **It is a paid add-on, so the app ships with it off and runs on standard keyword search.** Everything else works the same either way; only relevance on paraphrased queries changes.
 
-To turn it on:
+**Flip the toggle.** Settings > Under the hood > *Use Algolia NeuralSearch*. That persists the choice and immediately activates or deactivates NeuralSearch on all three indices. `ALGOLIA_NEURAL_SEARCH=true` sets the initial value for a fresh database, and `npm run setup:algolia` honors whatever the toggle currently says. No dashboard step is needed, and no click or conversion events are required.
 
-1. **Train NeuralSearch on each index.** In the dashboard, open Search, select the index, then the NeuralSearch tab > Configure NeuralSearch > Train NeuralSearch. Repeat per index: training is per index, not per application, so training one index leaves the others on keyword search. Wait for the build to finish.
-2. **Flip the toggle.** Settings > Under the hood > *Use Algolia NeuralSearch*. That persists the choice and immediately reapplies index settings, switching each index's `mode` between `neuralSearch` and `keywordSearch`. `ALGOLIA_NEURAL_SEARCH=true` sets the initial value for a fresh database, and `npm run setup:algolia` honours whatever the toggle currently says.
+Retrieval mode is not an index setting, which is why the JSON files above do not carry it. It lives on a separate endpoint, `PUT /1/indexes/{index}/semanticSearch/settings`, and activation there needs three fields together:
 
-`mode` is the one setting the JSON files do not carry, precisely because the toggle owns it.
+```json
+{
+  "neuralSearchMode": "active",
+  "vectorModelId": "external://algolia-large-multilang-generic-v2410",
+  "neuralExpression": { "title": 1, "notes": 1 }
+}
+```
 
-**Expect step 1 to fail on an application that sends no Insights events, and expect to run on keyword search.** `mode` only takes effect on an index NeuralSearch has been trained on, and on our indices no activation path works. Both `setSettings({ mode: "neuralSearch" })` and `PUT /1/indexes/{index}/semanticSearch/settings` with `{"neuralSearchMode":"active"}` return `412 SemanticSearch: no events`, whatever the index size, and the dashboard flow in step 1 is refused as well. Algolia's own guide says click and conversion events are *not* required for training, so this is an open question with Algolia rather than something you can configure your way out of — see NEURAL-1 in our findings. If you are following this guide on an application that already sends Insights events, step 1 should work normally.
+`neuralExpression` is the weighted map of attributes to vectorize. `setup()` derives it from each index's own `searchableAttributes`, so the attributes being embedded are the ones being ranked. Deactivation is a bare `{"neuralSearchMode":"inactive"}`.
 
-If the toggle is on and an index cannot take the mode, setup reapplies that index's settings in `keywordSearch` mode and leaves search working, reporting `neuralSearch: "unavailable_for_plan"` — a label that predates our knowing the real reason, and which is inaccurate: the cause is untrained indices, not the plan. NeuralSearch is an enhancement, not the source of truth or a prerequisite for correct CRUD.
+**If you get `412 SemanticSearch: no events`, the request is missing `neuralExpression` and `vectorModelId`** — the error names events, but events are not what it is checking. Omitting `neuralExpression` leaves Algolia to select the attributes itself, and *that* is the step events are needed for. Supply the attributes and activation succeeds on an application that has never sent an Insights event. See NEURAL-1 in our findings for the field-by-field evidence.
 
-To check what is actually applied rather than what was requested, read the indices directly: `getSettings({ indexName })` returns the live `mode`, and `GET /1/indexes/{index}/semanticSearch/settings` returns `neuralSearchMode` plus `vectorModelId`. An index that was never trained reports `neuralSearchMode: "preview"` with an empty `vectorModelId`; a trained one carries a real model id.
+Do not write `mode` with index settings. The semantic endpoint sets it for you, and writing it yourself is refused with the same `412` even when the index already holds the value you are writing.
 
-**Retrain after a full reindex.** `npm run reindex` rebuilds each index through `replaceAllObjects`, which swaps in a freshly built index. We have seen a trained index come back untrained after this, so treat NeuralSearch training as something to re-check whenever you rebuild.
+**Neural operations are limited to ten per hour per application.** Activating three indices costs three, so a few toggle flips in quick succession will hit it. Exceeding it returns `429`, which `algoliasearch` v5 surfaces as `Unreachable hosts - your application id may be incorrect`; if you see that message while changing NeuralSearch settings, your credentials are fine and you need to wait. `setup()` skips indices that already hold the requested state so repeated runs cost nothing. `npm run reindex` also counts against this limit.
+
+To check what is actually applied rather than what was requested, read the indices directly: `GET /1/indexes/{index}/semanticSearch/settings` returns `neuralSearchMode` plus `vectorModelId`, and `getSettings({ indexName })` returns the live `mode`. An index that was never activated reports `neuralSearchMode: "preview"` with an empty `vectorModelId`; an active one carries a real model id. Note that `getSettings().semanticSearch` is not a reliable read: it comes back `{}` on a fully active index.
+
+**Re-check after a full reindex.** `npm run reindex` rebuilds each index through `replaceAllObjects`, which swaps in a freshly built index. We have seen an active index come back inactive after this, so re-run `npm run setup:algolia` after a rebuild.
 
 ## 5. Create the agent
 

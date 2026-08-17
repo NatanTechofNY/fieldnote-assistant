@@ -8,20 +8,23 @@ Do not work around a missing entitlement by placing provider or Admin API keys i
 
 ## NeuralSearch is unavailable
 
-NeuralSearch requires an eligible plan, a populated index, and a completed training run on that index. Confirm:
+NeuralSearch requires an eligible plan, a populated index, and activation on that index. Confirm:
 
 1. the index contains records;
 2. searchable attributes are configured;
 3. the NeuralSearch tab is available for the selected application/index;
-4. training completed on *this* index, since it is per index rather than per application — `GET /1/indexes/{index}/semanticSearch/settings` reports a real `vectorModelId` on a trained index and an empty one on an untrained index;
-5. training was not discarded by a rebuild — `npm run reindex` swaps in a new index through `replaceAllObjects`, and we have seen training lost across it;
-6. the query is suitable for semantic retrieval rather than only exact IDs.
+4. activation succeeded on *this* index, since it is per index rather than per application — `GET /1/indexes/{index}/semanticSearch/settings` reports `neuralSearchMode: "active"` and a real `vectorModelId` on an active index, and `"preview"` with an empty one otherwise;
+5. `neuralExpression` names the attributes you expect to be vectorized. If it is `{"objectID": 1}`, the index is embedding record identifiers and semantic recall will be useless while every status reads healthy;
+6. activation was not discarded by a rebuild — `npm run reindex` swaps in a new index through `replaceAllObjects`, and we have seen activation lost across it. Re-run `npm run setup:algolia`;
+7. the query is suitable for semantic retrieval rather than only exact IDs.
 
-**If you get `412 SemanticSearch: no events`,** the index has not been trained, and there is no way to fix it from application code. The error appears on both `setSettings({ mode: "neuralSearch" })` and `PUT /1/indexes/{index}/semanticSearch/settings`, on indices of every size we have tried, and it names events even though Algolia's guide says events are not required for training. Training in the dashboard is the documented remedy, but on an application that sends no Insights events that path is refused too, so there is currently nothing to configure your way out of; see NEURAL-1 in the findings. The app keeps working on keyword search.
+**If you get `412 SemanticSearch: no events`,** the request is missing `neuralExpression` and `vectorModelId`. Despite the wording, this is not about events: `{"neuralSearchMode":"active"}` on its own is refused, and the same call with those two fields succeeds on an application that has never sent an Insights event. Omitting `neuralExpression` asks Algolia to choose the attributes itself, which is the part that needs events. The same `412` appears on `setSettings({ mode: "neuralSearch" })`, which you should not call at all — the semantic endpoint owns `mode` and sets it for you. See NEURAL-1 in the findings.
 
-Do not trust the Under the hood panel here: it reports the saved preference rather than the applied mode. Read `getSettings({ indexName }).mode` per index instead.
+**If you get `Unreachable hosts - your application id may be incorrect` while changing NeuralSearch settings,** your credentials are almost certainly fine. Two unrelated causes produce it. Neural operations are capped at ten per hour per application, and `algoliasearch` v5 retries the resulting `429` across every host before reporting it this way — wait for the window. And a `customGet`/`customPut` `path` that starts with `/` fails identically: use `1/indexes/...`, not `/1/indexes/...`.
 
-The app can continue with keyword search while entitlement or training is resolved. CRUD correctness must not depend on NeuralSearch. Note that the `neuralSearch: "unavailable_for_plan"` label the setup path reports is misleading: in practice the cause is an untrained index rather than the plan.
+Do not trust the Under the hood panel here: it reports the saved preference rather than the applied mode. Read the semantic settings endpoint per index instead. `getSettings().semanticSearch` is not a substitute — it returns `{}` on an active index.
+
+The app can continue with keyword search while any of this is resolved. CRUD correctness must not depend on NeuralSearch.
 
 ## Tool does not trigger
 

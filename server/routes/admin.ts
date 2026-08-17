@@ -18,8 +18,9 @@ export function registerAdminRoutes({ app, db, search, agentStudio }: RouteConte
   });
   app.post("/api/admin/reindex", async (_req, res) => success(res, await search.reindex()));
   app.post("/api/admin/algolia/setup", async (_req, res) => success(res, await search.setup()));
-  // Flipping the toggle rewrites the index `mode`, so the setup run has to
-  // happen here rather than waiting for the next manual "Configure Algolia".
+  // Flipping the toggle rewrites each index's semantic settings, so the setup
+  // run has to happen here rather than waiting for the next manual
+  // "Configure Algolia".
   app.put("/api/admin/algolia/neural-search", async (req, res) => {
     const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(req.body);
     saveSearchPreferences(db, { neuralSearchEnabled: enabled });

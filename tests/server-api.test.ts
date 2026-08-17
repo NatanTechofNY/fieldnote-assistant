@@ -1144,23 +1144,43 @@ describe("outbox and Algolia integration", () => {
 });
 
 describe("NeuralSearch toggle", () => {
-  function settingsClient(rejectNeural = false) {
-    const applied: Array<{ indexName: string; mode: unknown }> = [];
+  function settingsClient(rejectNeural = false, live: Record<string, unknown> = {}) {
+    const applied: Array<{ indexName: string; indexSettings: Record<string, unknown> }> = [];
+    const semantic: Array<{ path: string; body: Record<string, unknown> }> = [];
     return {
       applied,
+      semantic,
       async setSettings(input: { indexName: string; indexSettings: Record<string, unknown> }) {
-        if (rejectNeural && input.indexSettings.mode === "neuralSearch") {
-          throw new Error("NeuralSearch is not enabled for this application");
-        }
-        applied.push({ indexName: input.indexName, mode: input.indexSettings.mode });
+        applied.push(input);
         return { taskID: applied.length };
+      },
+      async customGet() { return { neuralSearchMode: "preview", vectorModelId: "", ...live }; },
+      async customPut(input: { path: string; body: Record<string, unknown> }) {
+        if (rejectNeural && input.body.neuralSearchMode === "active") {
+          throw new Error("SemanticSearch: no events");
+        }
+        semantic.push(input);
+        return {};
       },
       async waitForTask() { return {}; },
       async searchSingleIndex() { return { nbHits: 0, hits: [] }; },
     };
   }
 
-  it("defaults to keyword search and only applies neural mode once enabled", async () => {
+  it("never writes mode with index settings, since the semantic endpoint owns it", async () => {
+    const db = openDatabase(":memory:");
+    databases.push(db);
+    const client = settingsClient();
+    const sync = new AlgoliaSync(db, { client: client as never });
+
+    await sync.setup();
+    assert.equal(client.applied.length, 3);
+    for (const entry of client.applied) {
+      assert.equal("mode" in entry.indexSettings, false, "writing mode is refused even when it already holds that value");
+    }
+  });
+
+  it("defaults to keyword search and only activates once enabled", async () => {
     const db = openDatabase(":memory:");
     databases.push(db);
     const client = settingsClient();
@@ -1168,15 +1188,54 @@ describe("NeuralSearch toggle", () => {
 
     assert.equal(sync.neuralSearchEnabled(), false, "NeuralSearch is a paid add-on, so it is opt-in");
     assert.deepEqual(await sync.setup(), { configured: true, details: { search: "keyword" } });
-    assert.deepEqual(client.applied.map(entry => entry.mode), ["keywordSearch", "keywordSearch", "keywordSearch"]);
+    assert.equal(client.semantic.length, 0, "an index that was never activated needs no write to stay keyword");
 
     saveSearchPreferences(db, { neuralSearchEnabled: true });
-    client.applied.length = 0;
     assert.deepEqual(await sync.setup(), { configured: true, details: { search: "neural" } });
-    assert.deepEqual(client.applied.map(entry => entry.mode), ["neuralSearch", "neuralSearch", "neuralSearch"]);
+    assert.deepEqual(client.semantic.map(entry => entry.body.neuralSearchMode), ["active", "active", "active"]);
+    // No leading slash: with one the client fails as "Unreachable hosts".
+    assert.deepEqual(
+      client.semantic.map(entry => entry.path),
+      [
+        "1/indexes/devcon_assistant_todos/semanticSearch/settings",
+        "1/indexes/devcon_assistant_memories/semanticSearch/settings",
+        "1/indexes/devcon_assistant_messages/semanticSearch/settings",
+      ],
+    );
   });
 
-  it("falls back to keyword mode when the application is not entitled", async () => {
+  it("leaves an index alone when it already holds the requested mode", async () => {
+    const db = openDatabase(":memory:");
+    databases.push(db);
+    saveSearchPreferences(db, { neuralSearchEnabled: true });
+    const live = { neuralSearchMode: "active", vectorModelId: "external://algolia-large-multilang-generic-v2410" };
+    const client = settingsClient(false, live);
+    const sync = new AlgoliaSync(db, { client: client as never });
+
+    await sync.setup();
+    assert.equal(client.semantic.length, 0, "neural operations are capped at 10 an hour, so re-running setup must be free");
+
+    saveSearchPreferences(db, { neuralSearchEnabled: false });
+    await sync.setup();
+    assert.deepEqual(client.semantic.map(entry => entry.body.neuralSearchMode), ["inactive", "inactive", "inactive"]);
+  });
+
+  it("names the attributes to vectorize, which is what activation without events requires", async () => {
+    const db = openDatabase(":memory:");
+    databases.push(db);
+    saveSearchPreferences(db, { neuralSearchEnabled: true });
+    const client = settingsClient();
+    const sync = new AlgoliaSync(db, { client: client as never });
+
+    await sync.setup();
+    const [todos, , messages] = client.semantic;
+    // Derived from searchableAttributes, with the modifiers unwrapped.
+    assert.deepEqual(todos.body.neuralExpression, { title: 1, notes: 1 });
+    assert.deepEqual(messages.body.neuralExpression, { content: 1 });
+    assert.match(String(todos.body.vectorModelId), /^external:\/\//);
+  });
+
+  it("falls back to keyword search when Algolia refuses activation", async () => {
     const db = openDatabase(":memory:");
     databases.push(db);
     saveSearchPreferences(db, { neuralSearchEnabled: true });
@@ -1184,11 +1243,11 @@ describe("NeuralSearch toggle", () => {
     const sync = new AlgoliaSync(db, { client: client as never });
 
     const result = await sync.setup();
-    assert.equal(result.configured, true, "an unentitled plan must not fail the whole setup");
+    assert.equal(result.configured, true, "a refused activation must not fail the whole setup");
     assert.equal(result.details?.search, "keyword");
-    assert.equal(result.details?.neuralSearch, "unavailable_for_plan");
-    assert.match(String(result.details?.warning), /not enabled for this application/);
-    assert.deepEqual(client.applied.map(entry => entry.mode), ["keywordSearch", "keywordSearch", "keywordSearch"]);
+    assert.equal(result.details?.neuralSearch, "unavailable");
+    assert.match(String(result.details?.warning), /SemanticSearch: no events/);
+    assert.equal(client.applied.length, 3, "the indices still get their keyword settings");
   });
 
   it("persists the toggle over REST and reapplies index settings", async () => {

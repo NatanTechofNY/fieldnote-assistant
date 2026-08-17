@@ -1371,10 +1371,10 @@ it("defaults to keyword search and reports what the NeuralSearch toggle achieved
   expect(await screen.findByText("Search mode set to NeuralSearch.")).toBeInTheDocument();
   expect(await screen.findByText("Algolia NeuralSearch")).toBeInTheDocument();
 
-  // An application without the add-on keeps running, on keyword search.
-  neuralSearchSetupDetails = { neuralSearch: "unavailable_for_plan" };
+  // An application Algolia refuses to activate keeps running, on keyword search.
+  neuralSearchSetupDetails = { neuralSearch: "unavailable" };
   await userEvent.click(screen.getByRole("checkbox", { name: /NeuralSearch/ }));
-  expect(await screen.findByText(/not entitled to NeuralSearch/)).toBeInTheDocument();
+  expect(await screen.findByText(/refused to activate NeuralSearch/)).toBeInTheDocument();
   neuralSearchSetupDetails = null;
   health.neuralSearch.enabled = false;
 });

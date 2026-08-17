@@ -106,7 +106,7 @@ export function UnderHoodSettings({ notify }: { notify: (message: string) => voi
 /**
  * NeuralSearch is a paid Algolia add-on. Applications without it fall back to
  * keyword search, which is why this defaults off and reports when Algolia
- * refuses the mode rather than leaving setup in a failed state.
+ * refuses activation rather than leaving setup in a failed state.
  */
 function NeuralSearchToggle({ enabled, notify }: { enabled: boolean; notify: (message: string) => void }) {
   const queryClient = useQueryClient();
@@ -115,8 +115,8 @@ function NeuralSearchToggle({ enabled, notify }: { enabled: boolean; notify: (me
     onSuccess: (result) => {
       const { neuralSearch, error } = result.setup.details ?? {};
       notify(
-        neuralSearch === "unavailable_for_plan"
-          ? "This Algolia application is not entitled to NeuralSearch; the indices stayed on keyword search."
+        neuralSearch === "unavailable"
+          ? "Algolia refused to activate NeuralSearch; the indices stayed on keyword search."
           : error
             ? `Saved, but Algolia could not be reached to apply it: ${error}`
             : `Search mode set to ${result.enabled ? "NeuralSearch" : "keyword search"}.`,
