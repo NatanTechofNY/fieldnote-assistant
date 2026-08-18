@@ -140,6 +140,18 @@ export function registerReminderRoutes({ app, db, search }: RouteContext): void 
       WHERE r.user_id=? AND r.status='pending' AND r.scheduled_for<=?
       ORDER BY r.scheduled_for LIMIT 100
     `).all(USER_ID, timestamp) as ReminderRow[];
-    return success(res, due.map(reminderJson));
+    /*
+     * A task whose reminder lands on its own due date holds two rows for the one
+     * moment, which the schedule wants and the toast does not: dismissing the
+     * first only summons its twin. One moment is one interruption.
+     */
+    const seen = new Set<string>();
+    const distinct = due.filter((reminder) => {
+      const key = `${reminder.todo_id}:${instant(reminder.scheduled_for)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return success(res, distinct.map(reminderJson));
   });
 }

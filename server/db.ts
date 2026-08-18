@@ -767,8 +767,20 @@ export function syncTodoReminders(db: Db, todo: TodoRow): void {
   `);
   for (const reminder of schedule) {
     const scheduledFor = instant(reminder.at);
-    if (seen.has(scheduledFor)) continue;
-    seen.add(scheduledFor);
+    /*
+     * Collapsing by timestamp alone silently ate the reminder whenever it
+     * landed on the due date, which is the normal shape of "remind me to take
+     * out the trash at 9pm": the agent writes the same instant to `due_at` and
+     * `reminder_at`, the `due` row is built first, and the `pre` row behind it
+     * looked like a duplicate. The worker never texts `due` rows, so the todo
+     * kept a schedule the UI could show while no message ever went out.
+     * Deduping per delivery bucket keeps that row out of the way of the one the
+     * user asked for, and still collapses a `pre` and an `escalation` that
+     * share an instant into the single text they are worth.
+     */
+    const bucket = `${reminder.kind === "due" ? "due" : "notify"}:${scheduledFor}`;
+    if (seen.has(bucket)) continue;
+    seen.add(bucket);
     insert.run(id("reminder"), USER_ID, todo.id, scheduledFor, reminder.kind, scheduledFor, timestamp, timestamp);
   }
 }

@@ -648,8 +648,11 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
   transition:background .12s ease;
 }
 .status-pick > button:hover { background:var(--surface-active); }
+/* Fixed rather than absolute: the table clips its own overflow to keep its
+   rounded corners, and a menu positioned inside it loses whatever hangs past a
+   row. The row supplies the coordinates. */
 .status-pick-menu {
-  position:absolute; left:0; top:calc(100% + 3px); z-index:20; min-width:150px; padding:4px;
+  position:fixed; z-index:20; min-width:150px; padding:4px;
   border:1px solid var(--border); border-radius:var(--radius); background:var(--surface-raised);
   box-shadow:var(--shadow-lg);
 }

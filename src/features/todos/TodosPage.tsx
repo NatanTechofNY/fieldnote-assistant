@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type DragEndEvent, DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { Archive, BellRing, CalendarDays, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus } from "lucide-react";
@@ -221,7 +221,10 @@ function TodoTable({ todos, children, onOpen, onStatus }: {
  */
 function StatusPicker({ todo, onStatus }: { todo: Todo; onStatus: (id: string, status: TodoStatus) => void }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [at, setAt] = useState<{ top: number; left: number } | null>(null);
   const wrapper = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
   const meta = statusMeta[todo.status];
   const Icon = meta.icon;
   useEffect(() => {
@@ -232,9 +235,40 @@ function StatusPicker({ todo, onStatus }: { todo: Todo; onStatus: (id: string, s
     document.addEventListener("mousedown", dismiss);
     return () => document.removeEventListener("mousedown", dismiss);
   }, [isOpen]);
+  // The menu is placed against the viewport, so a row near the bottom opens
+  // upward and a row near the right edge pulls itself back in rather than
+  // running off. Measured before the browser paints, so the menu never shows in
+  // the wrong place first. A layout with no layout — jsdom — reports zeroes and
+  // lands the menu in the corner, which no assertion depends on.
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    const place = () => {
+      const anchor = trigger.current?.getBoundingClientRect();
+      const size = menu.current?.getBoundingClientRect();
+      if (!anchor || !size) return;
+      const gap = 3, edge = 8;
+      const below = anchor.bottom + gap;
+      setAt({
+        top: below + size.height > window.innerHeight - edge
+          ? Math.max(edge, anchor.top - gap - size.height)
+          : below,
+        left: Math.max(edge, Math.min(anchor.left, window.innerWidth - edge - size.width)),
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    // Captured, since the box that scrolls under the menu is an ancestor and its
+    // own scroll event never reaches the window.
+    window.addEventListener("scroll", place, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, { capture: true });
+    };
+  }, [isOpen]);
   return <div className="status-pick" ref={wrapper}>
     <button
       type="button"
+      ref={trigger}
       aria-haspopup="menu"
       aria-expanded={isOpen}
       aria-label={`Status: ${meta.label}`}
@@ -243,7 +277,7 @@ function StatusPicker({ todo, onStatus }: { todo: Todo; onStatus: (id: string, s
     >
       <Icon size={13} style={{ color: meta.color }}/>{meta.label}
     </button>
-    {isOpen && <div className="status-pick-menu" role="menu">
+    {isOpen && <div className="status-pick-menu" role="menu" ref={menu} style={at ?? undefined}>
       {(Object.keys(statusMeta) as TodoStatus[]).map(status => {
         const option = statusMeta[status];
         const OptionIcon = option.icon;

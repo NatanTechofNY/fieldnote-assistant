@@ -119,7 +119,7 @@ Scheduled sends only happen when all four are true: SMS is enabled, a recipient 
 Two things worth knowing:
 
 - **Opt-out and quiet hours gate scheduled outbound only.** An inbound text is still enqueued, still runs the agent, and still gets a reply. If you need STOP to mean total silence, that check does not exist yet.
-- Reminders with `kind = 'due'` are never sent. They exist for scheduling and UI purposes; the worker only claims other kinds.
+- Reminders with `kind = 'due'` are never sent. They exist for scheduling and UI purposes; the worker only claims other kinds. A todo whose reminder lands on its own due date therefore keeps both rows — "remind me to take out the trash at 9pm" writes the same instant to `due_at` and `reminder_at`, and collapsing the pair would leave only the row the worker skips. `syncTodoReminders` dedupes per delivery bucket for that reason: a `pre` and an `escalation` sharing an instant still become one text, but a due date never stands in for the reminder itself. `GET /api/reminders/due`, which drives the in-app toast, collapses the pair at read time so one moment is one interruption.
 
 ## Idempotency
 

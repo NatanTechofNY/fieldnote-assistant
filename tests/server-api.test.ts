@@ -267,7 +267,7 @@ describe("frontend API contract", () => {
     );
   });
 
-  it("creates only one reminder when due and reminder times represent the same instant", async () => {
+  it("keeps the reminder as well as the due date when the two name the same instant", async () => {
     const { api } = fixture();
     const at = "2030-01-01T21:00:00.000Z";
     await api.post("/api/todos").send({
@@ -276,10 +276,22 @@ describe("frontend API contract", () => {
       reminder_at: "2030-01-01T21:00:00+00:00",
     }).expect(201);
     const reminders = (await api.get("/api/reminders").expect(200)).body.data;
-    assert.equal(reminders.length, 1);
-    assert.equal(reminders[0].scheduled_for, at);
-    const overview = (await api.get("/api/overview").expect(200)).body.data;
-    assert.equal(overview.upcoming_reminders.length, 1);
+    assert.deepEqual(
+      reminders.map((reminder: { kind: string; scheduled_for: string }) => [reminder.kind, reminder.scheduled_for]),
+      [["due", at], ["pre", at]],
+      "the deliverable row has to survive sharing a moment with the due date",
+    );
+  });
+
+  it("offers one local reminder per moment even when a due date shares it", async () => {
+    const { api } = fixture();
+    await api.post("/api/todos").send({
+      title: "One notification",
+      due_at: "2020-01-01T21:00:00.000Z",
+      reminder_at: "2020-01-01T21:00:00+00:00",
+    }).expect(201);
+    const due = (await api.get("/api/reminders/due").expect(200)).body.data;
+    assert.equal(due.length, 1, "dismissing the toast must not summon its twin");
   });
 
   it("keeps a task in Due today until midnight in the user's own timezone", async () => {
@@ -1147,9 +1159,11 @@ describe("NeuralSearch toggle", () => {
   function settingsClient(rejectNeural = false, live: Record<string, unknown> = {}) {
     const applied: Array<{ indexName: string; indexSettings: Record<string, unknown> }> = [];
     const semantic: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const waits: string[] = [];
     return {
       applied,
       semantic,
+      waits,
       async setSettings(input: { indexName: string; indexSettings: Record<string, unknown> }) {
         applied.push(input);
         return { taskID: applied.length };
@@ -1162,10 +1176,27 @@ describe("NeuralSearch toggle", () => {
         semantic.push(input);
         return {};
       },
-      async waitForTask() { return {}; },
+      async waitForTask({ indexName }: { indexName: string }) {
+        waits.push(indexName);
+        return {};
+      },
       async searchSingleIndex() { return { nbHits: 0, hits: [] }; },
     };
   }
+
+  it("returns without waiting for the settings tasks to publish", async () => {
+    const db = openDatabase(":memory:");
+    databases.push(db);
+    const client = settingsClient();
+    const sync = new AlgoliaSync(db, { client: client as never });
+
+    await sync.setup();
+    assert.equal(client.applied.length, 3);
+    // A settings task on a NeuralSearch index stays unpublished while the index
+    // re-vectorizes, so waiting makes this a multi-minute call and can time out
+    // on settings Algolia already accepted.
+    assert.deepEqual(client.waits, []);
+  });
 
   it("never writes mode with index settings, since the semantic endpoint owns it", async () => {
     const db = openDatabase(":memory:");
@@ -3701,6 +3732,52 @@ describe("worker scheduling", () => {
       [{ kind: "due", status: "pending" }, { kind: "pre", status: "sent" }],
       "the due row stays in the schedule so it can still be listed and moved",
     );
+  });
+
+  it("still texts a reminder that falls on the due date, in either spelling", async () => {
+    const { db, api } = schedulingFixture();
+    await api.post("/api/todos").send({
+      title: "Take out trash",
+      due_at: "2020-01-01T21:00:00-04:00",
+      reminder_at: "2020-01-02T01:00:00.000Z",
+    }).expect(201);
+    assert.deepEqual(
+      db.prepare("SELECT kind,scheduled_for FROM reminders ORDER BY kind").all(),
+      [
+        { kind: "due", scheduled_for: "2020-01-02T01:00:00.000Z" },
+        { kind: "pre", scheduled_for: "2020-01-02T01:00:00.000Z" },
+      ],
+      "a due row must not crowd out the reminder sharing its instant",
+    );
+    const sent: string[] = [];
+    await runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async (_db: Db, _to: string, body: string) => {
+        sent.push(body);
+        return { sid: `SM_${sent.length}`, status: "queued" };
+      },
+      runSmsAgent: async () => ({ text: "digest", threadId: "thread" }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    });
+    assert.deepEqual(sent, ["Reminder: Take out trash"]);
+  });
+
+  it("sends one text when a pre and an escalation share an instant", async () => {
+    const { db, api } = schedulingFixture();
+    await api.post("/api/todos").send({
+      title: "Ship the release",
+      reminder_at: "2020-01-02T01:00:00.000Z",
+      extra_reminders: ["2020-01-01T21:00:00-04:00"],
+    }).expect(201);
+    const sent: string[] = [];
+    await runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async (_db: Db, _to: string, body: string) => {
+        sent.push(body);
+        return { sid: `SM_${sent.length}`, status: "queued" };
+      },
+      runSmsAgent: async () => ({ text: "digest", threadId: "thread" }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    });
+    assert.deepEqual(sent, ["Reminder: Ship the release"], "one moment is worth one text");
   });
 
   it("holds reminders during quiet hours and releases them afterwards", async () => {

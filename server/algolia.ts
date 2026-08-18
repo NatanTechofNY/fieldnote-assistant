@@ -459,10 +459,13 @@ export class AlgoliaSync {
     if (!this.client) return { configured: false, details: { reason: "Missing server-side Algolia credentials" } };
     const requested = this.neuralSearchEnabled();
     const configured = await this.indexSettings();
-    const results = await Promise.all(configured.map(entry => this.client!.setSettings(entry)));
-    await Promise.all(results.map((result, index) =>
-      this.client!.waitForTask({ indexName: configured[index].indexName, taskID: result.taskID })
-    ));
+    // Deliberately not waiting for the settings tasks to publish. On an index
+    // with NeuralSearch active the task stays `notPublished` while the index
+    // re-vectorizes, measured at 269 seconds on six records, so waiting turned
+    // a routine button into a four-minute spinner. Worse, `waitForTask` gives
+    // up after 100 polls and reports failure for settings that were accepted
+    // immediately. Algolia applies them in order regardless.
+    await Promise.all(configured.map(entry => this.client!.setSettings(entry)));
     for (const entry of configured) this.userFilterConfigured.set(entry.indexName, true);
     // Retrieval mode is a separate endpoint from index settings, and a refusal
     // there has to leave a working keyword index rather than fail the setup.
