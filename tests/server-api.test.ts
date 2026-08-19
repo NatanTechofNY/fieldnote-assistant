@@ -1587,6 +1587,79 @@ describe("SMS, reminders, and channel agent execution", () => {
   });
 
   /*
+   * Agent Studio does not replay a conversation, so a turn flattened to its own
+   * prose left the model unable to tell a write it had made from one it had only
+   * promised. "I'll remind you at 1:45" read back exactly like a reminder that
+   * existed: on the user's "yes" the agent ran its duplicate preflight, took the
+   * hit on an unrelated todo as confirmation, called nothing, and reported a
+   * reminder that no row anywhere had ever held. Write results now come back with
+   * the window. Searches stay out, because the preflight is meant to run again and
+   * its hits were the thing being misread as proof.
+   */
+  it("replays past write results into the window and leaves reads out", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    type Part = Record<string, unknown>;
+    type Body = { messages: Array<{ role: string; parts: Part[] }> };
+    const searchPart: Part = {
+      type: "tool-algolia_search_index_devcon_assistant_todos",
+      tool_call_id: "call_search",
+      state: "output-available",
+      input: { queries: [{ query: "trash" }] },
+      output: { hits: [], nbHits: 0 },
+    };
+    let nextTitle = "Take out trash";
+    const requests: Body[] = [];
+    // Agent Studio hands the accumulated turn back on every pass, which is how the
+    // executed tool parts reach the stored assistant message in the first place.
+    const fetcher: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Body;
+      requests.push(body);
+      const last = body.messages.at(-1)!;
+      const parts: Part[] = last.role === "assistant"
+        ? [...last.parts, { type: "text", text: "Done." }]
+        : [searchPart, {
+          type: "tool-create_todo",
+          tool_call_id: `call_write_${requests.length}`,
+          state: "input-available",
+          input: {
+            title: nextTitle, notes: null, priority: null, category_id: null,
+            parent_id: null, due_at: null, reminder_at: null, extra_reminders: [], subtasks: [],
+          },
+        }];
+      return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+    };
+    const run = (text: string) =>
+      runSmsAgent(db, fakeSearch(db), "+17185551111", text, undefined, { fetcher });
+
+    await run("Remind me to throw the trash out tomorrow at 9pm");
+    requests.length = 0;
+    await run("Yes that’s fine");
+
+    const replayed = requests[0].messages.filter(message => message.role === "assistant");
+    assert.equal(replayed.length, 1, "the one finished turn is replayed once");
+    assert.deepEqual(
+      replayed[0].parts.map(part => part.type),
+      ["tool-create_todo", "text"],
+      "the write comes back with the window and the preflight search does not",
+    );
+    const output = replayed[0].parts[0].output as { success: boolean; data: { title: string } };
+    assert.equal(output.success, true);
+    assert.equal(output.data.title, "Take out trash", "the model can see which record it wrote");
+
+    // A write that failed is not evidence of anything either, so replaying it
+    // would only invert the mistake.
+    nextTitle = "";
+    await run("Remind me about the JIRA backlog at 1:45");
+    requests.length = 0;
+    await run("Anything else?");
+    const latest = requests[0].messages.filter(message => message.role === "assistant").at(-1)!;
+    assert.deepEqual(latest.parts.map(part => part.type), ["text"], "a rejected write is not replayed");
+  });
+
+  /*
    * Agent Studio titles a conversation from its first message and never retitles,
    * so one id pinned to a phone number for life collected three weeks of texts
    * into a single record named after whatever was said first. A conversation now

@@ -82,6 +82,8 @@ A thread is keyed on its `address` and lives forever; the `agent_conversation_id
 
 Note that the id buys observability, not memory: Agent Studio stores the transcript under it but does not replay it, which is why `threadHistory()` resends the window on every turn.
 
+What the window carries matters as much as how far back it reaches. Alongside each past turn's text it replays that turn's **successful write results** — the `create`, `update`, status, and `delete` tool parts rebuilt from the stored `metadata_json.parts` — and nothing else. A window of prose alone cannot distinguish a write the agent performed from one it merely announced, and an agent that promised "I'll remind you at 1:45," was told "yes," and then read its own sentence back as the record skipped the create and confirmed a reminder that never existed. Reads are deliberately excluded: repeating an Algolia duplicate preflight is cheap and expected, and a replayed preflight hit is precisely what got misread as proof that the write behind it had landed. A failed write is excluded for the same reason in reverse. This is separate from `get_conversation_context`, which still returns only `user` and `assistant` messages and never tool traces.
+
 ## Write path
 
 Same for a REST call from the UI and a tool call from the agent:
@@ -103,7 +105,7 @@ For exact current state the agent calls `get_agenda`, `list_todos`, `get_todo`, 
 
 For fuzzy discovery it calls `personal_data_search`, which Algolia executes against the three indices with a fixed `userId` filter and an allowlist of retrievable attributes. Before any update or delete it re-reads the record from SQLite by ID.
 
-Older conversation recall is a two-step: search the message index semantically, then call `get_conversation_context` with the returned `threadId` and `objectID` to read a bounded window of surrounding messages out of SQLite. Recent context does not need search — the SMS runner loads a 24-hour, 40-message window from SQLite on every turn.
+Older conversation recall is a two-step: search the message index semantically, then call `get_conversation_context` with the returned `threadId` and `objectID` to read a bounded window of surrounding messages out of SQLite. Recent context does not need search — the SMS runner loads a 24-hour, 40-message window from SQLite on every turn, carrying each past turn's successful write results with it as described under Conversation identity.
 
 When Algolia is unavailable, `GET /api/search` and `GET /api/conversations/search` fall back to a bounded SQLite `LIKE` scan, and the agent panel serves a small deterministic assistant instead of Agent Studio. Direct CRUD and agenda reads are unaffected.
 

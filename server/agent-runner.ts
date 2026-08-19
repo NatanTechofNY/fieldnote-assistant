@@ -100,6 +100,50 @@ function rotateStaleConversation(db: Db, thread: ChannelThreadRow): ChannelThrea
 }
 
 /**
+ * Tools that change SQLite, and so the only tools whose results are evidence of
+ * what a past turn did rather than what it looked at.
+ */
+const WRITE_TOOLS = new Set([
+  "create_todo", "update_todo", "set_todo_status", "delete_todo",
+  "create_memory", "update_memory", "delete_memory",
+  "create_reminder", "update_reminder", "delete_reminder",
+]);
+
+/**
+ * Rebuilds one stored assistant turn for the replayed window.
+ *
+ * A turn flattened to its own prose leaves the model unable to tell a write it
+ * performed from one it only promised. "I'll remind you at 1:45" read back
+ * identically to a reminder that existed, so the agent took its own sentence as
+ * the record, skipped the create on the user's "yes", and reported success for a
+ * reminder that was never written. Replaying the write results keeps the evidence
+ * beside the claim.
+ *
+ * Reads are deliberately left out. Repeating a search costs little and the
+ * duplicate preflight is supposed to run again, whereas a preflight hit replayed
+ * as history is what the agent misread as proof that the write behind it landed.
+ */
+function assistantParts(content: string, metadataJson: string): AgentPart[] {
+  const stored = ((): AgentPart[] => {
+    try {
+      return (JSON.parse(metadataJson) as { parts?: AgentPart[] }).parts ?? [];
+    } catch {
+      return [];
+    }
+  })();
+  const writes = stored.filter(part =>
+    typeof part.type === "string"
+    && part.type.startsWith("tool-")
+    && WRITE_TOOLS.has(part.type.slice(5))
+    && part.state === "output-available"
+    // Only a confirmed success is evidence. A failed write replayed without its
+    // error would be the same mistake in the opposite direction.
+    && (part.output as { success?: boolean } | null | undefined)?.success === true,
+  );
+  return [...writes, { type: "text", text: content }];
+}
+
+/**
  * The recent window a turn is answered against. An abandoned app-composed turn is
  * excluded: the row stays for the audit trail, but replaying an instruction that
  * is about to be composed again stacks a second copy of the ask in front of the
@@ -109,17 +153,24 @@ function rotateStaleConversation(db: Db, thread: ChannelThreadRow): ChannelThrea
 function threadHistory(db: Db, threadId: string): AgentMessage[] {
   const cutoff = new Date(Date.now() - CONTEXT_WINDOW_MS).toISOString();
   const rows = db.prepare(`
-    SELECT id,role,content FROM (
-      SELECT id,role,content,created_at,rowid FROM channel_messages
+    SELECT id,role,content,metadata_json FROM (
+      SELECT id,role,content,metadata_json,created_at,rowid FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant') AND created_at>=?
         AND status<>'failed'
       ORDER BY created_at DESC,rowid DESC LIMIT 40
     ) ORDER BY created_at,rowid
-  `).all(threadId, cutoff) as Array<{ id: string; role: "user" | "assistant"; content: string }>;
+  `).all(threadId, cutoff) as Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    metadata_json: string;
+  }>;
   return rows.map(row => ({
     id: row.id.startsWith("alg_msg_") ? row.id : `alg_msg_${row.id.replaceAll("-", "_")}`,
     role: row.role,
-    parts: [{ type: "text", text: row.content }],
+    parts: row.role === "assistant"
+      ? assistantParts(row.content, row.metadata_json)
+      : [{ type: "text", text: row.content }],
   }));
 }
 
