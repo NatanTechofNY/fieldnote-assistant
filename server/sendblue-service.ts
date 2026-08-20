@@ -246,21 +246,6 @@ export async function enableSendblueAcknowledgements(
 const TYPING_INDICATOR_MS = 120_000;
 
 /**
- * When to ask for the bubble, in milliseconds from the start of the turn.
- *
- * Sendblue delivers an indicator over the conversation's established route
- * mapping, and a thread that has been quiet for a few minutes behaves as though
- * it has none: measured against a live account, threads idle for 5m55s and 6m40s
- * got a read receipt and no bubble with every attempt accepted, while the next
- * message 48 seconds after a reply got one. So asking again is worth it for a turn
- * slow enough that the route may come back mid-flight, which is also the turn
- * where the wait is worth covering. The spacing costs a single call on the
- * four-second turns that are typical, because every attempt still outstanding is
- * dropped once the reply is on its way.
- */
-const TYPING_INDICATOR_ATTEMPTS_MS = [0, 8_000, 20_000];
-
-/**
  * What this endpoint answers with when it took the request. The reference
  * documents `SENT` and the worked example answers `QUEUED`, and either one means
  * the same thing here, so both are read as acceptance and anything else is
@@ -268,28 +253,25 @@ const TYPING_INDICATOR_ATTEMPTS_MS = [0, 8_000, 20_000];
  */
 const TYPING_INDICATOR_ACCEPTED = new Set(["QUEUED", "SENT"]);
 
-export type TypingIndicator = {
-  /** Stop asking, because the reply is being sent and will need the bubble gone. */
-  release: () => void;
-  /** Take the bubble down: the reply has landed, or none is coming. */
-  cancel: () => void;
-};
-
-const NO_TYPING_INDICATOR: TypingIndicator = { release: () => {}, cancel: () => {} };
+/** Takes the bubble down: the reply has landed, or none is coming. */
+export type StopTypingIndicator = () => void;
 
 /**
- * Raises the "…" bubble for the length of an agent turn. Nothing here is allowed
- * to fail the turn or be waited on, because the bubble is decoration; a refusal
- * only earns a line in the log, and the commonest one is a recipient who is on
- * SMS rather than iMessage.
+ * Raises the "…" bubble for the length of an agent turn, and asks exactly once.
+ *
+ * Asking again later was tried and measured as useless: on a thread idle for
+ * half an hour, a second ask eight seconds into the turn was accepted and still
+ * delivered nothing, because a cold conversation route does not come back until
+ * traffic crosses it and the reply is the first thing to do that. See the
+ * [docs](../docs/SMS_AND_EVENTS.md#the-first-message-after-an-idle-gap-gets-no-bubble).
+ *
+ * Nothing here is allowed to fail the turn or be waited on, because the bubble is
+ * decoration; a refusal only earns a line in the log, and the commonest one is a
+ * recipient who is on SMS rather than iMessage.
  */
-export function startSendblueTypingIndicator(
-  db: Db,
-  to: string,
-  attemptsMs: number[] = TYPING_INDICATOR_ATTEMPTS_MS,
-): TypingIndicator {
+export function startSendblueTypingIndicator(db: Db, to: string): StopTypingIndicator {
   const config = getSendblueSecret(db);
-  if (!config) return NO_TYPING_INDICATOR;
+  if (!config) return () => {};
   const post = async (state: "start" | "stop", legacy = false): Promise<void> => {
     try {
       const payload = await sendblueRequest(config, "/api/send-typing-indicator", {
@@ -331,25 +313,14 @@ export function startSendblueTypingIndicator(
       );
     }
   };
-  const attempts = attemptsMs.map(delay => {
-    const timer = setTimeout(() => void post("start"), delay);
-    timer.unref();
-    return timer;
-  });
-  // Dropping the outstanding attempts is what keeps a fast turn from raising a
-  // bubble the reply has already made a lie of.
-  const settle = () => attempts.forEach(clearTimeout);
+  void post("start");
   let stopped = false;
-  return {
-    release: settle,
-    cancel: () => {
-      settle();
-      // Taking the bubble down twice is a documented no-op, but there is no
-      // reason to spend the call.
-      if (stopped) return;
-      stopped = true;
-      void post("stop");
-    },
+  return () => {
+    // Taking the bubble down twice is a documented no-op, but there is no reason
+    // to spend the call.
+    if (stopped) return;
+    stopped = true;
+    void post("stop");
   };
 }
 

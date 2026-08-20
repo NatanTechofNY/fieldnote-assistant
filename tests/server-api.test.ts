@@ -2894,13 +2894,13 @@ describe("Sendblue provider", () => {
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
       startTypingIndicator: (_db: Db, to: string) => {
         typing.push(`start:${to}`);
-        return { release: () => typing.push("release"), cancel: () => typing.push("cancel") };
+        return () => typing.push("stop");
       },
     });
     assert.deepEqual(replies, [`${RECIPIENT}:Added milk.`]);
     assert.deepEqual(
       typing,
-      [`start:${RECIPIENT}`, "release", "cancel"],
+      [`start:${RECIPIENT}`, "stop"],
       "the bubble goes up before the turn and comes down once the reply is out",
     );
     assert.equal(
@@ -2909,40 +2909,29 @@ describe("Sendblue provider", () => {
     );
   });
 
-  it("asks for the typing indicator repeatedly so the first message after an idle gap gets a bubble", async () => {
+  it("asks for the bubble once and takes it down when the reply is out", async () => {
     const { db } = connectedFixture();
-    const indicator = () => json({ status: "SENT", number: RECIPIENT, error_message: null });
-    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-    const stub = stubSendblue({ "/api/send-typing-indicator": indicator });
+    const stub = stubSendblue({
+      "/api/send-typing-indicator": () => json({ status: "SENT", number: RECIPIENT, error_message: null }),
+    });
     try {
-      const typing = startSendblueTypingIndicator(db, RECIPIENT, [0, 5, 10]);
-      await sleep(30);
-      typing.cancel();
-      await sleep(5);
+      const stopTyping = startSendblueTypingIndicator(db, RECIPIENT);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      stopTyping();
+      stopTyping();
+      await new Promise(resolve => setTimeout(resolve, 20));
     } finally { stub.restore(); }
+
     const sent = stub.calls.filter(call => call.url.pathname === "/api/send-typing-indicator");
     assert.deepEqual(
       sent.map(call => call.body.state),
-      ["start", "start", "start", "stop"],
-      "Sendblue drops an indicator sent over a cold conversation route and reports it as sent anyway",
+      ["start", "stop"],
+      "asking twice was measured as useless on a cold route, and stopping twice is a wasted call",
     );
     assert.equal(sent[0].body.number, RECIPIENT);
     assert.equal(sent[0].body.from_number, LINE);
     assert.equal(sent[0].body.max_duration_ms, 120_000, "a slow agent turn outlasts the 60s default");
-
-    const released = stubSendblue({ "/api/send-typing-indicator": indicator });
-    try {
-      const typing = startSendblueTypingIndicator(db, RECIPIENT, [0, 30]);
-      await sleep(10);
-      typing.release();
-      await sleep(40);
-    } finally { released.restore(); }
-    assert.deepEqual(
-      released.calls.map(call => call.body.state),
-      ["start"],
-      "a turn that finishes first must not raise a bubble the reply has already answered",
-    );
+    assert.equal(sent[1].body.max_duration_ms, undefined, "a stop carries no duration");
   });
 
   it("reads a refused typing indicator out of the 200 it arrives in", async () => {
@@ -2953,7 +2942,7 @@ describe("Sendblue provider", () => {
       console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
       const stub = stubSendblue({ "/api/send-typing-indicator": answer });
       try {
-        startSendblueTypingIndicator(db, RECIPIENT, [0]);
+        startSendblueTypingIndicator(db, RECIPIENT);
         await new Promise(resolve => setTimeout(resolve, 20));
       } finally { stub.restore(); console.warn = warn; }
       return warnings.join("\n");
@@ -2999,7 +2988,7 @@ describe("Sendblue provider", () => {
         : json({ status: "QUEUED", status_code: 200, error_message: null, number: RECIPIENT }),
     });
     try {
-      startSendblueTypingIndicator(db, RECIPIENT, [0]);
+      startSendblueTypingIndicator(db, RECIPIENT);
       await new Promise(resolve => setTimeout(resolve, 30));
     } finally { stub.restore(); console.warn = warn; }
 
@@ -3025,7 +3014,7 @@ describe("Sendblue provider", () => {
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
       // This case is about the wake, and the real indicator would reach for the
       // network on the way through.
-      startTypingIndicator: () => ({ release: () => {}, cancel: () => {} }),
+      startTypingIndicator: () => () => {},
     });
     try {
       // The startup tick has to finish first, or it would answer the message on

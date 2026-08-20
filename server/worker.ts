@@ -10,7 +10,7 @@ import { localParts } from "./local-time.ts";
 import { sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
-import type { TypingIndicator } from "./sendblue-service.ts";
+import type { StopTypingIndicator } from "./sendblue-service.ts";
 import type { Db, DigestBriefRow, ReminderRow } from "./types.ts";
 
 type SearchWriter = Pick<AlgoliaSync, "flushSoon" | "flush">;
@@ -357,24 +357,21 @@ export async function runWorkerOnce(
   const showTyping = dependencies.startTypingIndicator || startTypingIndicator;
   for (const { source, read } of INBOUND_SOURCES) {
     for (const event of claimExternalEvents(db, source, 20)) {
-      let typing: TypingIndicator | null = null;
+      let stopTyping: StopTypingIndicator | null = null;
       try {
         const message = read(JSON.parse(event.payload_json) as Record<string, unknown>);
         if (!message.from || !message.body) throw new Error("Inbound SMS event is missing a sender or body");
-        // The bubble goes up before the turn starts and stays up for as long as
-        // it takes, so the wait for an answer is not silent.
-        typing = showTyping(db, message.from);
-        const response = await runAgent(db, search, message.from, message.body, message.messageId);
-        // Asking stops here and the bubble comes down once the reply is actually
-        // out, rather than in between, so the wait is covered end to end and no
+        // The bubble goes up before the turn starts and comes down once the reply
+        // is out rather than in between, so the wait is covered end to end and no
         // bubble outlives the answer.
-        typing.release();
+        stopTyping = showTyping(db, message.from);
+        const response = await runAgent(db, search, message.from, message.body, message.messageId);
         const sent = await send(db, message.from, response.text);
-        typing.cancel();
+        stopTyping();
         recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status);
         completeExternalEvent(db, event.id, "processed");
       } catch (error) {
-        typing?.cancel();
+        stopTyping?.();
         completeExternalEvent(
           db,
           event.id,
