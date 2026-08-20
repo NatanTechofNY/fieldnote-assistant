@@ -365,8 +365,12 @@ export async function runWorkerOnce(
         // it takes, so the wait for an answer is not silent.
         typing = showTyping(db, message.from);
         const response = await runAgent(db, search, message.from, message.body, message.messageId);
+        // Asking stops here and the bubble comes down once the reply is actually
+        // out, rather than in between, so the wait is covered end to end and no
+        // bubble outlives the answer.
         typing.release();
         const sent = await send(db, message.from, response.text);
+        typing.cancel();
         recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status);
         completeExternalEvent(db, event.id, "processed");
       } catch (error) {

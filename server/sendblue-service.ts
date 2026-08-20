@@ -73,6 +73,17 @@ async function readError(response: Response, fallback: string): Promise<string> 
   return `${fallback} (${response.status}): ${text.slice(0, 300)}`;
 }
 
+/** Carries the HTTP status, which is how a refusal worth retrying is recognised. */
+class SendblueRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "SendblueRequestError";
+    this.status = status;
+  }
+}
+
 async function sendblueRequest(
   config: SendblueSecretConfig,
   path: string,
@@ -83,7 +94,9 @@ async function sendblueRequest(
     headers: headers(config),
     ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
   });
-  if (!response.ok) throw new Error(await readError(response, "Sendblue request failed"));
+  if (!response.ok) {
+    throw new SendblueRequestError(await readError(response, "Sendblue request failed"), response.status);
+  }
   const text = await response.text();
   return text ? JSON.parse(text) as unknown : {};
 }
@@ -236,25 +249,29 @@ const TYPING_INDICATOR_MS = 120_000;
  * When to ask for the bubble, in milliseconds from the start of the turn.
  *
  * Sendblue delivers an indicator over the conversation's established route
- * mapping, and after a few minutes of quiet that mapping is cold: the indicator
- * is dropped and reported as `SENT` anyway. Measured against a live account, a
- * thread idle for six minutes got a read receipt and no bubble however many times
- * it was asked, and the next message 48 seconds later got one — so what warms the
- * route is traffic, and the first thing to travel is the reply itself. **The first
- * message after an idle gap therefore cannot get a bubble**, and no amount of
- * retrying inside the turn changes that.
- *
- * Asking again is still worth it for a turn slow enough that the route may come
- * back mid-flight, which is also the turn where the wait is worth covering. The
- * spacing costs a single call on the four-second turns that are typical, because
- * every attempt still outstanding is dropped when the reply is on its way.
+ * mapping, and a thread that has been quiet for a few minutes behaves as though
+ * it has none: measured against a live account, threads idle for 5m55s and 6m40s
+ * got a read receipt and no bubble with every attempt accepted, while the next
+ * message 48 seconds after a reply got one. So asking again is worth it for a turn
+ * slow enough that the route may come back mid-flight, which is also the turn
+ * where the wait is worth covering. The spacing costs a single call on the
+ * four-second turns that are typical, because every attempt still outstanding is
+ * dropped once the reply is on its way.
  */
 const TYPING_INDICATOR_ATTEMPTS_MS = [0, 8_000, 20_000];
 
+/**
+ * What this endpoint answers with when it took the request. The reference
+ * documents `SENT` and the worked example answers `QUEUED`, and either one means
+ * the same thing here, so both are read as acceptance and anything else is
+ * reported.
+ */
+const TYPING_INDICATOR_ACCEPTED = new Set(["QUEUED", "SENT"]);
+
 export type TypingIndicator = {
-  /** A reply is on its way, and the message itself takes the bubble down. */
+  /** Stop asking, because the reply is being sent and will need the bubble gone. */
   release: () => void;
-  /** No reply is coming, so the bubble is taken down explicitly. */
+  /** Take the bubble down: the reply has landed, or none is coming. */
   cancel: () => void;
 };
 
@@ -273,58 +290,65 @@ export function startSendblueTypingIndicator(
 ): TypingIndicator {
   const config = getSendblueSecret(db);
   if (!config) return NO_TYPING_INDICATOR;
-  const post = (state: "start" | "stop") => {
-    void sendblueRequest(config, "/api/send-typing-indicator", {
-      method: "POST",
-      body: {
-        number: to,
-        from_number: config.fromPhone,
-        state,
-        ...(state === "start" ? { max_duration_ms: TYPING_INDICATOR_MS } : {}),
-      },
-    }).then(payload => {
+  const post = async (state: "start" | "stop", legacy = false): Promise<void> => {
+    try {
+      const payload = await sendblueRequest(config, "/api/send-typing-indicator", {
+        method: "POST",
+        body: {
+          number: to,
+          from_number: config.fromPhone,
+          // A line on pre-typing-v2 firmware refuses these two, so the retry
+          // below drops back to the spelling every firmware accepts.
+          ...(legacy ? {} : { state, ...(state === "start" ? { max_duration_ms: TYPING_INDICATOR_MS } : {}) }),
+        },
+      });
       /*
-       * A refused indicator arrives as HTTP 200 with the reason in the body, the
-       * same shape `sendSendblueSms` has to inspect. Reading it is the only way
-       * to tell "the bubble is up" from "Sendblue would not show it", which is
-       * otherwise invisible from this side.
-       *
-       * Every answer that is not `SENT` is reported, so that saying nothing means
-       * Sendblue accepted the request and nothing else. A bubble that never
-       * appears against a silent log is then Sendblue's own drop rather than
-       * anything this app can see or fix.
+       * A refusal arrives as HTTP 200 with the reason in the body, the same shape
+       * `sendSendblueSms` has to inspect. Reading it is the only way to tell "the
+       * bubble is up" from "Sendblue would not show it", so anything that is not
+       * an acceptance is reported and saying nothing means it was accepted.
        */
       const result = payload as { status?: string; error_message?: string | null };
-      const status = (result.status || "").toUpperCase();
-      if (status === "SENT") return;
-      if (status === "ERROR") {
-        console.warn(`Sendblue refused a typing indicator (${state}): ${result.error_message || "no reason given"}`);
-        return;
-      }
+      if (TYPING_INDICATOR_ACCEPTED.has((result.status || "").toUpperCase())) return;
       console.warn(
-        `Sendblue answered a typing indicator (${state}) with neither SENT nor ERROR:`,
-        JSON.stringify(payload).slice(0, 200),
+        `Sendblue did not accept a typing indicator (${state}):`,
+        result.error_message || JSON.stringify(payload).slice(0, 200),
       );
-    }).catch(error => {
+    } catch (error) {
+      /*
+       * A line whose worker firmware predates typing-v2 refuses `state` and
+       * `max_duration_ms` with a 503 and names the firmware. A bare `start` is
+       * documented to work on every firmware, so the bubble is still worth asking
+       * for once — it lasts Sendblue's default 60 seconds rather than the 120 this
+       * would have chosen. There is no legacy spelling of `stop`, so that one is
+       * given up on instead, and its bubble expires on its own.
+       */
+      const outdated = error instanceof SendblueRequestError && error.status === 503;
+      if (outdated && state === "start" && !legacy) return post("start", true);
       console.warn(
         `Sendblue could not be asked for a typing indicator (${state}):`,
         error instanceof Error ? error.message : error,
       );
-    });
+    }
   };
   const attempts = attemptsMs.map(delay => {
-    const timer = setTimeout(() => post("start"), delay);
+    const timer = setTimeout(() => void post("start"), delay);
     timer.unref();
     return timer;
   });
   // Dropping the outstanding attempts is what keeps a fast turn from raising a
   // bubble the reply has already made a lie of.
   const settle = () => attempts.forEach(clearTimeout);
+  let stopped = false;
   return {
     release: settle,
     cancel: () => {
       settle();
-      post("stop");
+      // Taking the bubble down twice is a documented no-op, but there is no
+      // reason to spend the call.
+      if (stopped) return;
+      stopped = true;
+      void post("stop");
     },
   };
 }

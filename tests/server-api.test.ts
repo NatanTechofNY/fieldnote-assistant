@@ -2900,8 +2900,8 @@ describe("Sendblue provider", () => {
     assert.deepEqual(replies, [`${RECIPIENT}:Added milk.`]);
     assert.deepEqual(
       typing,
-      [`start:${RECIPIENT}`, "release"],
-      "the bubble goes up before the turn and is let go once the reply is on its way",
+      [`start:${RECIPIENT}`, "release", "cancel"],
+      "the bubble goes up before the turn and comes down once the reply is out",
     );
     assert.equal(
       (db.prepare("SELECT status FROM external_events WHERE external_id='SB_inbound'").get() as { status: string }).status,
@@ -2965,16 +2965,52 @@ describe("Sendblue provider", () => {
       "a refusal answers 200 like a send does, so it is invisible unless the body is read",
     );
     /*
-     * Saying nothing has to mean `SENT` and nothing else. Otherwise a missing
-     * bubble leaves no way to tell a request Sendblue dropped from one it never
-     * understood.
+     * Saying nothing has to mean the request was accepted and nothing else.
+     * Otherwise a missing bubble leaves no way to tell an indicator Sendblue
+     * dropped from a request it never understood.
      */
     assert.match(
       await capture(() => json({ ok: true })),
-      /neither SENT nor ERROR.*ok/s,
+      /did not accept.*ok/s,
       "an answer in an unknown shape is not evidence the bubble went up",
     );
+    // The reference documents `SENT` and the worked example answers `QUEUED`.
     assert.equal(await capture(() => json({ status: "SENT", error_message: null })), "");
+    assert.equal(
+      await capture(() => json({ status: "QUEUED", status_code: 200, error_message: null, number: RECIPIENT })),
+      "",
+    );
+  });
+
+  it("falls back to a bare start when the line's firmware refuses typing-v2", async () => {
+    const { db } = connectedFixture();
+    const warn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+    const stub = stubSendblue({
+      "/api/send-typing-indicator": call => call.body.max_duration_ms || call.body.state
+        ? json({
+          status: "ERROR",
+          status_code: 503,
+          error_message: 'Worker firmware iowa-1.9.80 does not yet support typing-v2 state="stop".'
+            + " Fleet update is rolling out; retry shortly.",
+          number: RECIPIENT,
+        }, 503)
+        : json({ status: "QUEUED", status_code: 200, error_message: null, number: RECIPIENT }),
+    });
+    try {
+      startSendblueTypingIndicator(db, RECIPIENT, [0]);
+      await new Promise(resolve => setTimeout(resolve, 30));
+    } finally { stub.restore(); console.warn = warn; }
+
+    const bodies = stub.calls.map(call => call.body);
+    assert.deepEqual(
+      bodies.map(body => [body.state, body.max_duration_ms]),
+      [["start", 120_000], [undefined, undefined]],
+      "a bare start is documented to work on every firmware, so the bubble is still worth one ask",
+    );
+    assert.equal(bodies[1].number, RECIPIENT);
+    assert.deepEqual(warnings, [], "a firmware too old for a duration is handled, not reported");
   });
 
   it("answers a new inbound message on the webhook instead of waiting out the poll interval", async () => {
