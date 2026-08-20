@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs in the workflows, so Dependabot is the only
+  # thing that moves them. Without this entry they stay frozen forever.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(actions)"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    groups:
+      # One PR per ecosystem rather than a dozen; a lockfile-only bump that passes
+      # CI is not worth reviewing individually.
+      production:
+        dependency-type: production
+        update-types: [minor, patch]
+      development:
+        dependency-type: development
+        update-types: [minor, patch]
