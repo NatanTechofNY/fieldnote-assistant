@@ -2909,22 +2909,22 @@ describe("Sendblue provider", () => {
     );
   });
 
-  it("sends the typing indicator twice so the first message after an idle gap gets a bubble", async () => {
+  it("asks for the typing indicator repeatedly so the first message after an idle gap gets a bubble", async () => {
     const { db } = connectedFixture();
     const indicator = () => json({ status: "SENT", number: RECIPIENT, error_message: null });
-    const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
     const stub = stubSendblue({ "/api/send-typing-indicator": indicator });
     try {
-      const typing = startSendblueTypingIndicator(db, RECIPIENT, 5);
-      await settle();
+      const typing = startSendblueTypingIndicator(db, RECIPIENT, [0, 5, 10]);
+      await sleep(30);
       typing.cancel();
-      await settle();
+      await sleep(5);
     } finally { stub.restore(); }
     const sent = stub.calls.filter(call => call.url.pathname === "/api/send-typing-indicator");
     assert.deepEqual(
       sent.map(call => call.body.state),
-      ["start", "start", "stop"],
+      ["start", "start", "start", "stop"],
       "Sendblue drops an indicator sent over a cold conversation route and reports it as sent anyway",
     );
     assert.equal(sent[0].body.number, RECIPIENT);
@@ -2933,14 +2933,48 @@ describe("Sendblue provider", () => {
 
     const released = stubSendblue({ "/api/send-typing-indicator": indicator });
     try {
-      startSendblueTypingIndicator(db, RECIPIENT, 5).release();
-      await settle();
+      const typing = startSendblueTypingIndicator(db, RECIPIENT, [0, 30]);
+      await sleep(10);
+      typing.release();
+      await sleep(40);
     } finally { released.restore(); }
     assert.deepEqual(
       released.calls.map(call => call.body.state),
       ["start"],
       "a turn that finishes first must not raise a bubble the reply has already answered",
     );
+  });
+
+  it("reads a refused typing indicator out of the 200 it arrives in", async () => {
+    const { db } = connectedFixture();
+    const warn = console.warn;
+    const capture = async (answer: () => Response) => {
+      const warnings: string[] = [];
+      console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+      const stub = stubSendblue({ "/api/send-typing-indicator": answer });
+      try {
+        startSendblueTypingIndicator(db, RECIPIENT, [0]);
+        await new Promise(resolve => setTimeout(resolve, 20));
+      } finally { stub.restore(); console.warn = warn; }
+      return warnings.join("\n");
+    };
+
+    assert.match(
+      await capture(() => json({ status: "ERROR", error_message: "No recent conversation" })),
+      /No recent conversation/,
+      "a refusal answers 200 like a send does, so it is invisible unless the body is read",
+    );
+    /*
+     * Saying nothing has to mean `SENT` and nothing else. Otherwise a missing
+     * bubble leaves no way to tell a request Sendblue dropped from one it never
+     * understood.
+     */
+    assert.match(
+      await capture(() => json({ ok: true })),
+      /neither SENT nor ERROR.*ok/s,
+      "an answer in an unknown shape is not evidence the bubble went up",
+    );
+    assert.equal(await capture(() => json({ status: "SENT", error_message: null })), "");
   });
 
   it("answers a new inbound message on the webhook instead of waiting out the poll interval", async () => {

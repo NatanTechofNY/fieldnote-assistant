@@ -233,14 +233,23 @@ export async function enableSendblueAcknowledgements(
 const TYPING_INDICATOR_MS = 120_000;
 
 /**
- * How long to wait before sending the indicator a second time. Sendblue delivers
- * one over the conversation's established route mapping, and after an idle gap
- * that mapping is cold: the indicator is dropped and still reported as `SENT`,
- * which is why the account-side setting alone leaves the first message of a
- * conversation with no bubble. The inbound message that started this turn is what
- * warms the route, so a second attempt a beat later is the one that lands.
+ * When to ask for the bubble, in milliseconds from the start of the turn.
+ *
+ * Sendblue delivers an indicator over the conversation's established route
+ * mapping, and after a few minutes of quiet that mapping is cold: the indicator
+ * is dropped and reported as `SENT` anyway. Measured against a live account, a
+ * thread idle for six minutes got a read receipt and no bubble however many times
+ * it was asked, and the next message 48 seconds later got one — so what warms the
+ * route is traffic, and the first thing to travel is the reply itself. **The first
+ * message after an idle gap therefore cannot get a bubble**, and no amount of
+ * retrying inside the turn changes that.
+ *
+ * Asking again is still worth it for a turn slow enough that the route may come
+ * back mid-flight, which is also the turn where the wait is worth covering. The
+ * spacing costs a single call on the four-second turns that are typical, because
+ * every attempt still outstanding is dropped when the reply is on its way.
  */
-const TYPING_INDICATOR_REPEAT_MS = 2_000;
+const TYPING_INDICATOR_ATTEMPTS_MS = [0, 8_000, 20_000];
 
 export type TypingIndicator = {
   /** A reply is on its way, and the message itself takes the bubble down. */
@@ -253,13 +262,14 @@ const NO_TYPING_INDICATOR: TypingIndicator = { release: () => {}, cancel: () => 
 
 /**
  * Raises the "…" bubble for the length of an agent turn. Nothing here is allowed
- * to fail the turn or be waited on: the indicator is decoration, and a dropped
- * one is reported as sent anyway, so there is no outcome worth acting on.
+ * to fail the turn or be waited on, because the bubble is decoration; a refusal
+ * only earns a line in the log, and the commonest one is a recipient who is on
+ * SMS rather than iMessage.
  */
 export function startSendblueTypingIndicator(
   db: Db,
   to: string,
-  repeatMs = TYPING_INDICATOR_REPEAT_MS,
+  attemptsMs: number[] = TYPING_INDICATOR_ATTEMPTS_MS,
 ): TypingIndicator {
   const config = getSendblueSecret(db);
   if (!config) return NO_TYPING_INDICATOR;
@@ -272,17 +282,48 @@ export function startSendblueTypingIndicator(
         state,
         ...(state === "start" ? { max_duration_ms: TYPING_INDICATOR_MS } : {}),
       },
-    }).catch(() => {});
+    }).then(payload => {
+      /*
+       * A refused indicator arrives as HTTP 200 with the reason in the body, the
+       * same shape `sendSendblueSms` has to inspect. Reading it is the only way
+       * to tell "the bubble is up" from "Sendblue would not show it", which is
+       * otherwise invisible from this side.
+       *
+       * Every answer that is not `SENT` is reported, so that saying nothing means
+       * Sendblue accepted the request and nothing else. A bubble that never
+       * appears against a silent log is then Sendblue's own drop rather than
+       * anything this app can see or fix.
+       */
+      const result = payload as { status?: string; error_message?: string | null };
+      const status = (result.status || "").toUpperCase();
+      if (status === "SENT") return;
+      if (status === "ERROR") {
+        console.warn(`Sendblue refused a typing indicator (${state}): ${result.error_message || "no reason given"}`);
+        return;
+      }
+      console.warn(
+        `Sendblue answered a typing indicator (${state}) with neither SENT nor ERROR:`,
+        JSON.stringify(payload).slice(0, 200),
+      );
+    }).catch(error => {
+      console.warn(
+        `Sendblue could not be asked for a typing indicator (${state}):`,
+        error instanceof Error ? error.message : error,
+      );
+    });
   };
-  post("start");
-  const repeat = setTimeout(() => post("start"), repeatMs);
-  repeat.unref();
+  const attempts = attemptsMs.map(delay => {
+    const timer = setTimeout(() => post("start"), delay);
+    timer.unref();
+    return timer;
+  });
+  // Dropping the outstanding attempts is what keeps a fast turn from raising a
+  // bubble the reply has already made a lie of.
+  const settle = () => attempts.forEach(clearTimeout);
   return {
-    // Clearing the repeat is what keeps a fast turn from raising a bubble the
-    // reply has already made a lie of.
-    release: () => clearTimeout(repeat),
+    release: settle,
     cancel: () => {
-      clearTimeout(repeat);
+      settle();
       post("stop");
     },
   };
