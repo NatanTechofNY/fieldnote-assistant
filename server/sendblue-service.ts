@@ -187,9 +187,11 @@ export type SendblueAcknowledgements = {
 
 /**
  * Asks Sendblue to send the "…" bubble and the read receipt itself on every
- * inbound iMessage. Doing it account-side rather than from the inbound route is
- * what makes it useful here: an indicator fired by this process carries a
- * 60-second lifetime, which a slow agent turn can still outlast.
+ * inbound iMessage, which acknowledges the messages this app never answers —
+ * a `STOP` keyword, or a text from a number that is not the configured
+ * recipient — as well as the ones it does. An answered message gets a second,
+ * longer-lived indicator from `startSendblueTypingIndicator`, because the
+ * account-side one lasts 60 seconds and a slow agent turn outlasts it.
  *
  * Neither is required to deliver anything, and read receipts have to be enabled
  * by Sendblue for some accounts, so a refusal is recorded and reported rather
@@ -220,6 +222,69 @@ export async function enableSendblueAcknowledgements(
     typingIndicator: typing.enabled,
     markRead: markRead.enabled,
     notes: [typing.note, markRead.note].filter((note): note is string => Boolean(note)),
+  };
+}
+
+/**
+ * How long the "…" bubble stays up on its own. Long enough to cover a slow agent
+ * turn, and short enough that a crash mid-turn cannot leave a bubble on someone's
+ * phone for the five minutes the endpoint allows.
+ */
+const TYPING_INDICATOR_MS = 120_000;
+
+/**
+ * How long to wait before sending the indicator a second time. Sendblue delivers
+ * one over the conversation's established route mapping, and after an idle gap
+ * that mapping is cold: the indicator is dropped and still reported as `SENT`,
+ * which is why the account-side setting alone leaves the first message of a
+ * conversation with no bubble. The inbound message that started this turn is what
+ * warms the route, so a second attempt a beat later is the one that lands.
+ */
+const TYPING_INDICATOR_REPEAT_MS = 2_000;
+
+export type TypingIndicator = {
+  /** A reply is on its way, and the message itself takes the bubble down. */
+  release: () => void;
+  /** No reply is coming, so the bubble is taken down explicitly. */
+  cancel: () => void;
+};
+
+const NO_TYPING_INDICATOR: TypingIndicator = { release: () => {}, cancel: () => {} };
+
+/**
+ * Raises the "…" bubble for the length of an agent turn. Nothing here is allowed
+ * to fail the turn or be waited on: the indicator is decoration, and a dropped
+ * one is reported as sent anyway, so there is no outcome worth acting on.
+ */
+export function startSendblueTypingIndicator(
+  db: Db,
+  to: string,
+  repeatMs = TYPING_INDICATOR_REPEAT_MS,
+): TypingIndicator {
+  const config = getSendblueSecret(db);
+  if (!config) return NO_TYPING_INDICATOR;
+  const post = (state: "start" | "stop") => {
+    void sendblueRequest(config, "/api/send-typing-indicator", {
+      method: "POST",
+      body: {
+        number: to,
+        from_number: config.fromPhone,
+        state,
+        ...(state === "start" ? { max_duration_ms: TYPING_INDICATOR_MS } : {}),
+      },
+    }).catch(() => {});
+  };
+  post("start");
+  const repeat = setTimeout(() => post("start"), repeatMs);
+  repeat.unref();
+  return {
+    // Clearing the repeat is what keeps a fast turn from raising a bubble the
+    // reply has already made a lie of.
+    release: () => clearTimeout(repeat),
+    cancel: () => {
+      clearTimeout(repeat);
+      post("stop");
+    },
   };
 }
 

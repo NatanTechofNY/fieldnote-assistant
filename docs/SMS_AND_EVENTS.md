@@ -43,13 +43,17 @@ Everything downstream of the send is provider-agnostic: quiet hours, opt-out, id
 | Inbound webhook | Per number, set at connect time | Account-wide, registered at connect time |
 | Webhook authenticity | `X-Twilio-Signature` HMAC | A secret this app mints and Sendblue echoes back |
 | Delivery receipts | `statusCallback` per message | `status_callback` per message |
-| Inbound acknowledgement | None available | Typing bubble and read receipt, sent by Sendblue |
+| Inbound acknowledgement | None available | Typing bubble and read receipt |
 
 ### Acknowledging an inbound message
 
-The reply to an inbound text still takes as long as the agent takes, so there is a gap with nothing to show the sender their message landed. Connecting Sendblue turns on two account settings — `auto-typing-indicator` and `auto-mark-read` — which make Sendblue itself show the "…" bubble and mark the message read the moment it arrives on a 1:1 iMessage.
+The reply to an inbound text still takes as long as the agent takes, so there is a gap with nothing to show the sender their message landed. Two things fill it, both iMessage-only and both no-ops for a recipient on SMS.
 
-This is done account-side rather than from the inbound route on purpose: an indicator fired by this process would carry a 60-second default lifetime, and before the webhook woke the worker it would often expire before the tick that answers it. Neither setting affects delivery, and read receipts have to be enabled per account by Sendblue, so a refusal is recorded on the integration row and reported in the connect toast rather than failing the connection. Both are iMessage-only and are no-ops for a recipient on SMS. Saving the Sendblue card again retries them.
+Connecting Sendblue turns on two account settings — `auto-typing-indicator` and `auto-mark-read` — which make Sendblue itself show the "…" bubble and mark the message read the moment it arrives on a 1:1 iMessage. That covers every inbound message, including the ones this app never answers: a `STOP` keyword, or a text from a number that is not the configured recipient. Neither setting affects delivery, and read receipts have to be enabled per account by Sendblue, so a refusal is recorded on the integration row and reported in the connect toast rather than failing the connection. Saving the Sendblue card again retries them.
+
+For a message that does get an answer, the worker also sends an indicator explicitly through `/api/send-typing-indicator` before it starts the agent turn, because the account setting is not enough on its own. The account-side indicator lasts 60 seconds and a slow turn outlasts it, so the explicit one asks for 120. More importantly, Sendblue delivers an indicator over the conversation's established route mapping, and after an idle gap that mapping is cold: the indicator is dropped and reported as `SENT` anyway, which is why the first message of the day arrived with a read receipt and no bubble. The inbound message is what warms the route, so the indicator is sent a second time two seconds later, and that attempt lands.
+
+The bubble is released as soon as the reply is on its way, since the message itself takes it down, and the pending second attempt is cancelled with it — otherwise a turn that finished in under two seconds would raise a bubble the reply had already answered. A turn that fails takes the bubble down explicitly with `state: "stop"`. None of it can fail a turn: a dropped indicator is reported as sent, so there is no outcome worth acting on, and the calls are never waited for.
 
 ## Hosted deployment
 
@@ -102,7 +106,7 @@ The webhook does almost nothing itself, which is deliberate — the provider get
 2. If `recipient_phone` is configured, the sender must match it. **If no recipient phone has been set yet, any sender is accepted** — set one before pointing a real number at a public instance.
 3. STOP / UNSUBSCRIBE / CANCEL / END / QUIT set the opt-out flag; START / UNSTOP clear it. Neither is enqueued.
 4. Anything else is enqueued into `external_events` keyed on the provider's message ID, which is what makes retries safe. A Sendblue payload with `is_outbound: true` is acknowledged and dropped, so an echo of our own reply is never answered as if the user had written it.
-5. Enqueuing wakes the worker, which claims the event on the spot — or on the next tick if the process was busy or restarting — and [`server/agent-runner.ts`](../server/agent-runner.ts) calls the Agent Studio completions API with a 24-hour, 40-message context window read from SQLite, executes any requested tools **in-process** via `executeAgentTool()` (max 8 iterations), sends the reply, and records the outbound provider message.
+5. Enqueuing wakes the worker, which claims the event on the spot — or on the next tick if the process was busy or restarting — raises the typing bubble described [above](#acknowledging-an-inbound-message), and then [`server/agent-runner.ts`](../server/agent-runner.ts) calls the Agent Studio completions API with a 24-hour, 40-message context window read from SQLite, executes any requested tools **in-process** via `executeAgentTool()` (max 8 iterations), sends the reply, and records the outbound provider message.
 
 No browser is involved anywhere in that path.
 

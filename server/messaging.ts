@@ -4,7 +4,7 @@ import {
   getTwilioSecret,
   type SmsProvider,
 } from "./integrations.ts";
-import { sendSendblueSms } from "./sendblue-service.ts";
+import { sendSendblueSms, startSendblueTypingIndicator, type TypingIndicator } from "./sendblue-service.ts";
 import { sendTwilioSms } from "./twilio-service.ts";
 import type { Db } from "./types.ts";
 
@@ -35,4 +35,19 @@ const senders: Record<SmsProvider, SmsSender> = {
  */
 export async function sendSms(db: Db, to: string, body: string): Promise<{ sid: string; status: string }> {
   return senders[activeSmsProvider(db)](db, to, body);
+}
+
+const typingIndicators: Record<SmsProvider, (db: Db, to: string) => TypingIndicator> = {
+  // Twilio carries SMS, which has no bubble to raise.
+  twilio: () => ({ release: () => {}, cancel: () => {} }),
+  sendblue: startSendblueTypingIndicator,
+};
+
+/**
+ * Shows the sender that their message landed and an answer is being written, for
+ * the whole time the agent takes. Read on the active provider like `sendSms`, so
+ * the acknowledgement and the reply always travel the same way.
+ */
+export function startTypingIndicator(db: Db, to: string): TypingIndicator {
+  return typingIndicators[activeSmsProvider(db)](db, to);
 }

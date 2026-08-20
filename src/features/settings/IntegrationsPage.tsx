@@ -299,7 +299,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               ? "Sendblue shows a typing bubble and marks your message read the moment it arrives, so you get an acknowledgement before the reply is composed."
               : data.sendblue.autoTypingIndicator
                 ? "Typing bubbles are on. Read receipts are off — Sendblue enables those per account, so email support@sendblue.com to ask for them, then save again."
-                : "Typing bubbles and read receipts are off, so nothing acknowledges an inbound message until the reply lands. Save again to retry."}
+                : "Sendblue is not acknowledging arrivals itself. Messages the assistant answers still get a typing bubble; anything it does not answer waits with no acknowledgement. Save again to retry."}
           </p>}
           <p className="integration-copy">On the free shared line, a contact has to text your Sendblue number once before you can message them. Add them with <code>sendblue add-contact +1…</code> first.</p>
           {sendblueConnect.error && <div className="inline-error"><TriangleAlert size={14}/><span>{sendblueConnect.error.message}</span></div>}

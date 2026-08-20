@@ -26,6 +26,7 @@ import {
 } from "../server/integrations.ts";
 import { enqueueExternalEvent } from "../server/event-ingestion.ts";
 import { toolInput } from "../server/schemas.ts";
+import { startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { runWorkerOnce, startWorker } from "../server/worker.ts";
 import type { Db } from "../server/types.ts";
 
@@ -2883,6 +2884,7 @@ describe("Sendblue provider", () => {
     );
 
     const replies: string[] = [];
+    const typing: string[] = [];
     await runWorkerOnce(db, fakeSearch(db), {
       sendSms: async (_db: Db, to: string, body: string) => {
         replies.push(`${to}:${body}`);
@@ -2890,11 +2892,54 @@ describe("Sendblue provider", () => {
       },
       runSmsAgent: async () => ({ text: "Added milk.", threadId: "thread_sb" }),
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: (_db: Db, to: string) => {
+        typing.push(`start:${to}`);
+        return { release: () => typing.push("release"), cancel: () => typing.push("cancel") };
+      },
     });
     assert.deepEqual(replies, [`${RECIPIENT}:Added milk.`]);
+    assert.deepEqual(
+      typing,
+      [`start:${RECIPIENT}`, "release"],
+      "the bubble goes up before the turn and is let go once the reply is on its way",
+    );
     assert.equal(
       (db.prepare("SELECT status FROM external_events WHERE external_id='SB_inbound'").get() as { status: string }).status,
       "processed",
+    );
+  });
+
+  it("sends the typing indicator twice so the first message after an idle gap gets a bubble", async () => {
+    const { db } = connectedFixture();
+    const indicator = () => json({ status: "SENT", number: RECIPIENT, error_message: null });
+    const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+
+    const stub = stubSendblue({ "/api/send-typing-indicator": indicator });
+    try {
+      const typing = startSendblueTypingIndicator(db, RECIPIENT, 5);
+      await settle();
+      typing.cancel();
+      await settle();
+    } finally { stub.restore(); }
+    const sent = stub.calls.filter(call => call.url.pathname === "/api/send-typing-indicator");
+    assert.deepEqual(
+      sent.map(call => call.body.state),
+      ["start", "start", "stop"],
+      "Sendblue drops an indicator sent over a cold conversation route and reports it as sent anyway",
+    );
+    assert.equal(sent[0].body.number, RECIPIENT);
+    assert.equal(sent[0].body.from_number, LINE);
+    assert.equal(sent[0].body.max_duration_ms, 120_000, "a slow agent turn outlasts the 60s default");
+
+    const released = stubSendblue({ "/api/send-typing-indicator": indicator });
+    try {
+      startSendblueTypingIndicator(db, RECIPIENT, 5).release();
+      await settle();
+    } finally { released.restore(); }
+    assert.deepEqual(
+      released.calls.map(call => call.body.state),
+      ["start"],
+      "a turn that finishes first must not raise a bubble the reply has already answered",
     );
   });
 
@@ -2908,6 +2953,9 @@ describe("Sendblue provider", () => {
       },
       runSmsAgent: async () => ({ text: "On it.", threadId: "thread_wake" }),
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      // This case is about the wake, and the real indicator would reach for the
+      // network on the way through.
+      startTypingIndicator: () => ({ release: () => {}, cancel: () => {} }),
     });
     try {
       // The startup tick has to finish first, or it would answer the message on

@@ -670,7 +670,7 @@
           "slot": {
             "type": "string",
             "enum": ["primary", "extra"],
-            "description": "Whether to use reminder_at or append to extra_reminders"
+            "description": "primary overwrites the todo's single reminder_at, discarding any reminder already there; extra appends an additional reminder and leaves existing ones alone"
           }
         },
         "required": ["todo_id", "reminder_at", "slot"],
