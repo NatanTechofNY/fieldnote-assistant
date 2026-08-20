@@ -23,7 +23,7 @@
     "type": "function",
     "function": {
       "name": "get_reflection_evidence",
-      "description": "Returns canonical memories and completed todos for a grounded personal reflection over a daily, weekly, monthly, or custom date range.",
+      "description": "Returns evidence for a daily, weekly, monthly, or custom range. todo_candidates and memory_candidates are all that got done or captured in it; todos and memories are the selected subset, often empty.",
       "strict": true,
       "parameters": {
         "type": "object",
@@ -594,7 +594,7 @@
     "type": "function",
     "function": {
       "name": "get_review_evidence",
-      "description": "Returns all Work memories/notes and completed Work todos for one Algolia-style fiscal quarter, plus candidates that can be included. Q1 begins February 1.",
+      "description": "Returns fiscal-quarter evidence, where Q1 begins February 1. todos and memories are the Work-scoped set a draft may quote; todo_candidates and memory_candidates cover every life area.",
       "strict": true,
       "parameters": {
         "type": "object",

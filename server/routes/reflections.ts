@@ -119,7 +119,8 @@ export function registerReflectionRoutes({ app, db, search, draftWithAgent }: Ro
       `Draft a personal reflection for ${period.label}.`,
       `Call get_reflection_evidence with preset=${period.preset}, start_date=${period.startDate}, end_date=${period.endDate}, timezone=${period.timezone},`,
       `life_area_ids=${JSON.stringify(filters.lifeAreaIds)}, category_ids=${JSON.stringify(filters.categoryIds)}, sources=${JSON.stringify(filters.sources)}.`,
-      "Use only returned evidence. Organize concise grounded notes under Highlights, Progress, Lessons, and Next steps.",
+      "Use only the rows in the returned todos and memories arrays, which are the ones I selected. Ignore todo_candidates and memory_candidates: those cover the whole range, including what I chose to leave out.",
+      "Organize concise grounded notes under Highlights, Progress, Lessons, and Next steps.",
       "Include the supporting memory or todo title in parentheses when available. Never invent outcomes.",
       'Return only valid JSON shaped exactly as {"content":"Markdown reflection","tags":["up to five concise tags"],"mood_score":1,"mood_label":"concise mood"}.',
       "Suggest tags and an overall mood from the evidence. mood_score must be an integer from 1 to 5, or null with mood_label null when the evidence does not support a mood.",
@@ -233,7 +234,8 @@ export function registerReflectionRoutes({ app, db, search, draftWithAgent }: Ro
       exclusions.exclude_memory_ids.length || exclusions.exclude_todo_ids.length
         ? `Exclude these evidence IDs from the draft: ${[...exclusions.exclude_memory_ids, ...exclusions.exclude_todo_ids].join(", ")}.`
         : "",
-      "Use only returned evidence. Group concise bullets under Impact, Execution, Collaboration & leadership, and Growth.",
+      "Use only the rows in the returned todos and memories arrays, which are already scoped to Work. Ignore todo_candidates and memory_candidates: those span every life area.",
+      "Group concise bullets under Impact, Execution, Collaboration & leadership, and Growth.",
       "Include the supporting memory or todo title in parentheses after each bullet. Do not invent metrics or outcomes.",
     ].join(" ");
     const text = await draftWithAgent(prompt, `performance-review:${evidence.range.key}`);

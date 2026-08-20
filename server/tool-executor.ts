@@ -150,6 +150,34 @@ export function getReflectionEvidence(
   };
 }
 
+/**
+ * How many candidate rows the agent payload carries per source. A day or a week
+ * fits well inside this; a month of journaling would otherwise crowd out the
+ * turn, so `candidate_totals` reports the true count and a truncated list can
+ * still be described honestly.
+ */
+const AGENT_CANDIDATE_LIMIT = 25;
+
+/**
+ * Evidence as the agent sees it. `memories` and `todos` stay the curated set a
+ * saved draft may quote, but the candidate lists have to survive into the
+ * payload: they are the difference between "nothing was selected" and "nothing
+ * happened", and an end-of-day check-in that cannot tell those apart reports an
+ * empty day to someone who just closed something out.
+ */
+function agentEvidence<T extends {
+  memory_candidates: unknown[];
+  todo_candidates: unknown[];
+}>(evidence: T) {
+  const { memory_candidates: memories, todo_candidates: todos, ...rest } = evidence;
+  return {
+    ...rest,
+    memory_candidates: memories.slice(0, AGENT_CANDIDATE_LIMIT),
+    todo_candidates: todos.slice(0, AGENT_CANDIDATE_LIMIT),
+    candidate_totals: { memories: memories.length, todos: todos.length },
+  };
+}
+
 export async function executeAgentTool(
   db: Db,
   search: SearchWriter,
@@ -427,9 +455,7 @@ export async function executeAgentTool(
     const year = input.year as number;
     const quarter = input.quarter as FiscalQuarter;
     const timezone = input.timezone as string;
-    const { memory_candidates: _memoryCandidates, todo_candidates: _todoCandidates, ...includedEvidence } =
-      getReviewEvidence(db, year, quarter, timezone);
-    return includedEvidence;
+    return agentEvidence(getReviewEvidence(db, year, quarter, timezone));
   }
   if (name === "get_reflection_evidence") {
     const preset = input.preset as ReflectionPreset;
@@ -439,13 +465,11 @@ export async function executeAgentTool(
       startDate: typeof input.start_date === "string" ? input.start_date : undefined,
       endDate: typeof input.end_date === "string" ? input.end_date : undefined,
     });
-    const { memory_candidates: _memoryCandidates, todo_candidates: _todoCandidates, ...includedEvidence } =
-      getReflectionEvidence(db, period, {
-        lifeAreaIds: strings("life_area_ids"),
-        categoryIds: strings("category_ids"),
-        sources: strings("sources") as Array<"memories" | "todos">,
-      });
-    return includedEvidence;
+    return agentEvidence(getReflectionEvidence(db, period, {
+      lifeAreaIds: strings("life_area_ids"),
+      categoryIds: strings("category_ids"),
+      sources: strings("sources") as Array<"memories" | "todos">,
+    }));
   }
   if (name === "create_reminder") {
     const todo = getTodo(db, input.todo_id as string);

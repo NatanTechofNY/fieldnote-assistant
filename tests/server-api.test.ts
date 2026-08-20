@@ -1998,7 +1998,8 @@ describe("agent tools over /api/agent/tools/:name", () => {
 
     const review = (await call("get_review_evidence", { year: 2030, quarter: 1, timezone: "UTC" })).data;
     assert.ok(review.range, "review evidence is scoped to a fiscal quarter");
-    assert.equal(review.memory_candidates, undefined, "candidate lists stay out of the agent payload");
+    assert.ok(Array.isArray(review.memory_candidates), "the agent payload carries the candidate lists");
+    assert.ok(review.candidate_totals, "and the true counts behind a truncated list");
     const reflection = (await call("get_reflection_evidence", {
       preset: "month",
       timezone: "UTC",
@@ -2032,6 +2033,41 @@ describe("agent tools over /api/agent/tools/:name", () => {
       ...remote,
     ]);
     assert.deepEqual(declared.filter(name => !exercised.has(name)), [], "every declared tool must be covered");
+  });
+
+  /**
+   * `memories` and `todos` hold only what the user ticked on the Reflections
+   * page, so on an account that has never curated a reflection by hand they are
+   * empty no matter how much got done. The tool used to strip the candidate
+   * lists as well, which left the evening check-in with an all-empty payload and
+   * no way to tell "nothing was selected" from "nothing happened": it told a
+   * user who had closed a task out that hours earlier that their day was empty.
+   */
+  it("reports a todo completed today even though nothing is selected for the reflection", async () => {
+    const { api, db } = fixture();
+    const call = async (name: string, input: object = {}, expected = 200) =>
+      (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
+
+    const todo = (await call("create_todo", { title: "Review the backlog cleanup" })).data;
+    assert.ok((await call("set_todo_status", { id: todo.id, status: "done" })).data.completed_at);
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM reflection_selections").get() as { count: number }).count,
+      0,
+      "the failure only shows up when the user has never selected evidence by hand",
+    );
+
+    const evidence = (await call("get_reflection_evidence", {
+      preset: "today",
+      timezone: "UTC",
+      sources: ["memories", "todos"],
+    })).data;
+    assert.deepEqual(evidence.todos, [], "selection stays a user action, so the curated list is still empty");
+    assert.deepEqual(
+      evidence.todo_candidates.map((row: { id: string }) => row.id),
+      [todo.id],
+      "but what actually got finished today has to reach the agent",
+    );
+    assert.equal(evidence.candidate_totals.todos, 1);
   });
 
   /**
