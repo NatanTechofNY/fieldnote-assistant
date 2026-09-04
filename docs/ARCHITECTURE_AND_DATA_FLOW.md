@@ -49,14 +49,15 @@ There is no separate indexer, cron service, or queue broker.
 | `ALGOLIA_TODO_INDEX` | `devcon_assistant_todos` | todos and subtasks |
 | `ALGOLIA_MEMORY_INDEX` | `devcon_assistant_memories` | memories |
 | `ALGOLIA_MESSAGE_INDEX` | `devcon_assistant_messages` | web and SMS channel messages |
+| `ALGOLIA_PRODUCT_INDEX` | `devcon_assistant_products` | the Walgreens-styled demo catalog (`store_products`) |
 
-Settings for all three are version-controlled in [`agent-studio/indices/`](../agent-studio/indices/) and applied by `npm run setup:algolia` or `POST /api/admin/algolia/setup`.
+Settings for all four are version-controlled in [`agent-studio/indices/`](../agent-studio/indices/) and applied by `npm run setup:algolia` or `POST /api/admin/algolia/setup`.
 
-The hosted Agent Studio search tool `personal_data_search` reads all three ([`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json)).
+The hosted Agent Studio search tool `personal_data_search` reads the first three ([`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json)). The products index is read by the `search_store_products` client tool, which falls back to an in-process ranking over the SQLite rows when Algolia is not configured.
 
 ## What is indexed and what is not
 
-**Indexed:** todos, memories, and channel messages. Messages are filtered to `user` and `assistant` roles, and turns marked `metadata.internal` (digest scratch work) are excluded.
+**Indexed:** todos, memories, channel messages, and the store catalog. Messages are filtered to `user` and `assistant` roles, and turns marked `metadata.internal` (digest scratch work) are excluded. The catalog is reference data from a checked-in file, [`server/catalog/walgreens-products.json`](../server/catalog/walgreens-products.json), loaded into `store_products` by `loadStoreCatalog()` at server start and before each CLI command; only rows whose file entry changed queue an index job, so a routine boot leaves the outbox alone.
 
 **Not indexed, fetched live on every call:** all Jira and Confluence data. The eight Atlassian tools hit the Atlassian REST API through [`server/atlassian-service.ts`](../server/atlassian-service.ts) and return the response to the agent. Nothing is copied into Algolia or SQLite, so there is no staleness window and no second copy of somebody else's data to keep in sync.
 
@@ -64,12 +65,14 @@ The hosted Agent Studio search tool `personal_data_search` reads all three ([`ag
 
 ## The agent, two transports, one executor
 
-There are 27 `client_side` tools ([`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json)) plus the one hosted search tool. Despite the name, every `client_side` tool executes on the server, in `executeAgentTool()`. Only the transport differs:
+There are 31 `client_side` tools ([`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json)) plus the one hosted search tool. Despite the name, every `client_side` tool executes on the server, in `executeAgentTool()`. Only the transport differs:
 
 - **Browser.** The React widget ([`src/features/chat/AgentStudioChat.tsx`](../src/features/chat/AgentStudioChat.tsx)) talks to Agent Studio directly. When Agent Studio asks for a tool, the browser forwards it to `POST /api/agent/tools/:name`, which is session-authenticated and calls `executeAgentTool()`.
 - **SMS and scheduled digests.** [`server/agent-runner.ts`](../server/agent-runner.ts) calls the Agent Studio completions API itself and calls `executeAgentTool()` in-process, no HTTP and no session. The loop caps at 8 tool iterations.
 
 Both paths run the same validation, the same SQLite access, and queue the same index jobs. That is why a reminder can send and a text can get answered with no browser open anywhere.
+
+The exception is the pair of iMessage tools, `react_to_message` and `reply_in_thread`, which act on the conversation rather than on stored records. They read a `ToolTurnContext` that only the SMS path can supply, and refuse on the browser transport. See [`docs/TOOL_ENDPOINT_MAPPING.md`](TOOL_ENDPOINT_MAPPING.md#imessage-reactions-and-inline-replies). `send_product_cards` reads the same context to text picture cards mid-turn, but degrades rather than refuses on the browser: it returns the cards for the agent to describe. See [Shopping](TOOL_ENDPOINT_MAPPING.md#shopping).
 
 Conversation storage is split for historical reasons: `channel_threads` / `channel_messages` back the agent and SMS (and are what gets indexed), while the older `conversations` / `messages` tables back the deterministic fallback chat at `POST /api/chat` used when Algolia credentials are absent.
 
@@ -103,7 +106,7 @@ Failed index jobs retry with exponential backoff, `min(3600, 2 ** min(attempts, 
 
 For exact current state the agent calls `get_agenda`, `list_todos`, `get_todo`, `list_reminders`, `get_memory`, or `list_life_areas`, and those read SQLite directly.
 
-For fuzzy discovery it calls `personal_data_search`, which Algolia executes against the three indices with a fixed `userId` filter and an allowlist of retrievable attributes. Before any update or delete it re-reads the record from SQLite by ID.
+For fuzzy discovery it calls `personal_data_search`, which Algolia executes against the three personal-data indices with a fixed `userId` filter and an allowlist of retrievable attributes. Before any update or delete it re-reads the record from SQLite by ID.
 
 Older conversation recall is a two-step: search the message index semantically, then call `get_conversation_context` with the returned `threadId` and `objectID` to read a bounded window of surrounding messages out of SQLite. Recent context does not need search — the SMS runner loads a 24-hour, 40-message window from SQLite on every turn, carrying each past turn's successful write results with it as described under Conversation identity.
 

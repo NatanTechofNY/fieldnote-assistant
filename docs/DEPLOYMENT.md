@@ -125,6 +125,7 @@ Set these as host secrets. Never commit them.
 | `ALGOLIA_TODO_INDEX` | `devcon_assistant_todos` | Index name |
 | `ALGOLIA_MEMORY_INDEX` | `devcon_assistant_memories` | Index name |
 | `ALGOLIA_MESSAGE_INDEX` | `devcon_assistant_messages` | Index name |
+| `ALGOLIA_PRODUCT_INDEX` | `devcon_assistant_products` | Index name for the demo store catalog |
 | `ALGOLIA_NEURAL_SEARCH` | `false` | Initial NeuralSearch value for a **fresh** database only. After that the Settings toggle owns it |
 | `VITE_ALGOLIA_*` | unset | Build-time browser values, see above |
 
@@ -151,7 +152,7 @@ Three steps, none of which are automatic:
 
 ```bash
 npm run setup:algolia   # apply agent-studio/indices/*.settings.json in the current search mode
-npm run reindex         # rebuild all three indices from SQLite via replaceAllObjects
+npm run reindex         # rebuild all four indices from SQLite via replaceAllObjects
 ```
 
 Then **publish the agent configuration**, which is easy to forget because nothing fails loudly without it — the agent just runs whatever was last published. Use the sync button in Settings → Under the hood, or `POST /api/admin/agent-studio/sync-tools`. That pushes `client-tools.json`, `algolia-search.json`, `system-prompt.txt`, and `system-prompt-block.txt` to Agent Studio and publishes the result.

@@ -64,9 +64,17 @@ async function readError(response: Response, fallback: string): Promise<string> 
   const text = await response.text().catch(() => "");
   if (!text) return `${fallback} (${response.status})`;
   try {
-    const parsed = JSON.parse(text) as { message?: string; error_message?: string; status?: string };
+    const parsed = JSON.parse(text) as {
+      message?: string;
+      error_message?: string;
+      status?: string;
+      detail?: string;
+    };
     const message = parsed.message || parsed.error_message;
-    if (message) return `Sendblue rejected the request (${response.status}): ${message}`;
+    // `unsupported_target` on its own says nothing; the reaction endpoint puts
+    // the readable half in `detail`.
+    const detail = parsed.detail && parsed.detail !== message ? ` (${parsed.detail})` : "";
+    if (message) return `Sendblue rejected the request (${response.status}): ${message}${detail}`;
   } catch {
     // A non-JSON body is still worth surfacing, trimmed to something readable.
   }
@@ -329,41 +337,130 @@ export function startSendblueTypingIndicator(db: Db, to: string): StopTypingIndi
  * Twilio returns, and `DECLINED`/`ERROR` arrive with HTTP 200, so the outcome is
  * inspected here and turned into a throw. Otherwise a declined message would be
  * recorded as delivered and never retried.
+ *
+ * `replyTo` carries the handle of the message this one answers, which makes it
+ * arrive threaded under that message in Messages. Inline replies need a V2 line
+ * and an iMessage conversation, and Sendblue refuses rather than downgrading, so
+ * a refusal is retried as a plain send: an answer that lands unthreaded is worth
+ * more than one the user never sees.
+ *
+ * `mediaUrl` must be a public URL Sendblue can fetch itself; it goes out as an
+ * iMessage attachment, or over RCS or MMS for a recipient without iMessage.
+ * `sendStyle` is a purely cosmetic iMessage effect and is dropped elsewhere.
  */
 export async function sendSendblueSms(
   db: Db,
   to: string,
   body: string,
-): Promise<{ sid: string; status: string }> {
+  options: { replyTo?: string; mediaUrl?: string; sendStyle?: string } = {},
+): Promise<{ sid: string; status: string; replyTo?: string }> {
   const config = getSendblueSecret(db);
   if (!config) throw new Error("Sendblue is not configured");
   const statusCallback = config.webhookBaseUrl && config.webhookSecret
     ? `${config.webhookBaseUrl.replace(/\/$/, "")}${SENDBLUE_STATUS_PATH}`
       + `?token=${encodeURIComponent(config.webhookSecret)}`
     : undefined;
-  const payload = await sendblueRequest(config, "/api/send-message", {
+  const post = async (replyTo: string | undefined) => {
+    const payload = await sendblueRequest(config, "/api/send-message", {
+      method: "POST",
+      body: {
+        number: to,
+        from_number: config.fromPhone,
+        content: body.slice(0, MAX_BODY_LENGTH),
+        ...(statusCallback ? { status_callback: statusCallback } : {}),
+        ...(options.mediaUrl ? { media_url: options.mediaUrl } : {}),
+        ...(options.sendStyle ? { send_style: options.sendStyle } : {}),
+        // `part_index` is Sendblue's to derive; the docs are explicit that a
+        // caller must not guess one.
+        ...(replyTo ? { reply_to: { message_handle: replyTo } } : {}),
+      },
+    }) as {
+      message_handle?: string;
+      status?: string;
+      error_code?: number | string | null;
+      error_message?: string | null;
+    };
+    const status = (payload.status || "QUEUED").toUpperCase();
+    const failed = status === "ERROR" || status === "DECLINED"
+      || Boolean(payload.error_code && payload.error_code !== 0 && payload.error_code !== "0");
+    if (failed) {
+      const code = payload.error_code ? ` (${payload.error_code})` : "";
+      throw new Error(`Sendblue could not send the message${code}: ${payload.error_message || status}`);
+    }
+    if (!payload.message_handle) throw new Error("Sendblue accepted the message without a handle");
+    // Reporting the handle only on the attempt that carried it is what lets the
+    // caller record the thread it actually landed in rather than the one asked for.
+    return {
+      sid: payload.message_handle,
+      status: normalizeSendblueStatus(status),
+      ...(replyTo ? { replyTo } : {}),
+    };
+  };
+  if (!options.replyTo) return post(undefined);
+  try {
+    return await post(options.replyTo);
+  } catch (error) {
+    /*
+     * Only a rejected request is retried. Sendblue refuses an unsupported reply
+     * before sending anything, so nothing was delivered and the plain send is
+     * the first attempt at delivery. Every other failure may have left a message
+     * queued, and resending it would text the user twice.
+     */
+    const rejected = error instanceof SendblueRequestError
+      && (error.status === 400 || error.status === 422);
+    if (!rejected) throw error;
+    console.warn("Sendblue would not thread the reply, sending it unthreaded:", error.message);
+    return post(undefined);
+  }
+}
+
+/**
+ * The six classic tapbacks. Everything else has to be exactly one emoji, which
+ * is what the `v` flag's `RGI_Emoji` property means: a family or a skin-toned
+ * thumb is one reaction, `hello🔥` and `🔥🔥` are not.
+ */
+const CLASSIC_REACTIONS = ["love", "like", "dislike", "laugh", "emphasize", "question"];
+
+/*
+ * Written out rather than as a literal because the `v` flag needs an ES2024
+ * target and this project compiles to ES2022; Node 22 supports the flag either
+ * way. `u` is not a substitute: it would match half of a family emoji.
+ */
+const SINGLE_EMOJI = new RegExp("^\\p{RGI_Emoji}$", "v");
+
+/** Names resolve before emoji, so `love` is Apple's heart and `❤️` is the emoji. */
+export function isSendblueReaction(value: string): boolean {
+  const bare = value.startsWith("-") ? value.slice(1) : value;
+  return CLASSIC_REACTIONS.includes(bare) || SINGLE_EMOJI.test(bare);
+}
+
+/**
+ * Puts a tapback on a message the user sent. Reactions are iMessage-only and
+ * cannot be applied to our own outbound messages, so a `422` here is a fact
+ * about the conversation rather than a bug; the caller hands the explanation
+ * back to the agent, which is the only party that can decide to say something
+ * instead. A `-` prefix removes a reaction sent earlier with that exact value.
+ */
+export async function sendSendblueReaction(
+  db: Db,
+  messageHandle: string,
+  reaction: string,
+): Promise<void> {
+  const config = getSendblueSecret(db);
+  if (!config) throw new Error("Sendblue is not configured");
+  const payload = await sendblueRequest(config, "/api/send-reaction", {
     method: "POST",
     body: {
-      number: to,
       from_number: config.fromPhone,
-      content: body.slice(0, MAX_BODY_LENGTH),
-      ...(statusCallback ? { status_callback: statusCallback } : {}),
+      message_handle: messageHandle,
+      reaction,
     },
-  }) as {
-    message_handle?: string;
-    status?: string;
-    error_code?: number | string | null;
-    error_message?: string | null;
-  };
-  const status = (payload.status || "QUEUED").toUpperCase();
-  const failed = status === "ERROR" || status === "DECLINED"
-    || Boolean(payload.error_code && payload.error_code !== 0 && payload.error_code !== "0");
-  if (failed) {
-    const code = payload.error_code ? ` (${payload.error_code})` : "";
-    throw new Error(`Sendblue could not send the message${code}: ${payload.error_message || status}`);
-  }
-  if (!payload.message_handle) throw new Error("Sendblue accepted the message without a handle");
-  return { sid: payload.message_handle, status: normalizeSendblueStatus(status) };
+  }) as { status?: string; message?: string | null; detail?: string | null };
+  // The refusals that arrive as HTTP 200 name themselves in `status`, the same
+  // shape `sendSendblueSms` has to read.
+  if ((payload.status || "OK").toUpperCase() !== "ERROR") return;
+  const detail = payload.detail ? `: ${payload.detail}` : "";
+  throw new Error(`Sendblue could not send the reaction: ${payload.message || "unknown error"}${detail}`);
 }
 
 /**

@@ -26,6 +26,7 @@ export function registerHealthRoutes({ app, db, search }: RouteContext): void {
         todos: process.env.ALGOLIA_TODO_INDEX || "devcon_assistant_todos",
         memories: process.env.ALGOLIA_MEMORY_INDEX || "devcon_assistant_memories",
         messages: process.env.ALGOLIA_MESSAGE_INDEX || "devcon_assistant_messages",
+        products: process.env.ALGOLIA_PRODUCT_INDEX || "devcon_assistant_products",
       },
       pendingIndexJobs: pending,
     });

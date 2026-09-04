@@ -82,7 +82,7 @@ export function SetupPage() {
       mark: "imessage",
       brand: "Sendblue",
       title: "iMessage with Sendblue",
-      description: "The same conversation as a blue bubble. Sendblue marks your message read and starts typing the moment it lands, then falls back to RCS and SMS on its own if iMessage cannot carry it.",
+      description: "The same conversation as a blue bubble. Sendblue marks your message read and starts typing the moment it lands, and the assistant can answer with a tapback or reply inside a thread. It falls back to RCS and SMS on its own if iMessage cannot carry it.",
       route: ["iMessage", "Agent", "Reply"],
       note: "Settings decides which provider sends, but a reply always goes back on the line the message arrived on.",
     },

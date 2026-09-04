@@ -1,0 +1,559 @@
+[
+  {
+    "sku": "WAG-1001",
+    "name": "Tylenol Extra Strength Caplets 500 mg",
+    "brand": "Tylenol",
+    "description": "Acetaminophen pain reliever and fever reducer for headaches, minor aches, and fever. Gentle on the stomach.",
+    "category": "pain-fever",
+    "symptoms": [
+      "headache",
+      "fever",
+      "body aches",
+      "pain",
+      "sore throat"
+    ],
+    "size": "100 caplets",
+    "price_cents": 1299,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/ba/Extra_Strength_Tylenol_and_Tylenol_PM.jpg/960px-Extra_Strength_Tylenol_and_Tylenol_PM.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Tylenol%20Extra%20Strength%20Caplets",
+    "popularity": 95
+  },
+  {
+    "sku": "WAG-1002",
+    "name": "Advil Ibuprofen Tablets 200 mg",
+    "brand": "Advil",
+    "description": "Ibuprofen pain reliever and fever reducer. Relieves headaches, muscle aches, menstrual cramps, and inflammation.",
+    "category": "pain-fever",
+    "symptoms": [
+      "headache",
+      "fever",
+      "inflammation",
+      "muscle aches",
+      "menstrual cramps",
+      "toothache"
+    ],
+    "size": "100 tablets",
+    "price_cents": 1149,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/db/Advil_200mg_Caplets.jpg/960px-Advil_200mg_Caplets.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Advil%20Ibuprofen%20Tablets%20200%20mg",
+    "popularity": 97
+  },
+  {
+    "sku": "WAG-1003",
+    "name": "Advil Liqui-Gels 200 mg",
+    "brand": "Advil",
+    "description": "Fast-acting liquid-filled ibuprofen capsules for headaches and migraines.",
+    "category": "pain-fever",
+    "symptoms": [
+      "headache",
+      "migraine",
+      "fast relief",
+      "pain"
+    ],
+    "size": "80 capsules",
+    "price_cents": 1399,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d8/Advilliquidgels.jpg/500px-Advilliquidgels.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Advil%20Liqui-Gels",
+    "popularity": 80
+  },
+  {
+    "sku": "WAG-1004",
+    "name": "Walgreens Ibuprofen Tablets 200 mg",
+    "brand": "Walgreens",
+    "description": "Store-brand ibuprofen, the same active ingredient as Advil at a lower price.",
+    "category": "pain-fever",
+    "symptoms": [
+      "headache",
+      "fever",
+      "pain",
+      "muscle aches",
+      "budget"
+    ],
+    "size": "200 tablets",
+    "price_cents": 849,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/99/Bottle_of_Ibuprofen_tablets_with_cap_removed_and_tablets_in_front.jpg/960px-Bottle_of_Ibuprofen_tablets_with_cap_removed_and_tablets_in_front.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Walgreens%20Ibuprofen%20Tablets%20200%20mg",
+    "popularity": 70
+  },
+  {
+    "sku": "WAG-1005",
+    "name": "Excedrin Migraine Caplets",
+    "brand": "Excedrin",
+    "description": "Acetaminophen, aspirin, and caffeine combination formulated for migraine pain.",
+    "category": "pain-fever",
+    "symptoms": [
+      "migraine",
+      "headache",
+      "light sensitivity"
+    ],
+    "size": "100 caplets",
+    "price_cents": 1499,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Excedrin_Migraine.jpg/960px-Excedrin_Migraine.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Excedrin%20Migraine",
+    "popularity": 78
+  },
+  {
+    "sku": "WAG-1006",
+    "name": "Aleve Naproxen Sodium Tablets 220 mg",
+    "brand": "Aleve",
+    "description": "Long-lasting naproxen sodium; one pill relieves pain for up to 12 hours.",
+    "category": "pain-fever",
+    "symptoms": [
+      "back pain",
+      "arthritis",
+      "muscle aches",
+      "long-lasting",
+      "pain"
+    ],
+    "size": "100 tablets",
+    "price_cents": 1349,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/72/Naproxen-250mg-16190835697216573249398282984232.jpg/960px-Naproxen-250mg-16190835697216573249398282984232.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Aleve%20Naproxen%20Sodium",
+    "popularity": 74
+  },
+  {
+    "sku": "WAG-1007",
+    "name": "Bayer Aspirin Tablets 325 mg",
+    "brand": "Bayer",
+    "description": "Classic aspirin pain reliever and fever reducer.",
+    "category": "pain-fever",
+    "symptoms": [
+      "headache",
+      "pain",
+      "fever",
+      "minor aches"
+    ],
+    "size": "100 tablets",
+    "price_cents": 799,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d5/Aspirin-Fl%C3%A4schchen.jpg/960px-Aspirin-Fl%C3%A4schchen.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Bayer%20Aspirin%20325%20mg",
+    "popularity": 55
+  },
+  {
+    "sku": "WAG-2001",
+    "name": "Vicks DayQuil Cold & Flu LiquiCaps",
+    "brand": "Vicks",
+    "description": "Non-drowsy daytime relief for cold and flu: headache, fever, sore throat, congestion, and cough.",
+    "category": "cold-flu",
+    "symptoms": [
+      "cold",
+      "flu",
+      "congestion",
+      "cough",
+      "sore throat",
+      "daytime",
+      "non-drowsy",
+      "fever"
+    ],
+    "size": "24 LiquiCaps",
+    "price_cents": 1299,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/da/DayQuil_%285990504169%29.jpg/960px-DayQuil_%285990504169%29.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Vicks%20DayQuil%20Cold%20and%20Flu%20LiquiCaps",
+    "popularity": 92
+  },
+  {
+    "sku": "WAG-2002",
+    "name": "Vicks NyQuil Cold & Flu Nighttime Relief Liquid",
+    "brand": "Vicks",
+    "description": "Nighttime cold and flu relief so you can rest: cough, sore throat, fever, and congestion.",
+    "category": "cold-flu",
+    "symptoms": [
+      "cold",
+      "flu",
+      "nighttime",
+      "cough",
+      "sleep",
+      "congestion",
+      "sore throat"
+    ],
+    "size": "12 fl oz",
+    "price_cents": 1349,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Treatments_for_the_Common_Cold_%2824667887648%29.jpg/960px-Treatments_for_the_Common_Cold_%2824667887648%29.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Vicks%20NyQuil%20Cold%20and%20Flu%20Nighttime",
+    "popularity": 90
+  },
+  {
+    "sku": "WAG-2003",
+    "name": "Vicks VapoRub Cough Suppressant Ointment",
+    "brand": "Vicks",
+    "description": "Topical cough suppressant with menthol, camphor, and eucalyptus for chest and throat.",
+    "category": "cold-flu",
+    "symptoms": [
+      "cough",
+      "congestion",
+      "chest",
+      "nighttime",
+      "muscle aches"
+    ],
+    "size": "3.53 oz",
+    "price_cents": 999,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Vicks_VapoRub_IMG_20211101.jpg/960px-Vicks_VapoRub_IMG_20211101.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Vicks%20VapoRub",
+    "popularity": 85
+  },
+  {
+    "sku": "WAG-2004",
+    "name": "Sudafed PE Sinus Congestion Tablets",
+    "brand": "Sudafed",
+    "description": "Phenylephrine nasal decongestant for sinus congestion and pressure.",
+    "category": "cold-flu",
+    "symptoms": [
+      "sinus congestion",
+      "stuffy nose",
+      "sinus pressure",
+      "cold"
+    ],
+    "size": "36 tablets",
+    "price_cents": 1199,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c9/Sudafed_Pills.jpg/960px-Sudafed_Pills.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Sudafed%20PE%20Sinus%20Congestion",
+    "popularity": 72
+  },
+  {
+    "sku": "WAG-2005",
+    "name": "Mucinex Extended-Release Tablets 600 mg",
+    "brand": "Mucinex",
+    "description": "12-hour guaifenesin expectorant that thins and loosens chest mucus.",
+    "category": "cold-flu",
+    "symptoms": [
+      "chest congestion",
+      "mucus",
+      "cough",
+      "cold"
+    ],
+    "size": "40 tablets",
+    "price_cents": 2499,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b0/Zentiva_Guajacuran_guaifenesin_30x200mg.jpg/960px-Zentiva_Guajacuran_guaifenesin_30x200mg.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Mucinex%20Extended-Release%20600%20mg",
+    "popularity": 74
+  },
+  {
+    "sku": "WAG-2006",
+    "name": "Alka-Seltzer Plus Cold Effervescent Tablets",
+    "brand": "Alka-Seltzer",
+    "description": "Dissolving tablets for cold symptoms: headache, body aches, congestion, and fever.",
+    "category": "cold-flu",
+    "symptoms": [
+      "cold",
+      "headache",
+      "congestion",
+      "body aches",
+      "fever"
+    ],
+    "size": "20 tablets",
+    "price_cents": 899,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2b/Alka-Seltzer_tablets_and_packet.jpg/960px-Alka-Seltzer_tablets_and_packet.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Alka-Seltzer%20Plus%20Cold",
+    "popularity": 60
+  },
+  {
+    "sku": "WAG-3001",
+    "name": "Halls Relief Cough Drops Cherry",
+    "brand": "Halls",
+    "description": "Menthol cough drops that soothe sore throats and quiet coughs.",
+    "category": "cough-throat",
+    "symptoms": [
+      "cough",
+      "sore throat",
+      "scratchy throat",
+      "cold"
+    ],
+    "size": "30 drops",
+    "price_cents": 329,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/99/Opened_and_unopened_Halls_cough_drops.jpg/960px-Opened_and_unopened_Halls_cough_drops.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Halls%20Relief%20Cough%20Drops%20Cherry",
+    "popularity": 88
+  },
+  {
+    "sku": "WAG-3002",
+    "name": "Ricola Original Herb Cough Drops",
+    "brand": "Ricola",
+    "description": "Swiss herb drops for cough relief and a soothed, hoarse voice.",
+    "category": "cough-throat",
+    "symptoms": [
+      "cough",
+      "sore throat",
+      "hoarse voice",
+      "dry throat"
+    ],
+    "size": "45 drops",
+    "price_cents": 499,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9d/Ricola_Bonbons.JPG/960px-Ricola_Bonbons.JPG",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Ricola%20Original%20Herb%20Cough%20Drops",
+    "popularity": 66
+  },
+  {
+    "sku": "WAG-3003",
+    "name": "Walgreens Tussin DM Cough Syrup",
+    "brand": "Walgreens",
+    "description": "Store-brand cough suppressant and expectorant, compare to Robitussin DM.",
+    "category": "cough-throat",
+    "symptoms": [
+      "cough",
+      "chest congestion",
+      "mucus",
+      "budget"
+    ],
+    "size": "8 fl oz",
+    "price_cents": 799,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/22/Cough_medicine_in_a_medicine_measure_cup.jpg/500px-Cough_medicine_in_a_medicine_measure_cup.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Walgreens%20Tussin%20DM",
+    "popularity": 58
+  },
+  {
+    "sku": "WAG-3004",
+    "name": "Halls Soothers Honey & Lemon",
+    "brand": "Halls",
+    "description": "Liquid-centre lozenges that coat and soothe a dry, irritated throat.",
+    "category": "cough-throat",
+    "symptoms": [
+      "sore throat",
+      "dry throat",
+      "soothing",
+      "tickly cough"
+    ],
+    "size": "10 lozenges",
+    "price_cents": 249,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Halls_Soothers_%285257502709%29.jpg/500px-Halls_Soothers_%285257502709%29.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Halls%20Soothers%20Honey%20Lemon",
+    "popularity": 50
+  },
+  {
+    "sku": "WAG-4001",
+    "name": "Zyrtec Allergy Relief Tablets 10 mg",
+    "brand": "Zyrtec",
+    "description": "24-hour cetirizine antihistamine for indoor and outdoor allergies.",
+    "category": "allergy",
+    "symptoms": [
+      "allergies",
+      "sneezing",
+      "runny nose",
+      "itchy eyes",
+      "hay fever"
+    ],
+    "size": "45 tablets",
+    "price_cents": 2999,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f2/Cetirizine_-_by_Danny_S.jpg/960px-Cetirizine_-_by_Danny_S.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Zyrtec%20Allergy%2010%20mg",
+    "popularity": 84
+  },
+  {
+    "sku": "WAG-4002",
+    "name": "Benadryl Allergy Ultratabs 25 mg",
+    "brand": "Benadryl",
+    "description": "Diphenhydramine antihistamine for allergy symptoms, hives, and itching. May cause drowsiness.",
+    "category": "allergy",
+    "symptoms": [
+      "allergies",
+      "hives",
+      "itching",
+      "allergic reaction",
+      "sleep aid",
+      "runny nose"
+    ],
+    "size": "100 tablets",
+    "price_cents": 1299,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/16/Diphenhydramine_1_%28cropped%29.jpg/960px-Diphenhydramine_1_%28cropped%29.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Benadryl%20Allergy%20Ultratabs",
+    "popularity": 76
+  },
+  {
+    "sku": "WAG-4003",
+    "name": "Benadryl Extra Strength Itch Stopping Gel",
+    "brand": "Benadryl",
+    "description": "Topical gel that cools and relieves itching from bug bites, rashes, and poison ivy.",
+    "category": "allergy",
+    "symptoms": [
+      "itching",
+      "bug bites",
+      "rash",
+      "poison ivy",
+      "skin irritation"
+    ],
+    "size": "3.5 oz",
+    "price_cents": 699,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bb/Benadryl_Itch_Stopping_Gel_%284600729217%29.jpg/960px-Benadryl_Itch_Stopping_Gel_%284600729217%29.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Benadryl%20Itch%20Stopping%20Gel",
+    "popularity": 45
+  },
+  {
+    "sku": "WAG-5001",
+    "name": "Pepto Bismol Liquid Original",
+    "brand": "Pepto Bismol",
+    "description": "Five-symptom digestive relief: nausea, heartburn, indigestion, upset stomach, and diarrhea.",
+    "category": "stomach",
+    "symptoms": [
+      "upset stomach",
+      "nausea",
+      "heartburn",
+      "indigestion",
+      "diarrhea"
+    ],
+    "size": "12 fl oz",
+    "price_cents": 849,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/8/8f/Bismuth_Subsalicylate_Bottle.png",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Pepto%20Bismol%20Liquid%20Original",
+    "popularity": 82
+  },
+  {
+    "sku": "WAG-5002",
+    "name": "Imodium A-D Anti-Diarrheal Caplets",
+    "brand": "Imodium",
+    "description": "Loperamide caplets that control diarrhea symptoms, often with one dose.",
+    "category": "stomach",
+    "symptoms": [
+      "diarrhea",
+      "stomach bug",
+      "traveler's diarrhea"
+    ],
+    "size": "24 caplets",
+    "price_cents": 1249,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/2023_Loperamid_2_mg.jpg/960px-2023_Loperamid_2_mg.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Imodium%20A-D%20Caplets",
+    "popularity": 60
+  },
+  {
+    "sku": "WAG-5003",
+    "name": "Alka-Seltzer Original Effervescent Tablets",
+    "brand": "Alka-Seltzer",
+    "description": "Fast relief for heartburn, acid indigestion, and upset stomach with headache.",
+    "category": "stomach",
+    "symptoms": [
+      "heartburn",
+      "acid indigestion",
+      "upset stomach",
+      "headache"
+    ],
+    "size": "36 tablets",
+    "price_cents": 949,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/Alka-Seltzer_tablet_dissolving_1.jpg/960px-Alka-Seltzer_tablet_dissolving_1.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Alka-Seltzer%20Original",
+    "popularity": 52
+  },
+  {
+    "sku": "WAG-6001",
+    "name": "Walgreens Digital Thermometer",
+    "brand": "Walgreens",
+    "description": "60-second oral, rectal, or underarm digital thermometer with fever alert.",
+    "category": "sick-day",
+    "symptoms": [
+      "fever",
+      "temperature check",
+      "chills"
+    ],
+    "size": "1 count",
+    "price_cents": 999,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/28/Digital_Thermometer_%2851825721879%29.jpg/960px-Digital_Thermometer_%2851825721879%29.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Walgreens%20Digital%20Thermometer",
+    "popularity": 79
+  },
+  {
+    "sku": "WAG-6002",
+    "name": "Kleenex Ultra Soft Facial Tissues",
+    "brand": "Kleenex",
+    "description": "Three-ply tissues that are soft on a sore, runny nose.",
+    "category": "sick-day",
+    "symptoms": [
+      "runny nose",
+      "sneezing",
+      "cold",
+      "allergies"
+    ],
+    "size": "3 boxes",
+    "price_cents": 679,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Kleenex-small-box.jpg/960px-Kleenex-small-box.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Kleenex%20Ultra%20Soft%20Facial%20Tissues",
+    "popularity": 81
+  },
+  {
+    "sku": "WAG-6003",
+    "name": "Pedialyte Electrolyte Solution Mixed Fruit",
+    "brand": "Pedialyte",
+    "description": "Oral electrolyte solution that replaces fluids lost to vomiting, diarrhea, and fever.",
+    "category": "sick-day",
+    "symptoms": [
+      "dehydration",
+      "vomiting",
+      "diarrhea",
+      "fever",
+      "hydration"
+    ],
+    "size": "33.8 fl oz",
+    "price_cents": 699,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/95/Pedialyte1.jpg/960px-Pedialyte1.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Pedialyte%20Electrolyte%20Solution",
+    "popularity": 73
+  },
+  {
+    "sku": "WAG-6004",
+    "name": "Gatorade Thirst Quencher Lemon-Lime",
+    "brand": "Gatorade",
+    "description": "Electrolyte sports drink to stay hydrated when you are under the weather.",
+    "category": "sick-day",
+    "symptoms": [
+      "hydration",
+      "electrolytes",
+      "dehydration"
+    ],
+    "size": "28 fl oz",
+    "price_cents": 229,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bf/Gatorade_Thirst_Quencher.jpg/960px-Gatorade_Thirst_Quencher.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Gatorade%20Thirst%20Quencher%20Lemon-Lime",
+    "popularity": 62
+  },
+  {
+    "sku": "WAG-6005",
+    "name": "Purell Advanced Hand Sanitizer",
+    "brand": "Purell",
+    "description": "Kills 99.99% of common germs; keeps the rest of the house from catching what you have.",
+    "category": "sick-day",
+    "symptoms": [
+      "germs",
+      "hand hygiene",
+      "cold and flu season"
+    ],
+    "size": "8 fl oz",
+    "price_cents": 499,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/Hand_sanitizer_bottle.jpg/960px-Hand_sanitizer_bottle.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Purell%20Advanced%20Hand%20Sanitizer",
+    "popularity": 57
+  },
+  {
+    "sku": "WAG-6006",
+    "name": "Campbell's Chicken Noodle Soup",
+    "brand": "Campbell's",
+    "description": "The sick-day classic. Warm broth for a sore throat and a little comfort.",
+    "category": "sick-day",
+    "symptoms": [
+      "comfort food",
+      "cold",
+      "sore throat",
+      "hydration",
+      "flu"
+    ],
+    "size": "10.75 oz can",
+    "price_cents": 199,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8a/Campbell%27s_Chicken_Noodle_Soup_with_Chayote_and_Potatoes.jpg/960px-Campbell%27s_Chicken_Noodle_Soup_with_Chayote_and_Potatoes.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Campbell%27s%20Chicken%20Noodle%20Soup",
+    "popularity": 64
+  },
+  {
+    "sku": "WAG-6007",
+    "name": "Tylenol PM Extra Strength Caplets",
+    "brand": "Tylenol",
+    "description": "Nighttime pain reliever plus sleep aid for when aches keep you up.",
+    "category": "sleep",
+    "symptoms": [
+      "sleeplessness",
+      "nighttime pain",
+      "headache",
+      "sleep",
+      "body aches"
+    ],
+    "size": "100 caplets",
+    "price_cents": 1399,
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Tylenol_bottle_closeup.jpg/960px-Tylenol_bottle_closeup.jpg",
+    "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Tylenol%20PM%20Extra%20Strength",
+    "popularity": 68
+  }
+]

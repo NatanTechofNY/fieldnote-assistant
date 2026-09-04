@@ -2,9 +2,9 @@
 
 ## How a tool call actually executes
 
-The agent has **28 tools**: 27 declared `client_side` in [`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json), plus one hosted search tool declared in [`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json).
+The agent has **32 tools**: 31 declared `client_side` in [`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json), plus one hosted search tool declared in [`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json).
 
-Despite the `client_side` type, none of them run in a browser. All 27 resolve to a single function, `executeAgentTool()` in [`server/tool-executor.ts`](../server/tool-executor.ts), which talks to SQLite (or, for Atlassian, straight out to the Atlassian API). Only the transport differs:
+Despite the `client_side` type, none of them run in a browser. All 31 resolve to a single function, `executeAgentTool()` in [`server/tool-executor.ts`](../server/tool-executor.ts), which talks to SQLite (or, for Atlassian and Sendblue, straight out to that provider's API). Only the transport differs:
 
 | Channel | Path to the executor |
 |---|---|
@@ -46,6 +46,10 @@ The fixed local identity is `USER_ID` (`process.env.DEMO_USER_ID || "devcon-demo
 | `list_confluence_pages` | read | — |
 | `get_confluence_page` | read | — |
 | `list_confluence_comments` | read | — |
+| `react_to_message` | **write** (iMessage) | — |
+| `reply_in_thread` | turn state | — |
+| `search_store_products` | read (catalog) | — |
+| `send_product_cards` | **write** (SMS media) | — |
 | `personal_data_search` | read | hosted by Algolia |
 
 `delete_todo`, `delete_memory`, and `delete_reminder` all require `confirmed === true` and throw otherwise.
@@ -56,7 +60,7 @@ There is no drift in either direction: every tool in the JSON has a `toolInput` 
 
 `personal_data_search` is `type: algolia_search_index`, which means Algolia executes it. It ships with every new agent, so there was no Algolia API client to write and no search endpoint to build.
 
-It is configured against all three indices — `devcon_assistant_todos`, `devcon_assistant_memories`, `devcon_assistant_messages` — each with a pinned `userId` filter, an allowlist of retrievable attributes, a facet allowlist, and a per-index description that is what actually steers the model toward the right index. `searchControls` decides which parameters the model may set, which are defaults it can override, and which are hard constraints it cannot.
+It is configured against the three personal-data indices — `devcon_assistant_todos`, `devcon_assistant_memories`, `devcon_assistant_messages` — each with a pinned `userId` filter, an allowlist of retrievable attributes, a facet allowlist, and a per-index description that is what actually steers the model toward the right index. `searchControls` decides which parameters the model may set, which are defaults it can override, and which are hard constraints it cannot. The fourth index, the store catalog, is searched by the `search_store_products` client tool instead (see [Shopping](#shopping)).
 
 Index names come from `ALGOLIA_TODO_INDEX` / `ALGOLIA_MEMORY_INDEX` / `ALGOLIA_MESSAGE_INDEX` at sync time.
 
@@ -138,6 +142,26 @@ curl -su "$EMAIL:$API_TOKEN" \
 
 A `200` with a `results` array means the fan-in works as built. A `400` naming `currentUser` means Basic auth resolves no principal for CQL, and both flags have to pass the accountId from `GET /wiki/rest/api/user/current` explicitly instead.
 
+## iMessage reactions and inline replies
+
+Two tools act on the conversation rather than on the user's records, and so are the only ones that need to know anything about the turn they are running inside. `executeAgentTool()` takes an optional `ToolTurnContext` — the channel, the address, the provider, and the handle of the message that started the turn — which [`server/agent-runner.ts`](../server/agent-runner.ts) builds and the browser route does not have. Both tools refuse with `This turn has no iMessage to act on: …` when the context is missing, on Twilio, on the web channel, or on a turn the app composed itself.
+
+- `react_to_message({ reaction })` → `POST https://api.sendblue.co/api/send-reaction`, targeting the inbound `message_handle`. The value is one of `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`, or exactly one emoji, with a `-` prefix to remove one sent earlier. [`server/schemas.ts`](../server/schemas.ts) checks the shape before the request goes out. Sendblue answers `422` for an SMS or RCS target, one of our own outbound messages, or a line that cannot deliver reactions; the reason reaches the model as a failed tool result so it can answer in words instead. The tool is listed in `WRITE_TOOLS`, so a retried turn sees the reaction it already sent rather than sending a second.
+- `reply_in_thread()` sends nothing. It records on the turn context that the answer should be delivered as an inline reply, and [`server/worker.ts`](../server/worker.ts) passes that handle to `sendSms()`, which adds `reply_to` to the send. Sendblue refuses an inline reply outright rather than downgrading it, so `sendSendblueSms()` retries once without `reply_to`: an unthreaded answer beats none.
+
+Inbound texts carry `reply_to` and `thread_originator` when the user replied inside a thread. The worker reads both onto the turn, they are stored in the inbound row's `metadata_json`, and `threadHistory()` prefixes that turn with a quote of the parent so `"that one"` attaches to the message the user picked rather than the one above it. The stored content and its Algolia projection keep the text the user actually sent.
+
+## Shopping
+
+A DevCon spoiler rather than a product feature: two tools that let "I'm not feeling well, find me something for a headache" end in a short scroll of Walgreens product cards in Messages. **Nothing here buys anything.** There is no cart, checkout, stock check, or Walgreens API; every product link is a `walgreens.com` search URL, and the prompt tells the agent to say so.
+
+The catalog is a checked-in file, [`server/catalog/walgreens-products.json`](../server/catalog/walgreens-products.json): ~30 over-the-counter items across the aisles `pain-fever`, `cold-flu`, `cough-throat`, `allergy`, `stomach`, `sick-day`, and `sleep`, each with symptoms, a price in cents, a public product image, and a store link. `loadStoreCatalog()` in [`server/db.ts`](../server/db.ts) upserts it into the `store_products` table at server start and before every CLI command, keyed by SKU and fingerprinted so an unchanged file queues nothing. Changed or new rows queue a `product` index job; rows dropped from the file are deleted with a `delete` job. The table is reference data, so `resetDatabase()` leaves it alone and `seedDatabase()` re-queues it.
+
+- `search_store_products({ query, category, max_price, limit })` searches the `devcon_assistant_products` index when Algolia is configured (`ALGOLIA_PRODUCT_INDEX` to rename it; settings in [`agent-studio/indices/products.settings.json`](../agent-studio/indices/products.settings.json)) and hydrates the ranked IDs from `store_products`. Without a client, or when Algolia fails, it falls back to an in-process ranking over name, brand, description, category, and symptoms, so a shopping question on stage gets an answer either way. `max_price` is in dollars; the result carries `source: "algolia" | "local"`, the store name, and each product's `price`, `image_url`, and `product_url`.
+- `send_product_cards({ product_ids, note })` takes one to three IDs from the search and, on an SMS turn, texts one message per product through `sendSms()` with `mediaUrl` set to the product image and a caption of `Name (size) — $price` plus the store link. Sends are sequential so the cards land in the agent's order. Each accepted send is filed on the thread as an `assistant` row with `metadata_json.kind = "product_card"`, the `productCard` fields, and `mediaUrl`, before the agent's own reply is written, so the reply's provider handle patches the right row. An optional `note` goes out as a plain text before the cards. A product the catalog no longer holds, or a send Sendblue refuses, lands in `failed: [{ id, error }]` while the rest keep going. On the browser transport, where there is no Messages thread to drop a picture into, it sends nothing and returns the cards with their captions so the agent can describe them.
+
+The worker passes its own `sendSms` into the turn context, so a test that captures the reply captures the cards too. Run `npm run catalog:check` before the demo: it HEAD-requests every image and product URL, fails on anything that is not a 200 with an `image/*` content type, and paces itself because the image host rate-limits bursts.
+
 ## Digest briefs
 
 A brief is a user-authored standing instruction with its own send time, stored in `digest_briefs` and delivered by `runWorkerOnce`. There are **no agent tools** for briefs; they are UI-managed and agent-composed.
@@ -157,6 +181,7 @@ Failure is `{ "success": false, "error": "<message>" }` — **a plain string, no
 | `/user-classified\|override confirmation\|confirmation is required/` | 409 |
 | `/ not found$/` | 404 |
 | `/^Unsupported tool: /` | 400 |
+| `/^This turn has no iMessage /` | 400 |
 | `/ is not configured$/` | 503 |
 | `/^Atlassian /` | 502, with the upstream message intact |
 | anything else | 500 |

@@ -7,8 +7,42 @@ export type TodoStatus = "pending" | "in_progress" | "blocked" | "done" | "cance
 export type Priority = "low" | "normal" | "high" | "urgent" | null;
 export type MemoryKind = "fact" | "note" | "journal";
 export type LifeAreaSource = "agent" | "user";
-export type EntityType = "todo" | "memory" | "channel_message";
+export type EntityType = "todo" | "memory" | "channel_message" | "product";
 export type IndexOperation = "upsert" | "delete";
+
+/** One entry of the checked-in store catalog, `server/catalog/*.json`. */
+export interface CatalogProduct {
+  sku: string;
+  name: string;
+  brand: string;
+  description: string;
+  category: string;
+  symptoms: string[];
+  size: string | null;
+  price_cents: number;
+  image_url: string;
+  product_url: string;
+  popularity: number;
+}
+
+export interface StoreProductRow {
+  id: string;
+  sku: string;
+  store: string;
+  name: string;
+  brand: string;
+  description: string;
+  category: string;
+  symptoms_json: string;
+  size: string | null;
+  price_cents: number;
+  image_url: string;
+  product_url: string;
+  popularity: number;
+  source_hash: string;
+  created_at: string;
+  updated_at: string;
+}
 
 export interface TodoRow {
   id: string;

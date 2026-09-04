@@ -1,8 +1,11 @@
 import Database from "better-sqlite3";
-import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type { ChannelMessageRow, Db, EntityType, IndexOperation, MemoryRow, ReminderRow, TodoRow } from "./types.ts";
+import type {
+  CatalogProduct, ChannelMessageRow, Db, EntityType, IndexOperation, MemoryRow, ReminderRow,
+  StoreProductRow, TodoRow,
+} from "./types.ts";
 import { USER_ID } from "./types.ts";
 
 export { USER_ID };
@@ -113,7 +116,7 @@ CREATE INDEX IF NOT EXISTS reminders_due ON reminders(user_id, status, scheduled
 CREATE TABLE IF NOT EXISTS index_jobs (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  entity_type TEXT NOT NULL CHECK(entity_type IN ('todo','memory','channel_message')),
+  entity_type TEXT NOT NULL CHECK(entity_type IN ('todo','memory','channel_message','product')),
   entity_id TEXT NOT NULL,
   operation TEXT NOT NULL CHECK(operation IN ('upsert','delete')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','failed','done')),
@@ -124,6 +127,24 @@ CREATE TABLE IF NOT EXISTS index_jobs (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS index_jobs_ready ON index_jobs(status, available_at);
+CREATE TABLE IF NOT EXISTS store_products (
+  id TEXT PRIMARY KEY,
+  sku TEXT NOT NULL UNIQUE,
+  store TEXT NOT NULL,
+  name TEXT NOT NULL,
+  brand TEXT NOT NULL,
+  description TEXT NOT NULL,
+  category TEXT NOT NULL,
+  symptoms_json TEXT NOT NULL DEFAULT '[]',
+  size TEXT,
+  price_cents INTEGER NOT NULL,
+  image_url TEXT NOT NULL,
+  product_url TEXT NOT NULL,
+  popularity INTEGER NOT NULL DEFAULT 0,
+  source_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS integration_settings (
   user_id TEXT NOT NULL,
   provider TEXT NOT NULL,
@@ -644,6 +665,41 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
     }
     db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(12,?)").run(now());
   }
+  const productIndexingApplied = db.prepare(
+    "SELECT 1 found FROM schema_migrations WHERE version=13",
+  ).get();
+  if (!productIndexingApplied) {
+    // The store catalog is indexed through the same outbox, so the entity CHECK
+    // has to admit 'product'. Same copy and rename as v7.
+    const indexJobsSql = String((db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='index_jobs'",
+    ).get() as { sql?: string } | undefined)?.sql || "");
+    if (!indexJobsSql.includes("'product'")) {
+      db.transaction(() => {
+        db.exec(`
+          DROP INDEX IF EXISTS index_jobs_ready;
+          ALTER TABLE index_jobs RENAME TO index_jobs_v12;
+          CREATE TABLE index_jobs (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            entity_type TEXT NOT NULL CHECK(entity_type IN ('todo','memory','channel_message','product')),
+            entity_id TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN ('upsert','delete')),
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','failed','done')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            available_at TEXT NOT NULL,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO index_jobs SELECT * FROM index_jobs_v12;
+          DROP TABLE index_jobs_v12;
+          CREATE INDEX index_jobs_ready ON index_jobs(status, available_at);
+        `);
+      })();
+    }
+    db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(13,?)").run(now());
+  }
   // NeuralSearch is opt-in: it is a paid add-on, so an application without the
   // entitlement gets plain keyword search rather than a failed setup.
   const searchPreferenceTimestamp = now();
@@ -659,6 +715,78 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
   db.exec("CREATE INDEX IF NOT EXISTS todos_life_area ON todos(user_id,life_area_id)");
   db.exec("CREATE INDEX IF NOT EXISTS memories_life_area ON memories(user_id,life_area_id,review_worthy)");
   return db;
+}
+
+export const STORE_NAME = "Walgreens";
+const CATALOG_FILE = new URL("./catalog/walgreens-products.json", import.meta.url);
+
+export function readStoreCatalog(): CatalogProduct[] {
+  return JSON.parse(readFileSync(CATALOG_FILE, "utf8")) as CatalogProduct[];
+}
+
+/** Catalog IDs are derived from the SKU so a reload never duplicates a product. */
+export const storeProductId = (sku: string): string => `product_${sku.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_")}`;
+
+/**
+ * Loads the checked-in catalog into `store_products`. The file is the source
+ * for this table the way the user is for todos, so a changed entry is written
+ * through and queued for indexing, while an unchanged one is left alone rather
+ * than churning an index job on every boot. Entries removed from the file are
+ * deleted, with a delete job, so the index does not keep selling them.
+ *
+ * Called at server start and by the CLI rather than from `openDatabase`, so a
+ * database opened for a test starts with an empty outbox.
+ */
+export function loadStoreCatalog(db: Db, products: CatalogProduct[] = readStoreCatalog()): { changed: number } {
+  const timestamp = now();
+  const existing = new Map(
+    (db.prepare("SELECT id,source_hash FROM store_products").all() as Array<{ id: string; source_hash: string }>)
+      .map(row => [row.id, row.source_hash]),
+  );
+  const upsert = db.prepare(`
+    INSERT INTO store_products(
+      id,sku,store,name,brand,description,category,symptoms_json,size,price_cents,
+      image_url,product_url,popularity,source_hash,created_at,updated_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET
+      sku=excluded.sku,store=excluded.store,name=excluded.name,brand=excluded.brand,
+      description=excluded.description,category=excluded.category,symptoms_json=excluded.symptoms_json,
+      size=excluded.size,price_cents=excluded.price_cents,image_url=excluded.image_url,
+      product_url=excluded.product_url,popularity=excluded.popularity,source_hash=excluded.source_hash,
+      updated_at=excluded.updated_at
+  `);
+  let changed = 0;
+  db.transaction(() => {
+    const seen = new Set<string>();
+    for (const product of products) {
+      const productId = storeProductId(product.sku);
+      seen.add(productId);
+      const hash = createHash("sha1").update(JSON.stringify(product)).digest("hex");
+      if (existing.get(productId) === hash) continue;
+      upsert.run(
+        productId, product.sku, STORE_NAME, product.name, product.brand, product.description,
+        product.category, JSON.stringify(product.symptoms), product.size, product.price_cents,
+        product.image_url, product.product_url, product.popularity, hash, timestamp, timestamp,
+      );
+      queueIndexJob(db, "product", productId);
+      changed += 1;
+    }
+    for (const productId of existing.keys()) {
+      if (seen.has(productId)) continue;
+      db.prepare("DELETE FROM store_products WHERE id=?").run(productId);
+      queueIndexJob(db, "product", productId, "delete");
+      changed += 1;
+    }
+  })();
+  return { changed };
+}
+
+export function getStoreProduct(db: Db, productId: string): StoreProductRow | undefined {
+  return db.prepare("SELECT * FROM store_products WHERE id=?").get(productId) as StoreProductRow | undefined;
+}
+
+export function listStoreProducts(db: Db): StoreProductRow[] {
+  return db.prepare("SELECT * FROM store_products ORDER BY popularity DESC,name").all() as StoreProductRow[];
 }
 
 export function queueIndexJob(
@@ -687,6 +815,66 @@ export function queueIndexJob(
     VALUES (?,?,?,?,?,'pending',0,?,?,?)
   `).run(jobId, USER_ID, entityType, entityId, operation, timestamp, timestamp, timestamp);
   return jobId;
+}
+
+/**
+ * Files a message the app sent on a thread mid-turn, outside the agent's own
+ * reply: a product card, for instance. The row is written after the provider
+ * accepted the send, so it carries the handle and status it actually got.
+ */
+export function insertOutboundChannelMessage(
+  db: Db,
+  threadId: string,
+  content: string,
+  providerMessageId: string,
+  status: string,
+  metadata: Record<string, unknown> = {},
+): string {
+  const messageId = id("channel_message");
+  const timestamp = now();
+  db.transaction(() => {
+    db.prepare(`
+      INSERT INTO channel_messages(
+        id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at
+      ) VALUES(?,?,'outbound','assistant',?,?,?,?,?,?)
+    `).run(
+      messageId, threadId, content, providerMessageId,
+      status === "queued" ? "queued" : "sent", JSON.stringify(metadata), timestamp, timestamp,
+    );
+    db.prepare("UPDATE channel_threads SET updated_at=? WHERE id=?").run(timestamp, threadId);
+    queueIndexJob(db, "channel_message", messageId);
+  })();
+  return messageId;
+}
+
+/**
+ * Files a tapback on the message it was placed on, so the archive can draw it
+ * where the reader saw it rather than only as a tool call further down the
+ * thread. Sendblue spells a removal `-love`, which takes the reaction back off.
+ *
+ * A handle with no row is not an error: reactions are addressed by provider
+ * handle, and an inbound message the app never stored has nothing to carry one.
+ */
+export function recordMessageReaction(
+  db: Db,
+  threadId: string,
+  providerMessageId: string,
+  reaction: string,
+): void {
+  const row = db.prepare(`
+    SELECT id,metadata_json FROM channel_messages WHERE thread_id=? AND provider_message_id=?
+  `).get(threadId, providerMessageId) as { id: string; metadata_json: string | null } | undefined;
+  if (!row) return;
+  const metadata = JSON.parse(row.metadata_json || "{}") as Record<string, unknown>;
+  const current = (Array.isArray(metadata.reactions) ? metadata.reactions : [])
+    .filter((value): value is string => typeof value === "string");
+  const removing = reaction.startsWith("-");
+  const value = removing ? reaction.slice(1) : reaction;
+  const reactions = removing
+    ? current.filter(entry => entry !== value)
+    : current.includes(value) ? current : [...current, value];
+  db.prepare("UPDATE channel_messages SET metadata_json=?,updated_at=? WHERE id=?")
+    .run(JSON.stringify({ ...metadata, reactions }), now(), row.id);
 }
 
 /**
@@ -835,6 +1023,9 @@ export function seedDatabase(db: Db): { seeded: true } {
     `).run("message_welcome", "conversation_current", "How can I help today?", timestamp);
     queueIndexJob(db, "todo", "todo_welcome");
     queueIndexJob(db, "memory", "memory_welcome");
+    // The reset emptied the outbox, and the catalog rows it left in place still
+    // need to reach the index.
+    for (const product of listStoreProducts(db)) queueIndexJob(db, "product", product.id);
   })();
   return { seeded: true };
 }

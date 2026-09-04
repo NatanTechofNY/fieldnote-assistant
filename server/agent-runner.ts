@@ -1,7 +1,8 @@
 import type { AlgoliaSync } from "./algolia.ts";
 import { id, now, queueIndexJob, USER_ID } from "./db.ts";
-import { getNotificationPreferences } from "./integrations.ts";
-import { executeAgentTool } from "./tool-executor.ts";
+import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
+import type { SmsSender } from "./messaging.ts";
+import { executeAgentTool, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
 import type { Db } from "./types.ts";
 
@@ -107,6 +108,10 @@ const WRITE_TOOLS = new Set([
   "create_todo", "update_todo", "set_todo_status", "delete_todo",
   "create_memory", "update_memory", "delete_memory",
   "create_reminder", "update_reminder", "delete_reminder",
+  // A tapback changes nothing in SQLite but is just as irreversible from the
+  // user's side, and a retried turn that cannot see the first one sends a
+  // second.
+  "react_to_message",
 ]);
 
 /**
@@ -143,6 +148,36 @@ function assistantParts(content: string, metadataJson: string): AgentPart[] {
   return [...writes, { type: "text", text: content }];
 }
 
+/** How much of a quoted parent is worth carrying before it crowds out the reply. */
+const QUOTE_LENGTH = 200;
+
+/**
+ * What a text sent as an iMessage inline reply is answering.
+ *
+ * The thread the user picked is not the one the transcript implies: "that works"
+ * attached to this morning's flight question reads as agreement with whatever was
+ * said last. The handle is on the row, and the parent is another row in the same
+ * thread, so the quote is recoverable and belongs in front of the reply.
+ */
+function quotedParent(db: Db, threadId: string, metadataJson: string): string | null {
+  const handle = ((): string | undefined => {
+    try {
+      return (JSON.parse(metadataJson) as { replyTo?: string }).replyTo;
+    } catch {
+      return undefined;
+    }
+  })();
+  if (!handle) return null;
+  const parent = db.prepare(`
+    SELECT content FROM channel_messages WHERE thread_id=? AND provider_message_id=?
+  `).get(threadId, handle) as { content: string } | undefined;
+  if (!parent) return null;
+  const quote = parent.content.length > QUOTE_LENGTH
+    ? `${parent.content.slice(0, QUOTE_LENGTH)}…`
+    : parent.content;
+  return quote;
+}
+
 /**
  * The recent window a turn is answered against. An abandoned app-composed turn is
  * excluded: the row stays for the audit trail, but replaying an instruction that
@@ -165,13 +200,18 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
     content: string;
     metadata_json: string;
   }>;
-  return rows.map(row => ({
-    id: row.id.startsWith("alg_msg_") ? row.id : `alg_msg_${row.id.replaceAll("-", "_")}`,
-    role: row.role,
-    parts: row.role === "assistant"
-      ? assistantParts(row.content, row.metadata_json)
-      : [{ type: "text", text: row.content }],
-  }));
+  return rows.map(row => {
+    const quote = row.role === "user" ? quotedParent(db, threadId, row.metadata_json) : null;
+    return {
+      id: row.id.startsWith("alg_msg_") ? row.id : `alg_msg_${row.id.replaceAll("-", "_")}`,
+      role: row.role,
+      parts: row.role === "assistant"
+        ? assistantParts(row.content, row.metadata_json)
+        // The quote is assembled here rather than stored, so the row and its
+        // Algolia projection keep the text the user actually sent.
+        : [{ type: "text", text: quote ? `[replying to "${quote}"] ${row.content}` : row.content }],
+    };
+  });
 }
 
 function saveChannelMessage(
@@ -337,14 +377,37 @@ export async function runChannelAgent(
      * back as something the user said.
      */
     internal?: boolean;
+    /**
+     * What the provider said about the message that started this turn. An
+     * app-composed turn has none, which is what stops the iMessage tools from
+     * reacting to a message the user never sent.
+     */
+    inbound?: { provider: SmsProvider; replyTo?: string; threadOriginator?: string };
+    /** The sender a tool that texts mid-turn uses; the worker passes its own so a test can capture both. */
+    sendSms?: SmsSender;
   } = {},
-): Promise<{ text: string; threadId: string }> {
+): Promise<{ text: string; threadId: string; replyTo?: string }> {
   const thread = getOrCreateThread(db, channel, address);
   const internalMark = options.internal ? { internal: true } : {};
+  const threadMark = options.inbound?.replyTo
+    ? {
+      replyTo: options.inbound.replyTo,
+      ...(options.inbound.threadOriginator ? { threadOriginator: options.inbound.threadOriginator } : {}),
+    }
+    : {};
   const inboundId = saveInboundMessage(db, thread.id, body, providerMessageId, {
     ...options.userMessageMetadata,
     ...internalMark,
+    ...threadMark,
   });
+  const context: ToolTurnContext = {
+    channel,
+    address,
+    threadId: thread.id,
+    provider: options.inbound?.provider,
+    inboundMessageHandle: options.internal ? undefined : providerMessageId,
+    sendSms: options.sendSms,
+  };
   search.flushSoon();
   const messages = threadHistory(db, thread.id);
   const preferences = getNotificationPreferences(db);
@@ -391,13 +454,13 @@ export async function runChannelAgent(
           ...internalMark,
         });
         search.flushSoon();
-        return { text: finalText, threadId: thread.id };
+        return { text: finalText, threadId: thread.id, replyTo: context.replyToMessageHandle };
       }
 
       for (const part of toolParts) {
         const toolName = String(part.type).slice(5);
         try {
-          const data = await executeAgentTool(db, search, toolName, part.input || {});
+          const data = await executeAgentTool(db, search, toolName, part.input || {}, context);
           // An undefined payload disappears from the serialized body, leaving a
           // bare `{"success":true}` that reads as a truncated result rather than
           // a confirmation. An explicit null says the write landed and returned
@@ -437,20 +500,38 @@ export async function runSmsAgent(
     fetcher?: typeof fetch;
     internal?: boolean;
     userMessageMetadata?: Record<string, unknown>;
+    inbound?: { provider: SmsProvider; replyTo?: string; threadOriginator?: string };
+    sendSms?: SmsSender;
   } = {},
-): Promise<{ text: string; threadId: string }> {
+): Promise<{ text: string; threadId: string; replyTo?: string }> {
   return runChannelAgent(db, search, "sms", fromPhone, body, providerMessageId, options);
 }
 
+/**
+ * `replyTo` is the handle the message actually threaded under, which the sender
+ * reports back rather than the caller assuming. The agent can ask to thread and
+ * have Sendblue refuse, and a reply the archive draws under a parent it never
+ * reached is a lie the reader has no way to catch.
+ */
 export function recordOutboundProviderMessage(
   db: Db,
   threadId: string,
   providerMessageId: string,
   status: string,
+  replyTo?: string,
 ): void {
   db.prepare(`
-    UPDATE channel_messages SET provider_message_id=?,status=?,updated_at=?
+    UPDATE channel_messages SET provider_message_id=?,status=?,updated_at=?,
+      metadata_json=CASE WHEN ? IS NULL THEN metadata_json
+        ELSE json_set(COALESCE(NULLIF(metadata_json,''),'{}'),'$.replyTo',?) END
     WHERE id=(SELECT id FROM channel_messages WHERE thread_id=? AND direction='outbound'
       ORDER BY created_at DESC LIMIT 1)
-  `).run(providerMessageId, status === "queued" ? "queued" : "sent", now(), threadId);
+  `).run(
+    providerMessageId,
+    status === "queued" ? "queued" : "sent",
+    now(),
+    replyTo ?? null,
+    replyTo ?? null,
+    threadId,
+  );
 }

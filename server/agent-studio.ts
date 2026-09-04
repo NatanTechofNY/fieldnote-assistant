@@ -49,6 +49,7 @@ const INDEX_ENV_OVERRIDES: Record<string, string> = {
   devcon_assistant_todos: "ALGOLIA_TODO_INDEX",
   devcon_assistant_memories: "ALGOLIA_MEMORY_INDEX",
   devcon_assistant_messages: "ALGOLIA_MESSAGE_INDEX",
+  devcon_assistant_products: "ALGOLIA_PRODUCT_INDEX",
 };
 
 const resolveIndexName = (name: string): string =>

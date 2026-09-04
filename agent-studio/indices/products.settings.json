@@ -1,0 +1,39 @@
+{
+  "searchableAttributes": [
+    "unordered(name)",
+    "unordered(symptoms)",
+    "unordered(brand)",
+    "unordered(category)",
+    "unordered(description)"
+  ],
+  "attributesForFaceting": [
+    "filterOnly(userId)",
+    "category",
+    "brand",
+    "filterOnly(price_cents)"
+  ],
+  "customRanking": [
+    "desc(popularity)"
+  ],
+  "attributesToRetrieve": [
+    "objectID",
+    "userId",
+    "sku",
+    "store",
+    "name",
+    "brand",
+    "description",
+    "category",
+    "symptoms",
+    "size",
+    "price_cents",
+    "image_url",
+    "product_url",
+    "popularity"
+  ],
+  "attributesToHighlight": [],
+  "attributesToSnippet": [],
+  "typoTolerance": true,
+  "removeStopWords": true,
+  "removeWordsIfNoResults": "allOptional"
+}

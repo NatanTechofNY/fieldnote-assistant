@@ -1,16 +1,17 @@
 import { type Tools } from "react-instantsearch";
-import { BookText, Check, Database, LoaderCircle, SquareKanban, TriangleAlert } from "lucide-react";
+import { BookText, Check, Database, LoaderCircle, ShoppingBag, SquareKanban, TriangleAlert } from "lucide-react";
 
 type ToolLayoutProps = Parameters<NonNullable<Tools[string]["layoutComponent"]>>[0];
 
-/** The Atlassian tools are the first that read outside SQLite, so the card names
+/** The Atlassian and shopping tools read outside SQLite, so the card names
  *  which system answered rather than assuming the local database. */
-type ToolSource = "SQLite" | "Jira" | "Confluence";
+type ToolSource = "SQLite" | "Jira" | "Confluence" | "Walgreens";
 
 const sourceIcon: Record<ToolSource, typeof Database> = {
   SQLite: Database,
   Jira: SquareKanban,
   Confluence: BookText,
+  Walgreens: ShoppingBag,
 };
 
 export const toolActivityMeta: Record<string, { active: string; done: string; source: ToolSource }> = {
@@ -41,6 +42,8 @@ export const toolActivityMeta: Record<string, { active: string; done: string; so
   list_confluence_pages: { active: "Searching Confluence pages", done: "Confluence pages found", source: "Confluence" },
   get_confluence_page: { active: "Reading Confluence page", done: "Confluence page loaded", source: "Confluence" },
   list_confluence_comments: { active: "Checking Confluence comments", done: "Confluence comments checked", source: "Confluence" },
+  search_store_products: { active: "Browsing the Walgreens shelf", done: "Products found", source: "Walgreens" },
+  send_product_cards: { active: "Sending product cards", done: "Product cards sent", source: "Walgreens" },
 };
 
 function toolResultDetail(output: unknown): string | null {
@@ -57,7 +60,9 @@ function toolResultDetail(output: unknown): string | null {
         ? `${record.title} · ${record.status.replace("_", " ")}`
         : record.title;
     }
-    const counts = ["todos", "reminders", "subtasks", "issues", "boards", "pages", "spaces", "comments", "users"].reduce((total, key) => {
+    const counts = [
+      "todos", "reminders", "subtasks", "issues", "boards", "pages", "spaces", "comments", "users", "products", "cards",
+    ].reduce((total, key) => {
       const value = record[key];
       return total + (Array.isArray(value) ? value.length : 0);
     }, 0);

@@ -301,6 +301,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
                 ? "Typing bubbles are on. Read receipts are off — Sendblue enables those per account, so email support@sendblue.com to ask for them, then save again."
                 : "Sendblue is not acknowledging arrivals itself. Messages the assistant answers still get a typing bubble; anything it does not answer waits with no acknowledgement. Save again to retry."}
           </p>}
+          <p className="integration-copy">The assistant can also reply with a tapback instead of a message, and thread its answer under an older message you replied to. It chooses per message, and neither works over Twilio.</p>
           <p className="integration-copy">On the free shared line, a contact has to text your Sendblue number once before you can message them. Add them with <code>sendblue add-contact +1…</code> first.</p>
           {sendblueConnect.error && <div className="inline-error"><TriangleAlert size={14}/><span>{sendblueConnect.error.message}</span></div>}
           <div className="actions">

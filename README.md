@@ -76,6 +76,8 @@ Then configure and publish the Agent Studio agent using the artifacts in [`agent
 
 The **Settings** page (`/settings`) configures encrypted Twilio and Sendblue credentials, which of the two carries outbound messages, reminder delivery, daily digests, quiet hours, Granola meeting-note polling, and Atlassian credentials. Both providers can stay connected, and inbound messages are answered on whichever one they arrive on. Inbound handling is entirely server-side — the worker runs the agent loop and executes its tools in-process — so no browser needs to be open for a reminder to send or a text to get answered.
 
+Over iMessage the assistant can also send pictures: a demo-only shopping pair, `search_store_products` and `send_product_cards`, searches a small Walgreens-styled over-the-counter catalog (its own Algolia index, seeded from `server/catalog/walgreens-products.json`) and texts each pick as an image card with a price and a store link. It browses; it never buys.
+
 See [`docs/SMS_AND_EVENTS.md`](docs/SMS_AND_EVENTS.md) for tunnels, provider consent requirements, and recovery.
 
 ## Deployment
@@ -97,6 +99,7 @@ SQLite forces three rules: exactly one replica, a real persistent volume, and no
 | `npm run reset` | Restore the known demo dataset |
 | `npm run setup:algolia` | Apply index settings in the currently selected search mode |
 | `npm run reindex` | Rebuild Algolia from SQLite |
+| `npm run catalog:check` | Verify every demo-catalog image and store link still resolves (run before a demo) |
 
 ## Documentation
 

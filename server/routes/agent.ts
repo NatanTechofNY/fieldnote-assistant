@@ -21,6 +21,10 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       // request that could never succeed and buried real faults in the logs.
       if (/ not found$/i.test(message)) return failure(res, 404, message);
       if (/^Unsupported tool: /.test(message)) return failure(res, 400, message);
+      // The reaction and threading tools act on the message that started the
+      // turn, which the browser chat does not have. Retrying from here cannot
+      // produce one.
+      if (/^This turn has no iMessage /.test(message)) return failure(res, 400, message);
       // An unconfigured integration is the same shape of problem: retrying cannot
       // help, and the agent should say the tool is unavailable instead.
       if (/ is not configured$/i.test(message)) return failure(res, 503, message);

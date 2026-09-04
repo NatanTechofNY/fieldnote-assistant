@@ -8,11 +8,35 @@ import { sendSendblueSms, startSendblueTypingIndicator, type StopTypingIndicator
 import { sendTwilioSms } from "./twilio-service.ts";
 import type { Db } from "./types.ts";
 
+/** The iMessage expressive effects Sendblue accepts on `send_style`. */
+export const SEND_STYLES = [
+  "celebration", "shooting_star", "fireworks", "lasers", "love", "confetti", "balloons",
+  "spotlight", "echo", "invisible", "gentle", "loud", "slam",
+] as const;
+export type SendStyle = typeof SEND_STYLES[number];
+
+/**
+ * What a send can ask for beyond the text itself. Only iMessage has anywhere to
+ * put a reply or play an effect, so a provider that cannot ignores those rather
+ * than refusing. `mediaUrl` is a public image URL delivered as an attachment,
+ * which both providers carry: Sendblue as iMessage media with RCS or MMS as the
+ * fallback, Twilio as MMS.
+ */
+export type SendOptions = { replyTo?: string; mediaUrl?: string; sendStyle?: SendStyle };
+
 /**
  * Every outbound text goes through one signature, whichever API carries it, so
  * reminders, digests, briefs, and agent replies stay unaware of the provider.
+ *
+ * `replyTo` comes back set only when the message was delivered threaded, which
+ * is not every time it was requested — the archive records what landed.
  */
-export type SmsSender = (db: Db, to: string, body: string) => Promise<{ sid: string; status: string }>;
+export type SmsSender = (
+  db: Db,
+  to: string,
+  body: string,
+  options?: SendOptions,
+) => Promise<{ sid: string; status: string; replyTo?: string }>;
 
 export function activeSmsProvider(db: Db): SmsProvider {
   return getNotificationPreferences(db).smsProvider;
@@ -33,8 +57,13 @@ const senders: Record<SmsProvider, SmsSender> = {
  * was selected but never connected fails loudly here, which the scheduler treats
  * as a delivery failure and retries.
  */
-export async function sendSms(db: Db, to: string, body: string): Promise<{ sid: string; status: string }> {
-  return senders[activeSmsProvider(db)](db, to, body);
+export async function sendSms(
+  db: Db,
+  to: string,
+  body: string,
+  options: SendOptions = {},
+): Promise<{ sid: string; status: string; replyTo?: string }> {
+  return senders[activeSmsProvider(db)](db, to, body, options);
 }
 
 const typingIndicators: Record<SmsProvider, (db: Db, to: string) => StopTypingIndicator> = {

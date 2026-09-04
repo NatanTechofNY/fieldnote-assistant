@@ -374,8 +374,9 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       direction: "inbound",
       role: "user",
       content: "Remember this conversation",
+      providerMessageId: "SB_remember",
       status: "received",
-      metadata: {},
+      metadata: { reactions: ["love"] },
       createdAt: "2026-07-20T20:00:00.000Z",
       updatedAt: "2026-07-20T20:00:00.000Z",
     }, {
@@ -428,6 +429,7 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       content: "Saved it as today's journal entry.",
       status: "delivered",
       metadata: {
+        replyTo: "SB_remember",
         parts: [{
           type: "tool-create_memory",
           tool_call_id: "call_remember",
@@ -1224,6 +1226,9 @@ it("renders secure messaging and event integration settings", async () => {
   await userEvent.click(screen.getByRole("tab", { name: /Sendblue/ }));
   expect(screen.getByText("Sendblue iMessage")).toBeInTheDocument();
   expect(screen.queryByText("Twilio SMS")).not.toBeInTheDocument();
+  // The tapback and threading tools have no UI of their own, so this panel is
+  // the only place they are announced.
+  expect(screen.getByText(/reply with a tapback instead of a message/)).toBeInTheDocument();
   expect(screen.getByLabelText("API key ID")).toHaveValue("");
   const delivery = screen.getByText("Delivery schedule").closest("details") as HTMLDetailsElement;
   expect(delivery.open).toBe(false);
@@ -1447,6 +1452,7 @@ it("explains searchable conversations and the core feature loops", async () => {
   expect(screen.getByText("Remember the conversation")).toBeInTheDocument();
   expect(screen.getByText("Four doors into the same system.")).toBeInTheDocument();
   expect(screen.getByText("iMessage with Sendblue")).toBeInTheDocument();
+  expect(screen.getByText(/answer with a tapback or reply inside a thread/)).toBeInTheDocument();
   expect(screen.getByText("Read from Atlassian")).toBeInTheDocument();
   expect(screen.getByText(/A brief you write in your own words runs on its own schedule/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: /Recall/ }));
@@ -1511,6 +1517,14 @@ it("renders complete channel conversation history", async () => {
   expect(screen.getByText("3 tool calls")).toBeInTheDocument();
   expect(screen.getByText("create_memory, set_todo_status ×2")).toBeInTheDocument();
   expect(traced?.querySelectorAll(".history-trace-run-body .history-trace")).toHaveLength(3);
+
+  // A tapback and a threaded reply are answers in their own right, so they read
+  // as part of the conversation rather than as arguments inside a tool card.
+  const reacted = document.querySelector(".history-message.inbound .history-reactions");
+  expect(reacted).toHaveTextContent("❤️");
+  const threaded = [...document.querySelectorAll(".history-message")]
+    .find(node => node.textContent?.includes("Saved it as today's journal entry."));
+  expect(threaded?.querySelector(".history-reply-quote")).toHaveTextContent("Remember this conversation");
 });
 
 /**

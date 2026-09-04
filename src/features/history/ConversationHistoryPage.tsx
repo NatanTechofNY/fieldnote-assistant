@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  BookOpen, Database, LoaderCircle, Mail, MessageSquareText, Phone, Search, Settings2, Sparkles,
+  BookOpen, CornerUpLeft, Database, LoaderCircle, Mail, MessageSquareText, Phone, Search,
+  Settings2, Sparkles,
 } from "lucide-react";
 import { api } from "../../api";
 import type {
@@ -60,6 +61,38 @@ function DigestBlock({ message }: { message: ChannelMessage }) {
       </details>
     </div>
   </div>;
+}
+
+/**
+ * Sendblue names the six classic tapbacks on the wire and takes an emoji for
+ * anything else. Messages draws all of them as a glyph, so an unrecognised value
+ * is already one and is shown as it arrived.
+ */
+const REACTION_GLYPHS: Record<string, string> = {
+  love: "❤️", like: "👍", dislike: "👎", laugh: "😂", emphasize: "‼️", question: "❓",
+};
+
+function messageReactions(message: ChannelMessage): string[] {
+  const raw = Array.isArray(message.metadata.reactions) ? message.metadata.reactions : [];
+  return raw
+    .filter((value): value is string => typeof value === "string")
+    .map(value => REACTION_GLYPHS[value] ?? value);
+}
+
+/**
+ * The message a threaded reply was drawn under. The handle is stored on both
+ * sides of the thread — inbound from the webhook, outbound from what Sendblue
+ * confirmed it delivered — so this reads the same either way.
+ */
+function replyParent(
+  message: ChannelMessage,
+  byProviderId: Map<string, ChannelMessage>,
+): { content: string } | null {
+  const handle = typeof message.metadata.replyTo === "string" ? message.metadata.replyTo : null;
+  if (!handle) return null;
+  // A reply can point at a message from before this archive existed, and that it
+  // was threaded at all is still worth drawing.
+  return byProviderId.get(handle) ?? { content: "an earlier message" };
 }
 
 function StartConversationButton() {
@@ -169,6 +202,9 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
     enabled: debouncedSearch.length >= 2,
   });
   const timeline = useMemo(() => historyTimeline(messages), [messages]);
+  const byProviderId = useMemo(() => new Map(messages
+    .filter(message => typeof message.providerMessageId === "string")
+    .map(message => [message.providerMessageId as string, message])), [messages]);
   const searchGroups = useMemo(() => {
     const groups = new Map<string, ConversationSearchHit[]>();
     for (const hit of searchResult?.hits ?? []) {
@@ -277,8 +313,14 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
             const isDigestRequest = message.role === "user"
               && (message.metadata.kind === "digest_brief" || message.metadata.kind === "daily_digest");
             const isJumpTarget = jump?.messageId === message.id;
+            const parent = replyParent(message, byProviderId);
+            const reactions = messageReactions(message);
             return <article key={message.id} ref={node => { if (node) messageRefs.current.set(message.id, node); else messageRefs.current.delete(message.id); }} className={`history-message ${message.direction} role-${message.role} ${isJumpTarget ? "search-hit" : ""}`}>
               <div className="history-bubble">
+                {parent && <div className="history-reply-quote">
+                  <CornerUpLeft size={11}/>
+                  <span>{parent.content}</span>
+                </div>}
                 {isReflectionRequest
                   ? <ReflectionGenerationBlock message={message}/>
                   : isDigestRequest
@@ -287,6 +329,9 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
                       content={message.content}
                       highlight={isJumpTarget ? jump.terms : undefined}
                     />}
+                {reactions.length > 0 && <div className="history-reactions">
+                  {reactions.map(reaction => <span key={reaction}>{reaction}</span>)}
+                </div>}
                 {traces.length > 0 && <div className="history-traces">
                   <HistoryToolGroup traces={traces}/>
                 </div>}

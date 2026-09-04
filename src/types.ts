@@ -150,7 +150,15 @@ export interface Overview {
 
 export interface Health {
   sqlite: { ok: boolean; records?: number };
-  algolia: { ok: boolean; configured: boolean; error?: string; todoRecords?: number; memoryRecords?: number; messageRecords?: number };
+  algolia: {
+    ok: boolean;
+    configured: boolean;
+    error?: string;
+    todoRecords?: number;
+    memoryRecords?: number;
+    messageRecords?: number;
+    productRecords?: number;
+  };
   agentStudio: { configured: boolean; agentId?: string };
   auth: { enabled: boolean };
   neuralSearch: { enabled: boolean };

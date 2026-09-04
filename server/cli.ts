@@ -1,10 +1,11 @@
 import { AlgoliaSync } from "./algolia.ts";
-import { openDatabase, resetDatabase, seedDatabase } from "./db.ts";
+import { loadStoreCatalog, openDatabase, resetDatabase, seedDatabase } from "./db.ts";
 
 export type CliCommand = "seed" | "reset" | "reindex" | "setup-algolia";
 
 export async function runCli(command: CliCommand): Promise<void> {
   const db = openDatabase();
+  loadStoreCatalog(db);
   const search = new AlgoliaSync(db);
   try {
     if (command === "seed") {

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { algoliasearch } from "algoliasearch";
 import {
-  getChannelMessage, getMemory, getTodo, now, queueIndexJob, USER_ID,
+  getChannelMessage, getMemory, getStoreProduct, getTodo, now, queueIndexJob, USER_ID,
 } from "./db.ts";
 import { getSearchPreferences } from "./integrations.ts";
 import type { ChannelMessageRow, Db, EntityType, IndexJobRow } from "./types.ts";
@@ -83,7 +83,13 @@ export interface AlgoliaOptions {
   todoIndex?: string;
   memoryIndex?: string;
   messageIndex?: string;
+  productIndex?: string;
   settingsDirectory?: string;
+}
+
+export interface ProductSearchFilters {
+  category?: string | null;
+  maxPriceCents?: number | null;
 }
 
 export interface FlushResult {
@@ -114,6 +120,7 @@ export class AlgoliaSync {
   readonly todoIndex: string;
   readonly memoryIndex: string;
   readonly messageIndex: string;
+  readonly productIndex: string;
   readonly client: AlgoliaClient | null;
   readonly settingsDirectory: string;
   /** Per-index memo of the `filterOnly(userId)` check, keyed by index name. */
@@ -124,6 +131,7 @@ export class AlgoliaSync {
     this.todoIndex = options.todoIndex || process.env.ALGOLIA_TODO_INDEX || "devcon_assistant_todos";
     this.memoryIndex = options.memoryIndex || process.env.ALGOLIA_MEMORY_INDEX || "devcon_assistant_memories";
     this.messageIndex = options.messageIndex || process.env.ALGOLIA_MESSAGE_INDEX || "devcon_assistant_messages";
+    this.productIndex = options.productIndex || process.env.ALGOLIA_PRODUCT_INDEX || "devcon_assistant_products";
     this.settingsDirectory = options.settingsDirectory
       || resolve(process.cwd(), "agent-studio/indices");
     this.client = "client" in options ? (options.client ?? null) : this.createClient();
@@ -142,6 +150,7 @@ export class AlgoliaSync {
   private indexFor(entityType: EntityType): string {
     if (entityType === "todo") return this.todoIndex;
     if (entityType === "memory") return this.memoryIndex;
+    if (entityType === "product") return this.productIndex;
     return this.messageIndex;
   }
 
@@ -199,6 +208,29 @@ export class AlgoliaSync {
         review_worthy: Boolean(row.review_worthy),
         tags: JSON.parse(row.tags_json),
         created_at: row.created_at,
+        updated_at: row.updated_at,
+      };
+    }
+    if (entityType === "product") {
+      const row = getStoreProduct(this.db, entityId);
+      if (!row) return null;
+      // The catalog is not personal data, but every index carries the demo
+      // user's filter so the same guarded search path serves all of them.
+      return {
+        objectID: row.id,
+        userId: USER_ID,
+        sku: row.sku,
+        store: row.store,
+        name: row.name,
+        brand: row.brand,
+        description: row.description,
+        category: row.category,
+        symptoms: JSON.parse(row.symptoms_json),
+        size: row.size,
+        price_cents: row.price_cents,
+        image_url: row.image_url,
+        product_url: row.product_url,
+        popularity: row.popularity,
         updated_at: row.updated_at,
       };
     }
@@ -343,6 +375,11 @@ export class AlgoliaSync {
             AND COALESCE(json_extract(m.metadata_json,'$.internal'),0)=0
         `),
       },
+      {
+        indexName: this.productIndex,
+        entityType: "product",
+        ids: (this.db.prepare("SELECT id FROM store_products").all() as Array<{ id: string }>).map(row => row.id),
+      },
     ];
   }
 
@@ -410,15 +447,17 @@ export class AlgoliaSync {
     const read = async (file: string) => (
       JSON.parse(await readFile(resolve(directory, file), "utf8")) as Record<string, unknown>
     );
-    const [todos, memories, messages] = await Promise.all([
+    const [todos, memories, messages, products] = await Promise.all([
       read("todos.settings.json"),
       read("memories.settings.json"),
       read("messages.settings.json"),
+      read("products.settings.json"),
     ]);
     return [
       { indexName: this.todoIndex, indexSettings: todos },
       { indexName: this.memoryIndex, indexSettings: memories },
       { indexName: this.messageIndex, indexSettings: messages },
+      { indexName: this.productIndex, indexSettings: products },
     ];
   }
 
@@ -490,13 +529,15 @@ export class AlgoliaSync {
     todoRecords?: number;
     memoryRecords?: number;
     messageRecords?: number;
+    productRecords?: number;
   }> {
     if (!this.client) return { ok: true, configured: false };
     try {
-      const [todos, memories, messages] = await Promise.all([
+      const [todos, memories, messages, products] = await Promise.all([
         this.client.searchSingleIndex({ indexName: this.todoIndex, searchParams: { query: "", hitsPerPage: 0 } }),
         this.client.searchSingleIndex({ indexName: this.memoryIndex, searchParams: { query: "", hitsPerPage: 0 } }),
         this.client.searchSingleIndex({ indexName: this.messageIndex, searchParams: { query: "", hitsPerPage: 0 } }),
+        this.client.searchSingleIndex({ indexName: this.productIndex, searchParams: { query: "", hitsPerPage: 0 } }),
       ]);
       return {
         ok: true,
@@ -504,6 +545,7 @@ export class AlgoliaSync {
         todoRecords: "nbHits" in todos ? todos.nbHits : undefined,
         memoryRecords: "nbHits" in memories ? memories.nbHits : undefined,
         messageRecords: "nbHits" in messages ? messages.nbHits : undefined,
+        productRecords: "nbHits" in products ? products.nbHits : undefined,
       };
     } catch (error) {
       return { ok: false, configured: true, error: errorText(error) };
@@ -594,6 +636,26 @@ export class AlgoliaSync {
       query,
       limit: options.limit ?? 50,
       filters: facets,
+      attributesToRetrieve: ["objectID"],
+    });
+    return hits.map(hit => String(hit.objectID));
+  }
+
+  /**
+   * Ranked catalog IDs, hydrated by the caller from `store_products`. A price
+   * cap is a numeric filter rather than a facet, so it is spelled inline.
+   */
+  async searchProducts(
+    query: string,
+    options: { limit?: number } & ProductSearchFilters = {},
+  ): Promise<string[]> {
+    const filters: string[] = [];
+    if (options.category) filters.push(`category:"${escapeFilterValue(options.category)}"`);
+    if (options.maxPriceCents != null) filters.push(`price_cents <= ${Math.floor(options.maxPriceCents)}`);
+    const hits = await this.searchIndex(this.productIndex, "Product", {
+      query,
+      limit: options.limit ?? 5,
+      filters,
       attributesToRetrieve: ["objectID"],
     });
     return hits.map(hit => String(hit.objectID));

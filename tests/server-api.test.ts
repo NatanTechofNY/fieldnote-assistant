@@ -5,11 +5,11 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { runSmsAgent } from "../server/agent-runner.ts";
+import { recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
 import { AlgoliaSync } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
-import { getTodo, openDatabase, queueIndexJob, USER_ID } from "../server/db.ts";
+import { getTodo, loadStoreCatalog, openDatabase, queueIndexJob, readStoreCatalog, USER_ID } from "../server/db.ts";
 import { currentFiscalQuarter, fiscalQuarterRange } from "../server/fiscal-quarter.ts";
 import { reflectionPeriod } from "../server/reflection-period.ts";
 import {
@@ -25,8 +25,10 @@ import {
   setSmsProvider,
 } from "../server/integrations.ts";
 import { enqueueExternalEvent } from "../server/event-ingestion.ts";
+import { sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
-import { startSendblueTypingIndicator } from "../server/sendblue-service.ts";
+import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
+import { executeAgentTool, type ToolTurnContext } from "../server/tool-executor.ts";
 import { runWorkerOnce, startWorker } from "../server/worker.ts";
 import type { Db } from "../server/types.ts";
 
@@ -119,6 +121,7 @@ describe("frontend API contract", () => {
         todos: "devcon_assistant_todos",
         memories: "devcon_assistant_memories",
         messages: "devcon_assistant_messages",
+        products: "devcon_assistant_products",
       },
       pendingIndexJobs: 0,
     });
@@ -1192,7 +1195,7 @@ describe("NeuralSearch toggle", () => {
     const sync = new AlgoliaSync(db, { client: client as never });
 
     await sync.setup();
-    assert.equal(client.applied.length, 3);
+    assert.equal(client.applied.length, 4);
     // A settings task on a NeuralSearch index stays unpublished while the index
     // re-vectorizes, so waiting makes this a multi-minute call and can time out
     // on settings Algolia already accepted.
@@ -1206,7 +1209,7 @@ describe("NeuralSearch toggle", () => {
     const sync = new AlgoliaSync(db, { client: client as never });
 
     await sync.setup();
-    assert.equal(client.applied.length, 3);
+    assert.equal(client.applied.length, 4);
     for (const entry of client.applied) {
       assert.equal("mode" in entry.indexSettings, false, "writing mode is refused even when it already holds that value");
     }
@@ -1224,7 +1227,7 @@ describe("NeuralSearch toggle", () => {
 
     saveSearchPreferences(db, { neuralSearchEnabled: true });
     assert.deepEqual(await sync.setup(), { configured: true, details: { search: "neural" } });
-    assert.deepEqual(client.semantic.map(entry => entry.body.neuralSearchMode), ["active", "active", "active"]);
+    assert.deepEqual(client.semantic.map(entry => entry.body.neuralSearchMode), ["active", "active", "active", "active"]);
     // No leading slash: with one the client fails as "Unreachable hosts".
     assert.deepEqual(
       client.semantic.map(entry => entry.path),
@@ -1232,6 +1235,7 @@ describe("NeuralSearch toggle", () => {
         "1/indexes/devcon_assistant_todos/semanticSearch/settings",
         "1/indexes/devcon_assistant_memories/semanticSearch/settings",
         "1/indexes/devcon_assistant_messages/semanticSearch/settings",
+        "1/indexes/devcon_assistant_products/semanticSearch/settings",
       ],
     );
   });
@@ -1249,7 +1253,7 @@ describe("NeuralSearch toggle", () => {
 
     saveSearchPreferences(db, { neuralSearchEnabled: false });
     await sync.setup();
-    assert.deepEqual(client.semantic.map(entry => entry.body.neuralSearchMode), ["inactive", "inactive", "inactive"]);
+    assert.deepEqual(client.semantic.map(entry => entry.body.neuralSearchMode), ["inactive", "inactive", "inactive", "inactive"]);
   });
 
   it("names the attributes to vectorize, which is what activation without events requires", async () => {
@@ -1279,7 +1283,7 @@ describe("NeuralSearch toggle", () => {
     assert.equal(result.details?.search, "keyword");
     assert.equal(result.details?.neuralSearch, "unavailable");
     assert.match(String(result.details?.warning), /SemanticSearch: no events/);
-    assert.equal(client.applied.length, 3, "the indices still get their keyword settings");
+    assert.equal(client.applied.length, 4, "the indices still get their keyword settings");
   });
 
   it("persists the toggle over REST and reapplies index settings", async () => {
@@ -1350,7 +1354,7 @@ describe("Agent Studio configuration sync", () => {
       agentId: "agent",
       fetcher,
     });
-    assert.equal(result.clientTools, 27);
+    assert.equal(result.clientTools, 31);
     assert.equal(result.preservedTools, 1, "unrelated tools survive, the search tool is rebuilt not preserved");
     assert.equal(result.searchIndices, 3);
     assert.deepEqual(calls.map(call => call.method), ["GET", "PATCH", "POST"]);
@@ -1403,7 +1407,7 @@ describe("Agent Studio configuration sync", () => {
       assert.deepEqual(controls.facets.default, expected, `${index.index} exposes only safe facets`);
       assert.deepEqual(parameters.facets, expected, `${index.index} requests the same set it allows`);
     }
-    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 27);
+    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 31);
     assert.ok(!patch.tools.some(tool => tool.name === "list_memories"));
     assert.ok(patch.tools.some(tool => tool.name === "list_jira_issues" && "inputSchema" in tool));
     assert.ok(patch.tools.some(tool => tool.name === "create_memory" && "inputSchema" in tool));
@@ -1911,17 +1915,20 @@ describe("SMS, reminders, and channel agent execution", () => {
 
 describe("agent tools over /api/agent/tools/:name", () => {
   /** Every local tool the agent is allowed to call, exercised end to end. */
-  it("covers all nineteen local tools declared in the client contract", async () => {
+  it("covers all twenty-one local tools declared in the client contract", async () => {
     const { api, db } = fixture();
     const call = async (name: string, input: object = {}, expected = 200) =>
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
     const declared = Object.keys(toolInput);
-    assert.equal(declared.length, 27, "the tool contract changed; extend this test with it");
+    assert.equal(declared.length, 31, "the tool contract changed; extend this test with it");
     // The Atlassian tools read a remote system rather than SQLite, so they are
-    // exercised against a stubbed site in their own block instead of here.
+    // exercised against a stubbed site in their own block instead of here, as
+    // are the shopping tools, which read the store catalog.
     const remote = declared.filter(name => /_(jira|confluence)_/.test(name));
     assert.equal(remote.length, 8, "every Atlassian tool has to be named for its product");
+    const shopping = declared.filter(name => /product/.test(name));
+    assert.equal(shopping.length, 2, "both shopping tools name the product");
 
     const areas = (await call("list_life_areas")).data;
     const work = areas.find((area: { slug: string }) => area.slug === "work");
@@ -2021,6 +2028,17 @@ describe("agent tools over /api/agent/tools/:name", () => {
     const context = (await call("get_conversation_context", { thread_id: "thread_ctx", limit: 5 })).data;
     assert.equal(context.messages[0].content, "What did we decide?");
 
+    /*
+     * Both iMessage tools act on the message that started the turn, and a
+     * browser call has none. Answering 400 rather than 500 is what stops the
+     * agent from retrying a request that cannot succeed from here.
+     */
+    for (const name of ["react_to_message", "reply_in_thread"]) {
+      const refused = await call(name, name === "react_to_message" ? { reaction: "love" } : {}, 400);
+      assert.match(refused.error, /no iMessage to act on/);
+    }
+    await call("react_to_message", { reaction: "🔥🔥" }, 400);
+
     await call("delete_memory", { id: memory.id }, 409);
     assert.equal((await call("delete_memory", { id: memory.id, confirmed: true })).data.id, memory.id);
     await call("delete_todo", { id: created.id }, 409);
@@ -2031,7 +2049,9 @@ describe("agent tools over /api/agent/tools/:name", () => {
       "create_reminder", "list_reminders", "update_reminder", "delete_reminder", "create_memory",
       "get_memory", "update_memory", "get_agenda", "get_review_evidence", "get_reflection_evidence",
       "get_conversation_context", "delete_memory", "delete_todo",
+      "react_to_message", "reply_in_thread",
       ...remote,
+      ...shopping,
     ]);
     assert.deepEqual(declared.filter(name => !exercised.has(name)), [], "every declared tool must be covered");
   });
@@ -2134,6 +2154,299 @@ describe("agent tools over /api/agent/tools/:name", () => {
     await api.post("/api/agent/tools/get_memory").send({ id: "mem_missing" }).expect(404);
     await api.post("/api/agent/tools/update_reminder")
       .send({ id: "rem_missing", reminder_at: "2030-01-01T00:00:00.000Z" }).expect(404);
+  });
+});
+
+describe("store catalog and shopping tools", () => {
+  const ADDRESS = "+17185551111";
+
+  type Sent = { to: string; body: string; options?: { mediaUrl?: string; replyTo?: string } };
+
+  /** A loaded catalog plus an SMS turn context whose sends are captured rather than delivered. */
+  function shoppingFixture() {
+    const context = fixture();
+    loadStoreCatalog(context.db);
+    const sent: Sent[] = [];
+    let handle = 0;
+    const sendSms = async (_db: Db, to: string, body: string, options?: Sent["options"]) => {
+      sent.push({ to, body, options });
+      handle += 1;
+      return { sid: `SB_card_${handle}`, status: "queued" };
+    };
+    const threadId = (context.db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_shop',?,'sms',?,'alg_cnv_shop',?,?) RETURNING id
+    `).get(USER_ID, ADDRESS, new Date().toISOString(), new Date().toISOString()) as { id: string }).id;
+    const turn: ToolTurnContext = { channel: "sms", address: ADDRESS, threadId, provider: "sendblue", sendSms };
+    return { ...context, sent, turn };
+  }
+
+  it("loads the checked-in catalog once and queues each product for indexing", () => {
+    const { db } = fixture();
+    const before = (db.prepare("SELECT count(*) count FROM index_jobs").get() as { count: number }).count;
+    assert.equal(before, 0, "a database opened for a test starts with an empty outbox");
+
+    const first = loadStoreCatalog(db);
+    const rows = db.prepare("SELECT id,sku FROM store_products ORDER BY sku").all() as Array<{ id: string; sku: string }>;
+    assert.ok(rows.length >= 25, "the demo catalog covers a full sick-day shelf");
+    assert.equal(first.changed, rows.length);
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM index_jobs WHERE entity_type='product'").get() as { count: number }).count,
+      rows.length,
+      "every catalog row reaches Algolia through the same outbox as the user's records",
+    );
+    assert.equal(rows[0].id, `product_${rows[0].sku.toLowerCase().replace("-", "_")}`, "IDs derive from the SKU");
+
+    assert.equal(loadStoreCatalog(db).changed, 0, "an unchanged file must not churn the outbox on every boot");
+
+    // A shorter file removes the missing products and tells the index to drop them.
+    const trimmed = readStoreCatalog().slice(0, 3);
+    const removed = rows.length - trimmed.length;
+    assert.equal(loadStoreCatalog(db, trimmed).changed, removed);
+    assert.equal((db.prepare("SELECT count(*) count FROM store_products").get() as { count: number }).count, 3);
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM index_jobs WHERE entity_type='product' AND operation='delete'").get() as { count: number }).count,
+      removed,
+    );
+  });
+
+  it("projects a product into the products index behind the demo user's filter", async () => {
+    const { db } = fixture();
+    loadStoreCatalog(db);
+    const saved: Array<Record<string, unknown>> = [];
+    const client = {
+      async saveObjects(input: Record<string, unknown>) {
+        assert.equal(input.indexName, "devcon_assistant_products");
+        saved.push(...input.objects as Array<Record<string, unknown>>);
+        return [];
+      },
+      async deleteObjects() { return {}; },
+    };
+    const sync = new AlgoliaSync(db, { client: client as never });
+    assert.equal(sync.productIndex, "devcon_assistant_products");
+    const total = (db.prepare("SELECT count(*) count FROM store_products").get() as { count: number }).count;
+    assert.equal((await sync.flush({ limit: 100 })).succeeded, total);
+    const advil = saved.find(record => record.sku === "WAG-1002");
+    assert.ok(advil, "the catalog rows are what gets indexed");
+    assert.equal(advil.userId, USER_ID, "every index carries the user filter so one guarded search path serves all of them");
+    assert.equal(advil.name, "Advil Ibuprofen Tablets 200 mg");
+    assert.ok((advil.symptoms as string[]).includes("headache"));
+    assert.equal(typeof advil.image_url, "string");
+    assert.equal(typeof advil.product_url, "string");
+    assert.equal(typeof advil.price_cents, "number");
+  });
+
+  it("finds products by symptom without Algolia and reports which store answered", async () => {
+    const { api, db } = shoppingFixture();
+    const call = async (name: string, input: object = {}, expected = 200) =>
+      (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
+
+    const result = (await call("search_store_products", { query: "headache", category: null, max_price: null, limit: 3 })).data;
+    assert.equal(result.store, "Walgreens");
+    assert.equal(result.source, "local", "no Algolia client means the SQLite ranking answers");
+    assert.equal(result.products.length, 3);
+    for (const product of result.products) {
+      assert.ok(
+        (product.symptoms as string[]).includes("headache") || /headache/i.test(product.description),
+        `${product.name} is not a headache product`,
+      );
+      assert.match(product.price, /^\$\d+\.\d\d$/);
+      assert.match(product.product_url, /^https:\/\/www\.walgreens\.com\//);
+      assert.match(product.image_url, /^https:\/\//);
+    }
+    assert.equal(result.products[0].name, "Advil Ibuprofen Tablets 200 mg", "ties break on popularity");
+
+    const cheap = (await call("search_store_products", { query: "cough sore throat", max_price: 5, limit: 10 })).data;
+    assert.ok(cheap.products.length > 0);
+    assert.ok(cheap.products.every((product: { price_cents: number }) => product.price_cents <= 500), "the price cap is in dollars");
+
+    const aisle = (await call("search_store_products", { query: "cold", category: "cough-throat", limit: 10 })).data;
+    assert.ok(aisle.products.every((product: { category: string }) => product.category === "cough-throat"));
+
+    await call("search_store_products", { query: "cold", category: "toys" }, 400);
+    await call("search_store_products", { query: "" }, 400);
+    assert.deepEqual((await call("search_store_products", { query: "zzzzqqq" })).data.products, [], "no match is an empty list, not an error");
+
+    // With Algolia configured the ranked IDs come from the index and SQLite hydrates them.
+    const search = {
+      flushSoon() {},
+      client: {},
+      async searchProducts(query: string) {
+        assert.equal(query, "migraine");
+        return [(db.prepare("SELECT id FROM store_products WHERE sku='WAG-1005'").get() as { id: string }).id, "product_gone"];
+      },
+    };
+    const ranked = await executeAgentTool(db, search as never, "search_store_products", { query: "migraine" }) as {
+      source: string; products: Array<{ name: string }>;
+    };
+    assert.equal(ranked.source, "algolia");
+    assert.deepEqual(ranked.products.map(product => product.name), ["Excedrin Migraine Caplets"], "an ID the catalog no longer holds is dropped");
+
+    const failing = {
+      flushSoon() {},
+      client: {},
+      async searchProducts() { throw new Error("Algolia is down"); },
+    };
+    const fallback = await executeAgentTool(db, failing as never, "search_store_products", { query: "headache", limit: 1 }) as {
+      source: string; products: unknown[];
+    };
+    assert.equal(fallback.source, "local", "a search outage on stage still gets an answer");
+    assert.equal(fallback.products.length, 1);
+  });
+
+  it("texts one picture card per product on SMS and files each in the thread", async () => {
+    const { db, sent, turn } = shoppingFixture();
+    const ids = (db.prepare("SELECT id FROM store_products WHERE sku IN ('WAG-1002','WAG-1001') ORDER BY sku DESC").all() as Array<{ id: string }>)
+      .map(row => row.id);
+
+    const result = await executeAgentTool(db, fakeSearch(db) as never, "send_product_cards", {
+      product_ids: [...ids, "product_missing"],
+      note: null,
+    }, turn) as { channel: string; sent: number; cards: Array<Record<string, unknown>>; failed: Array<{ id: string; error: string }> };
+
+    assert.equal(result.channel, "sms");
+    assert.equal(result.sent, 2);
+    assert.deepEqual(result.failed, [{ id: "product_missing", error: "Product not found" }], "an unknown ID is reported, not fatal");
+    assert.equal(sent.length, 2, "one message per product, no extra text when note is null");
+    assert.deepEqual(sent.map(message => message.to), [ADDRESS, ADDRESS]);
+    // The agent's ranking is the order the cards land in.
+    assert.match(sent[0].body, /^Advil Ibuprofen Tablets 200 mg \(100 tablets\) — \$11\.49\nhttps:\/\/www\.walgreens\.com\//);
+    assert.match(sent[1].body, /^Tylenol Extra Strength Caplets 500 mg/);
+    assert.match(String(sent[0].options?.mediaUrl), /^https:\/\/upload\.wikimedia\.org\/.*\.jpg$/, "the picture rides as media on the same message");
+    assert.equal(sent[0].options?.replyTo, undefined, "cards are never threaded");
+
+    const rows = db.prepare(`
+      SELECT content,provider_message_id,status,metadata_json FROM channel_messages
+      WHERE thread_id='thread_shop' AND direction='outbound' ORDER BY created_at,rowid
+    `).all() as Array<{ content: string; provider_message_id: string; status: string; metadata_json: string }>;
+    assert.equal(rows.length, 2, "each card is a row in the archive the history page reads");
+    assert.deepEqual(rows.map(row => row.provider_message_id), ["SB_card_1", "SB_card_2"]);
+    assert.deepEqual(rows.map(row => row.status), ["queued", "queued"]);
+    const metadata = JSON.parse(rows[0].metadata_json) as { kind: string; mediaUrl: string; productCard: { name: string } };
+    assert.equal(metadata.kind, "product_card");
+    assert.equal(metadata.productCard.name, "Advil Ibuprofen Tablets 200 mg");
+    assert.equal(metadata.mediaUrl, sent[0].options?.mediaUrl);
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM index_jobs WHERE entity_type='channel_message'").get() as { count: number }).count,
+      2,
+      "card rows are indexed like any other assistant message",
+    );
+    assert.deepEqual(result.cards.map(card => card.message_handle), ["SB_card_1", "SB_card_2"]);
+  });
+
+  it("sends the note first, keeps going past a failed card, and caps the batch at three", async () => {
+    const { db, sent, turn } = shoppingFixture();
+    const ids = (db.prepare("SELECT id FROM store_products ORDER BY popularity DESC LIMIT 3").all() as Array<{ id: string }>)
+      .map(row => row.id);
+    let calls = 0;
+    turn.sendSms = async (_db: Db, to: string, body: string, options?: Sent["options"]) => {
+      calls += 1;
+      if (calls === 3) throw new Error("Sendblue could not send the message (4001): media too large");
+      sent.push({ to, body, options });
+      return { sid: `SB_${calls}`, status: "queued" };
+    };
+
+    const result = await executeAgentTool(db, fakeSearch(db) as never, "send_product_cards", {
+      product_ids: ids,
+      note: "Three things that should help tonight:",
+    }, turn) as { sent: number; failed: Array<{ id: string; error: string }> };
+
+    assert.equal(sent[0].body, "Three things that should help tonight:");
+    assert.equal(sent[0].options, undefined, "the note is plain text");
+    assert.equal(result.sent, 2);
+    assert.equal(result.failed.length, 1);
+    assert.equal(result.failed[0].id, ids[1]);
+    assert.match(result.failed[0].error, /media too large/);
+    assert.equal(calls, 4, "one failed card does not stop the ones behind it");
+
+    await assert.rejects(
+      executeAgentTool(db, fakeSearch(db) as never, "send_product_cards", { product_ids: [...ids, ids[0]] }, turn),
+      /Too big|at most 3|<=3/i,
+    );
+    await assert.rejects(
+      executeAgentTool(db, fakeSearch(db) as never, "send_product_cards", { product_ids: [] }, turn),
+    );
+  });
+
+  it("returns the cards without sending when the turn is not on SMS", async () => {
+    const { api, db, sent } = shoppingFixture();
+    const id = (db.prepare("SELECT id FROM store_products WHERE sku='WAG-2001'").get() as { id: string }).id;
+
+    // The browser reaches the executor over HTTP with no turn context at all.
+    const web = (await api.post("/api/agent/tools/send_product_cards").send({ product_ids: [id], note: null }).expect(200)).body.data;
+    assert.equal(web.channel, "web");
+    assert.equal(web.sent, 0);
+    assert.equal(web.cards.length, 1);
+    assert.equal(web.cards[0].name, "Vicks DayQuil Cold & Flu LiquiCaps");
+    assert.match(web.cards[0].caption, /DayQuil.*\$12\.99\nhttps:\/\//s, "the caption is returned so the agent can describe the card");
+    assert.deepEqual(sent, [], "nothing is texted from a web turn");
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM channel_messages").get() as { count: number }).count,
+      0,
+      "and nothing is filed on an SMS thread that was never used",
+    );
+  });
+
+  it("delivers the cards through the worker when the agent asks for them mid-turn", async () => {
+    const { db, api } = fixture();
+    loadStoreCatalog(db);
+    saveSendblueConfig(db, {
+      apiKeyId: "sendblue-key-id", apiSecret: "sendblue-api-secret", fromPhone: "+15551234567",
+      webhookBaseUrl: "https://assistant.example.com", webhookSecret: "secret",
+    }, { webhooksRegistered: true, autoTypingIndicator: true, autoMarkRead: true });
+    saveNotificationPreferences(db, {
+      smsEnabled: true, recipientPhone: ADDRESS, timezone: "UTC", dailyDigestEnabled: false,
+      dailyDigestTime: "09:00", quietHoursStart: null, quietHoursEnd: null,
+    });
+    setSmsProvider(db, "sendblue");
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    const id = (db.prepare("SELECT id FROM store_products WHERE sku='WAG-1002'").get() as { id: string }).id;
+    await api.post("/api/webhooks/sendblue/inbound?token=secret").send({
+      from_number: ADDRESS,
+      number: ADDRESS,
+      to_number: "+15551234567",
+      content: "I have a headache, find me something",
+      message_handle: "SB_headache",
+      is_outbound: false,
+      service: "iMessage",
+    }).expect(200);
+
+    const sent: Sent[] = [];
+    let call = 0;
+    const agent: typeof fetch = async () => {
+      call += 1;
+      return new Response(JSON.stringify(call === 1
+        ? {
+          role: "assistant",
+          parts: [{ type: "tool-send_product_cards", tool_call_id: "call_1", state: "input-available", input: { product_ids: [id], note: null } }],
+        }
+        : { role: "assistant", parts: [{ type: "text", text: "Advil is the quickest of those." }] }), { status: 200 });
+    };
+    await runWorkerOnce(db, fakeSearch(db) as never, {
+      sendSms: async (_db: Db, to: string, body: string, options?: Sent["options"]) => {
+        sent.push({ to, body, options });
+        return { sid: `SB_${sent.length}`, status: "queued" };
+      },
+      runSmsAgent: (runDb, search, from, body, handle, options) =>
+        runSmsAgent(runDb, search, from, body, handle, { ...options, fetcher: agent }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    });
+
+    assert.equal(sent.length, 2, "the card goes out during the turn and the reply after it");
+    assert.match(sent[0].body, /^Advil Ibuprofen/);
+    assert.match(String(sent[0].options?.mediaUrl), /^https:\/\//, "the worker's own sender carries the picture");
+    assert.equal(sent[1].body, "Advil is the quickest of those.");
+    assert.equal(sent[1].options?.mediaUrl, undefined);
+    const outbound = db.prepare(`
+      SELECT content,provider_message_id FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      WHERE t.address=? AND m.direction='outbound' AND m.role='assistant' ORDER BY m.created_at,m.rowid
+    `).all(ADDRESS) as Array<{ content: string; provider_message_id: string }>;
+    assert.deepEqual(outbound.map(row => row.provider_message_id), ["SB_1", "SB_2"], "the final reply is filed under its own handle, not the card's");
+    assert.match(outbound[0].content, /^Advil Ibuprofen/);
+    assert.equal(outbound[1].content, "Advil is the quickest of those.");
   });
 });
 
@@ -2833,6 +3146,28 @@ describe("Sendblue provider", () => {
     assert.deepEqual(reminder, { status: "sent", provider_message_id: "SB_reminder" });
   });
 
+  it("attaches a picture and an effect only when the send asks for them", async () => {
+    const { db } = connectedFixture();
+    const stub = stubSendblue({ "/api/send-message": () => accepted("SB_media") });
+    try {
+      const card = await sendSendblueSms(db, RECIPIENT, "Advil — $11.49", {
+        mediaUrl: "https://images.example.com/advil.jpg",
+        sendStyle: "gentle",
+      });
+      assert.equal(card.sid, "SB_media");
+      const plain = await sendSendblueSms(db, RECIPIENT, "Feel better.");
+      assert.equal(plain.sid, "SB_media");
+    } finally { stub.restore(); }
+
+    const [withMedia, withoutMedia] = stub.calls.filter(call => call.url.pathname === "/api/send-message");
+    assert.equal(withMedia.body.content, "Advil — $11.49");
+    assert.equal(withMedia.body.media_url, "https://images.example.com/advil.jpg", "Sendblue fetches the picture from this URL itself");
+    assert.equal(withMedia.body.send_style, "gentle");
+    assert.equal("media_url" in withoutMedia.body, false, "a text-only send carries no media key");
+    assert.equal("send_style" in withoutMedia.body, false);
+    assert.equal("reply_to" in withoutMedia.body, false);
+  });
+
   it("treats a declined message as a delivery failure rather than a send", async () => {
     const { db, api } = connectedFixture();
     await api.post("/api/todos")
@@ -2907,6 +3242,308 @@ describe("Sendblue provider", () => {
       (db.prepare("SELECT status FROM external_events WHERE external_id='SB_inbound'").get() as { status: string }).status,
       "processed",
     );
+  });
+
+  /**
+   * Two turns' worth of Agent Studio: one that calls a tool, one that answers in
+   * words. The completion fetcher is passed explicitly so the global `fetch`
+   * stub is left to serve Sendblue, which is what the tool itself reaches for.
+   */
+  function agentCalling(tool: string, input: Record<string, unknown>, text: string): typeof fetch {
+    let call = 0;
+    return async () => {
+      call += 1;
+      return new Response(JSON.stringify(call === 1
+        ? {
+          role: "assistant",
+          parts: [{ type: `tool-${tool}`, tool_call_id: "call_1", state: "input-available", input }],
+        }
+        : { role: "assistant", parts: [{ type: "text", text }] }), { status: 200 });
+    };
+  }
+
+  function agentStudioEnv(): void {
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+  }
+
+  it("puts a tapback on the message it is answering", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({
+      "/api/send-reaction": () => json({ status: "OK", message: "Reaction request sent" }),
+    });
+    let response;
+    try {
+      response = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "shipped it", "SB_shipped", {
+        fetcher: agentCalling("react_to_message", { reaction: "🔥" }, "Nice."),
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    const reaction = stub.calls.find(call => call.url.pathname === "/api/send-reaction");
+    assert.deepEqual(reaction?.body, {
+      from_number: LINE,
+      message_handle: "SB_shipped",
+      reaction: "🔥",
+    }, "a tapback lands on the message that started the turn, sent from our own line");
+    assert.equal(response?.text, "Nice.");
+    assert.equal(response?.replyTo, undefined, "reacting does not thread the answer as well");
+    const trace = db.prepare(`
+      SELECT content,metadata_json FROM channel_messages WHERE role='tool'
+    `).get() as { content: string; metadata_json: string };
+    assert.equal(trace.content, "react_to_message");
+    assert.equal(JSON.parse(trace.metadata_json).output.success, true);
+    // A tapback is the whole reply, so the archive has to draw it on the message
+    // it landed on. Left only as a tool row it reads as a turn that said nothing.
+    const reacted = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_shipped'
+    `).get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(reacted.metadata_json).reactions, ["🔥"]);
+  });
+
+  /*
+   * Sendblue spells a removal `-love`, and the archive has to follow it back off
+   * rather than leaving a tapback drawn on a message that no longer carries one.
+   */
+  it("takes a tapback back off the message when the agent removes it", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let call = 0;
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "shipped it", "SB_shipped", {
+        fetcher: async () => {
+          call += 1;
+          return new Response(JSON.stringify(call === 1
+            ? {
+              role: "assistant",
+              parts: ["love", "-love"].map((reaction, index) => ({
+                type: "tool-react_to_message",
+                tool_call_id: `call_${index}`,
+                state: "input-available",
+                input: { reaction },
+              })),
+            }
+            : { role: "assistant", parts: [{ type: "text", text: "Changed my mind." }] }), { status: 200 });
+        },
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    const reacted = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_shipped'
+    `).get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(reacted.metadata_json).reactions, []);
+  });
+
+  /*
+   * Reactions are an iMessage feature and Sendblue says so with a 422 that names
+   * the reason. Handing that back as a failed tool result is what lets the agent
+   * answer in words instead; a thrown 500 would only get the call retried.
+   */
+  it("hands a refused reaction back to the agent instead of failing the turn", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({
+      "/api/send-reaction": () => json({
+        status: "ERROR",
+        message: "unsupported_target",
+        detail: "Reactions are only supported on iMessage messages.",
+      }, 422),
+    });
+    let response;
+    try {
+      response = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "ok", "SB_sms", {
+        fetcher: agentCalling("react_to_message", { reaction: "like" }, "Got it."),
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.equal(response?.text, "Got it.");
+    const trace = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE role='tool'
+    `).get() as { metadata_json: string };
+    const output = JSON.parse(trace.metadata_json).output as { success: boolean; error: string };
+    assert.equal(output.success, false);
+    assert.match(output.error, /only supported on iMessage/, "the readable half of the refusal is in `detail`");
+  });
+
+  it("refuses a reaction that is not one tapback before spending a request", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "ok", "SB_bad", {
+        fetcher: agentCalling("react_to_message", { reaction: "sounds good 🔥" }, "Done."),
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction"),
+      [],
+      "prose and multiple emoji are rejected locally rather than by the API",
+    );
+  });
+
+  it("threads the answer under the message when the agent asks it to", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-message": () => accepted("SB_threaded") });
+    let response;
+    try {
+      response = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "what about the flight?", "SB_flight", {
+        fetcher: agentCalling("reply_in_thread", {}, "Boards at 6."),
+        inbound: { provider: "sendblue" },
+      });
+      assert.equal(response.replyTo, "SB_flight");
+      const delivered = await sendSms(db, RECIPIENT, response.text, { replyTo: response.replyTo });
+      recordOutboundProviderMessage(db, response.threadId, delivered.sid, delivered.status, delivered.replyTo);
+    } finally { stub.restore(); }
+
+    const sent = stub.calls.find(call => call.url.pathname === "/api/send-message");
+    assert.deepEqual(
+      sent?.body.reply_to,
+      { message_handle: "SB_flight" },
+      "the answer is threaded under the message it answers",
+    );
+    assert.equal(sent?.body.part_index, undefined, "part_index is Sendblue's to derive");
+    // The archive draws the thread from this, so the parent has to survive the send.
+    const outbound = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE direction='outbound' AND role='assistant'
+    `).get() as { metadata_json: string };
+    assert.equal(JSON.parse(outbound.metadata_json).replyTo, "SB_flight");
+  });
+
+  /*
+   * Sendblue refuses an inline reply outright rather than downgrading it, so a
+   * line that cannot thread would otherwise swallow the answer entirely.
+   */
+  it("sends the answer unthreaded when Sendblue will not thread it", async () => {
+    const { db } = connectedFixture();
+    const stub = stubSendblue({
+      "/api/send-message": call => call.body.reply_to
+        ? json({ status: "ERROR", message: "Inline replies are not supported on this line" }, 400)
+        : accepted("SB_plain"),
+    });
+    let sent;
+    try {
+      sent = await sendSms(db, RECIPIENT, "Boards at 6.", { replyTo: "SB_flight" });
+    } finally { stub.restore(); }
+
+    assert.equal(sent?.sid, "SB_plain");
+    assert.equal(
+      stub.calls.filter(call => call.url.pathname === "/api/send-message").length,
+      2,
+      "the reply lands unthreaded rather than not at all",
+    );
+    assert.equal(
+      sent?.replyTo,
+      undefined,
+      "the sender reports the thread it reached, so the archive cannot draw one that was refused",
+    );
+  });
+
+  /*
+   * A declined message may already be queued on Sendblue's side, so retrying it
+   * without the reply would text the user twice. Only a rejected request — which
+   * Sendblue refuses before sending anything — earns the second attempt.
+   */
+  it("does not resend a threaded message that failed for any other reason", async () => {
+    const { db } = connectedFixture();
+    const stub = stubSendblue({
+      "/api/send-message": () => json({ status: "DECLINED", error_message: "Recipient blocked this line" }),
+    });
+    try {
+      await assert.rejects(
+        () => sendSms(db, RECIPIENT, "Boards at 6.", { replyTo: "SB_flight" }),
+        /Recipient blocked this line/,
+      );
+    } finally { stub.restore(); }
+
+    assert.equal(stub.calls.filter(call => call.url.pathname === "/api/send-message").length, 1);
+  });
+
+  it("tells the agent what an inline reply is answering", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const search = fakeSearch(db);
+    const answered: unknown[] = [];
+    await runSmsAgent(db, search, RECIPIENT, "Do you want the 6am or the noon flight?", "SB_parent", {
+      fetcher: async () => new Response(JSON.stringify({
+        role: "assistant",
+        parts: [{ type: "text", text: "Let me know." }],
+      }), { status: 200 }),
+      inbound: { provider: "sendblue" },
+    });
+    await runSmsAgent(db, search, RECIPIENT, "that one", "SB_child", {
+      fetcher: async (_input, init) => {
+        answered.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({
+          role: "assistant",
+          parts: [{ type: "text", text: "Booked the 6am." }],
+        }), { status: 200 });
+      },
+      inbound: { provider: "sendblue", replyTo: "SB_parent", threadOriginator: "SB_parent" },
+    });
+
+    const messages = (answered[0] as { messages: Array<{ parts: Array<{ text: string }> }> }).messages;
+    assert.equal(
+      messages.at(-1)?.parts[0].text,
+      '[replying to "Do you want the 6am or the noon flight?"] that one',
+      "\"that one\" attaches to the message the user picked, not the one above it",
+    );
+    const stored = db.prepare(`
+      SELECT content,metadata_json FROM channel_messages WHERE provider_message_id='SB_child'
+    `).get() as { content: string; metadata_json: string };
+    assert.equal(stored.content, "that one", "the quote is assembled for the model, not stored");
+    assert.equal(JSON.parse(stored.metadata_json).replyTo, "SB_parent");
+  });
+
+  it("carries an inline reply's target from the webhook through to the agent", async () => {
+    const { db, api } = connectedFixture();
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send({
+      from_number: RECIPIENT,
+      number: RECIPIENT,
+      to_number: LINE,
+      content: "that one",
+      message_handle: "SB_child",
+      is_outbound: false,
+      service: "iMessage",
+      reply_to: { message_handle: "SB_parent", part_index: 0 },
+      thread_originator: { message_handle: "SB_parent" },
+    }).expect(200);
+
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const threaded: Array<string | undefined> = [];
+    await runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async (_db: Db, _to: string, _body: string, options?: { replyTo?: string }) => {
+        threaded.push(options?.replyTo);
+        return { sid: "SB_reply", status: "queued" };
+      },
+      runSmsAgent: async (
+        _db: Db,
+        _search,
+        _from: string,
+        _body: string,
+        _handle?: string,
+        options?: { inbound?: Record<string, unknown> },
+      ) => {
+        seen.push(options?.inbound);
+        return { text: "Booked the 6am.", threadId: "thread_sb", replyTo: "SB_child" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    });
+
+    assert.deepEqual(seen, [{
+      provider: "sendblue",
+      replyTo: "SB_parent",
+      threadOriginator: "SB_parent",
+    }]);
+    assert.deepEqual(threaded, ["SB_child"], "the agent's own threading choice reaches the send");
   });
 
   it("asks for the bubble once and takes it down when the reply is out", async () => {

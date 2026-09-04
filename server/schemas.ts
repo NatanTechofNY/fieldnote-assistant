@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isSendblueReaction } from "./sendblue-service.ts";
 
 /* Shared primitives ---------------------------------------------------------- */
 
@@ -267,12 +268,26 @@ const memoryToolFields = {
 const clearFields = <T extends readonly [string, ...string[]]>(values: T) =>
   z.array(z.enum(values)).optional();
 
+/*
+ * Sendblue takes one of six classic tapback names or exactly one emoji, with a
+ * `-` prefix to take a reaction back. Checking it here rather than letting the
+ * API say no keeps a model that sent "🔥🔥" or "sounds good" from spending a
+ * round trip to learn it, and the error names the shape it should have used.
+ */
+const reaction = z.string()
+  .refine(isSendblueReaction, "Use love, like, dislike, laugh, emphasize, question, or exactly one emoji");
+
 /* Atlassian tool primitives. Every filter here is a hard filter on a remote
  * system, so each one stays bounded and the free-text fields stay short. */
 const spaceKeys = z.array(z.string().trim().min(1).max(60)).max(20).nullable().optional();
 const searchText = z.string().trim().min(1).max(300).nullable().optional();
 const withinDays = (max: number) => z.coerce.number().int().min(1).max(max).nullable().optional();
 const resultLimit = (max: number) => z.coerce.number().int().min(1).max(max).nullable().optional();
+
+/** The aisles of the demo catalog, `server/catalog/walgreens-products.json`. */
+export const PRODUCT_CATEGORIES = [
+  "pain-fever", "cold-flu", "cough-throat", "allergy", "stomach", "sick-day", "sleep",
+] as const;
 
 export const toolInput = {
   list_life_areas: z.object({}),
@@ -406,6 +421,19 @@ export const toolInput = {
     within_days: withinDays(30),
     only_my_pages: z.boolean().nullable().optional(),
     limit: resultLimit(100),
+  }),
+  react_to_message: z.object({ reaction }),
+  reply_in_thread: z.object({}),
+  search_store_products: z.object({
+    query: z.string().trim().min(1).max(200),
+    category: z.enum(PRODUCT_CATEGORIES).nullable().optional(),
+    // Dollars, as the user says them; the catalog stores cents.
+    max_price: z.coerce.number().positive().max(1000).nullable().optional(),
+    limit: resultLimit(10),
+  }),
+  send_product_cards: z.object({
+    product_ids: z.array(entityId).min(1).max(3),
+    note: z.string().trim().max(300).nullable().optional(),
   }),
 } as const;
 

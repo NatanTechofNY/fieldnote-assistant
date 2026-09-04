@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { createApp } from "./app.ts";
 import { runCli, type CliCommand } from "./cli.ts";
+import { loadStoreCatalog } from "./db.ts";
 import { startWorker } from "./worker.ts";
 
 const flags: Record<string, CliCommand> = {
@@ -33,6 +34,9 @@ if (selectedFlag) {
   }
   const port = Number(process.env.PORT || 4174);
   const { app, db, search } = createApp();
+  // The demo catalog lives in a checked-in file; a changed entry is queued for
+  // indexing here and reaches Algolia on the worker's first flush.
+  loadStoreCatalog(db);
   const stopWorker = startWorker(db, search);
   const server = app.listen(port, () => {
     console.log(`Personal assistant API listening on http://localhost:${port}`);

@@ -33,7 +33,8 @@
     "seed": "tsx server/index.ts --seed",
     "reset": "tsx server/index.ts --reset",
     "reindex": "tsx server/index.ts --reindex",
-    "setup:algolia": "tsx server/index.ts --setup-algolia"
+    "setup:algolia": "tsx server/index.ts --setup-algolia",
+    "catalog:check": "tsx server/scripts/catalog-check.ts"
   },
   "keywords": [
     "algolia",

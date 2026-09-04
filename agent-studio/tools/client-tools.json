@@ -1023,5 +1023,106 @@
         "additionalProperties": false
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "react_to_message",
+      "description": "Puts an iMessage tapback on the message the user just sent. Pass love, like, dislike, laugh, emphasize, question, or exactly one emoji. Prefix with - to take a reaction back.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reaction": {
+            "type": "string",
+            "minLength": 1,
+            "description": "love, like, dislike, laugh, emphasize, question, or one emoji such as 🔥"
+          }
+        },
+        "required": ["reaction"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "reply_in_thread",
+      "description": "Delivers this turn's answer as an inline reply to the message the user just sent, so it appears threaded under it in Messages. Sends nothing on its own; write the answer as usual.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_store_products",
+      "description": "Searches the Walgreens catalog for over-the-counter remedies and sick-day supplies. Query by symptom or product name; results carry price, image, and store link. Browsing only, no purchase.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Symptom or product words, such as \"headache\", \"sore throat cough\", or \"DayQuil\""
+          },
+          "category": {
+            "type": ["string", "null"],
+            "enum": ["pain-fever", "cold-flu", "cough-throat", "allergy", "stomach", "sick-day", "sleep", null],
+            "description": "Restrict to one aisle, or null to search the whole store"
+          },
+          "max_price": {
+            "type": ["number", "null"],
+            "exclusiveMinimum": 0,
+            "maximum": 1000,
+            "description": "Highest price in dollars, or null for any price"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "description": "Maximum products, usually 5"
+          }
+        },
+        "required": ["query", "category", "max_price", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "send_product_cards",
+      "description": "Texts the user one image card per product: photo, name, price, and store link. Pass 1 to 3 IDs from search_store_products. Sends on SMS/iMessage only; on web it returns the cards to describe.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "product_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Exact product IDs from search_store_products, best match first"
+          },
+          "note": {
+            "type": ["string", "null"],
+            "maxLength": 300,
+            "description": "One short line texted before the cards, or null to send the cards alone"
+          }
+        },
+        "required": ["product_ids", "note"],
+        "additionalProperties": false
+      }
+    }
   }
 ]

@@ -1399,7 +1399,12 @@ tr:hover .attach-button,
 .health-card > .eyebrow { grid-column:3; display:inline-flex; align-items:center; gap:6px; order:3; white-space:nowrap; }
 .health-card strong { grid-column:2; font-size:13px; font-weight:500; }
 .health-card p { grid-column:2; grid-row:2; margin-top:1px; color:var(--text-tertiary); font-size:11px; }
-.integration-copy { color:var(--text-secondary); font-size:12px; line-height:1.55; }
+/* The settings stack is 960px wide, which at 12px is a 150-character line. These
+   are prose, so they get a measure of their own rather than the panel's. */
+.integration-copy { max-width:82ch; color:var(--text-secondary); font-size:12px; line-height:1.55; }
+/* Margins are reset globally, so stacked copy ran together as one gray block.
+   Only the Sendblue panel stacks it, and each paragraph is a separate fact. */
+.integration-copy + .integration-copy { margin-top:8px; }
 .settings-stack { display:grid; gap:10px; max-width:960px; }
 .life-area-settings-list { display:grid; margin:12px 0; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
 .life-area-setting { display:grid; grid-template-columns:10px minmax(0,1fr) 30px; align-items:center; gap:10px; padding:8px 11px; border-top:1px solid var(--border); background:var(--surface); }
@@ -1963,6 +1968,26 @@ tr:hover .attach-button,
 .history-message.role-tool .history-bubble { width:min(720px,94%); max-width:94%; padding:6px; border:0; background:transparent; }
 .history-bubble .markdown-content { font-size:13px; line-height:1.55; }
 .history-bubble footer { display:flex; gap:9px; margin-top:6px; font-size:11px; opacity:.7; }
+/* An inline reply is only legible beside the message it answers, and that parent
+   is often far enough up the thread to be off screen. `currentColor` carries the
+   rule through the accent bubble, where a fixed border would disappear. */
+.history-reply-quote {
+  display:flex; gap:6px; align-items:center; margin-bottom:7px; padding-left:7px;
+  border-left:2px solid currentColor; font-size:11.5px; line-height:1.4; opacity:.62;
+}
+.history-reply-quote svg { flex-shrink:0; }
+.history-reply-quote span { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+/* A tapback is the whole reply, not a step toward one, so it is drawn on the
+   message it landed on instead of being left as a tool card further down. */
+.history-reactions { display:flex; gap:4px; margin-top:7px; }
+.history-reactions span {
+  display:grid; place-items:center; min-width:22px; height:22px; padding:0 5px; border:1px solid var(--border);
+  border-radius:999px; background:var(--surface); font-size:12px; line-height:1;
+}
+.history-message.inbound .history-reactions span {
+  border-color:color-mix(in oklab, var(--accent-fg) 30%, transparent);
+  background:color-mix(in oklab, var(--accent-fg) 16%, transparent);
+}
 .reflection-history-block { display:grid; grid-template-columns:26px minmax(0,1fr); gap:10px; align-items:center; min-width:280px; padding:4px; }
 .reflection-history-block > span { width:26px; height:26px; display:grid; place-items:center; border-radius:var(--radius-sm); color:var(--success); background:var(--success-subtle); }
 .reflection-history-block small { display:block; color:var(--text-tertiary); font-size:11px; }

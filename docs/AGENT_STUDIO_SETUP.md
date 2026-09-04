@@ -13,13 +13,15 @@ Several steps below exist to work around specific Agent Studio behaviors. The re
 - `agent-studio/indices/todos.settings.json`: settings for the todo retrieval index.
 - `agent-studio/indices/memories.settings.json`: settings for the memory retrieval index.
 - `agent-studio/indices/messages.settings.json`: settings for the redacted conversation-message index.
+- `agent-studio/indices/products.settings.json`: settings for the Walgreens-styled demo catalog index, which the `search_store_products` client tool reads (it is not part of the hosted Search tool).
+- `server/catalog/walgreens-products.json`: the catalog itself; `npm run catalog:check` verifies every image and product link resolves before a demo.
 - `docs/TOOL_ENDPOINT_MAPPING.md`: one REST mapping for every client tool.
 
 ## 1. Confirm access and choose names
 
 1. Open the Algolia dashboard and select the intended application.
 2. Confirm that Agent Studio is visible under Generative AI. If it is absent, see `TROUBLESHOOTING_SECURITY.md`; availability can depend on account, region, rollout, or plan.
-3. Use the checked-in demo defaults `devcon_assistant_todos`, `devcon_assistant_memories`, and `devcon_assistant_messages`. If an environment overrides them, change the matching index entries in `algolia-search.json` and the dashboard together.
+3. Use the checked-in demo defaults `devcon_assistant_todos`, `devcon_assistant_memories`, and `devcon_assistant_messages`, plus `devcon_assistant_products` for the demo catalog. If an environment overrides them, change the matching index entries in `algolia-search.json` and the dashboard together; the products index is only named through `ALGOLIA_PRODUCT_INDEX`.
 4. Use the fixed local user ID `devcon-demo`. Every indexed record must carry `userId: "devcon-demo"`, and the Search tool must keep its checked-in `userId:"devcon-demo"` filter.
 5. Do not commit credentials. The fixed demo ID is not authentication and must be replaced by server-enforced identity before adapting this design to multiple users.
 
@@ -79,7 +81,7 @@ NeuralSearch combines semantic/vector retrieval with keyword ranking. It improve
 
 **It is a paid add-on, so the app ships with it off and runs on standard keyword search.** Everything else works the same either way; only relevance on paraphrased queries changes.
 
-**Flip the toggle.** Settings > Under the hood > *Use Algolia NeuralSearch*. That persists the choice and immediately activates or deactivates NeuralSearch on all three indices. `ALGOLIA_NEURAL_SEARCH=true` sets the initial value for a fresh database, and `npm run setup:algolia` honors whatever the toggle currently says. No dashboard step is needed, and no click or conversion events are required.
+**Flip the toggle.** Settings > Under the hood > *Use Algolia NeuralSearch*. That persists the choice and immediately activates or deactivates NeuralSearch on all four indices. `ALGOLIA_NEURAL_SEARCH=true` sets the initial value for a fresh database, and `npm run setup:algolia` honors whatever the toggle currently says. No dashboard step is needed, and no click or conversion events are required.
 
 Retrieval mode is not an index setting, which is why the JSON files above do not carry it. It lives on a separate endpoint, `PUT /1/indexes/{index}/semanticSearch/settings`, and activation there needs three fields together:
 
@@ -97,7 +99,7 @@ Retrieval mode is not an index setting, which is why the JSON files above do not
 
 Do not write `mode` with index settings. The semantic endpoint sets it for you, and writing it yourself is refused with the same `412` even when the index already holds the value you are writing.
 
-**Neural operations are limited to ten per hour per application.** Activating three indices costs three, so a few toggle flips in quick succession will hit it. Exceeding it returns `429` with a message naming the limit explicitly, so it is recognisable when you see it. `setup()` skips indices that already hold the requested state so repeated runs cost nothing. `npm run reindex` also counts against this limit.
+**Neural operations are limited to ten per hour per application.** Activating four indices costs four, so two toggle flips in quick succession will nearly hit it. Exceeding it returns `429` with a message naming the limit explicitly, so it is recognisable when you see it. `setup()` skips indices that already hold the requested state so repeated runs cost nothing. `npm run reindex` also counts against this limit.
 
 **Expect settings applies to be slow once the mode is active.** `PUT /1/indexes/{index}/settings` is accepted in well under a second, but on a NeuralSearch index the task then stays `notPublished` while the index re-vectorizes — 269 seconds on a six-record index in our case. `setup()` therefore does not wait for the settings tasks to publish; Algolia applies them in order regardless. If you write your own tooling, note that `waitForTask` gives up after 100 polls, which is a shorter budget than the vectorization takes, so it can report a timeout on settings that were accepted immediately.
 

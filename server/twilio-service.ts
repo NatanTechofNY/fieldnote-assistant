@@ -46,6 +46,7 @@ export async function sendTwilioSms(
   db: Db,
   to: string,
   body: string,
+  options: { mediaUrl?: string } = {},
 ): Promise<{ sid: string; status: string }> {
   const config = getTwilioSecret(db);
   if (!config) throw new Error("Twilio is not configured");
@@ -57,6 +58,7 @@ export async function sendTwilioSms(
     from: config.fromPhone,
     body: body.slice(0, 1500),
     ...(statusCallback ? { statusCallback } : {}),
+    ...(options.mediaUrl ? { mediaUrl: [options.mediaUrl] } : {}),
   });
   return { sid: message.sid, status: message.status };
 }

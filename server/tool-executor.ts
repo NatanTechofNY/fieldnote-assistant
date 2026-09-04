@@ -3,16 +3,26 @@ import {
   getConfluencePage, getJiraIssue, listConfluenceComments, listConfluencePages,
   listConfluenceSpaces, listJiraBoards, listJiraIssues, listJiraUsers,
 } from "./atlassian-service.ts";
+import { productCaption, productJson, searchStoreProductsLocally, STORE_NAME } from "./catalog.ts";
 import {
-  getMemory, getReminders, getTodo, id, instant, now, queueIndexJob, syncTodoReminders, USER_ID,
+  getMemory, getReminders, getStoreProduct, getTodo, id, insertOutboundChannelMessage, instant, now,
+  queueIndexJob, recordMessageReaction, syncTodoReminders, USER_ID,
 } from "./db.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
+import type { SmsProvider } from "./integrations.ts";
+import { sendSms, type SmsSender } from "./messaging.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
 import { toolInput, type ToolName } from "./schemas.ts";
+import { sendSendblueReaction } from "./sendblue-service.ts";
 import { completeParentIfSettled } from "./todo-status.ts";
-import type { Db, MemoryRow, TodoRow, TodoStatus } from "./types.ts";
+import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 
-type SearchWriter = Pick<AlgoliaSync, "flushSoon">;
+/**
+ * Writes need only the flush; the catalog search also reads Algolia when it is
+ * configured. Both are optional so a test double that supplies neither still
+ * exercises every tool through the local fallbacks.
+ */
+type SearchWriter = Pick<AlgoliaSync, "flushSoon"> & Partial<Pick<AlgoliaSync, "client" | "searchProducts">>;
 type Input = Record<string, unknown>;
 
 const todoJson = (row: TodoRow) => ({
@@ -178,17 +188,162 @@ function agentEvidence<T extends {
   };
 }
 
+/**
+ * What a tool needs to know about the turn it is running inside. Every other
+ * tool reads and writes the user's own records and needs none of this; the two
+ * iMessage tools act on the conversation itself, which has no representation in
+ * SQLite that a model-supplied argument could name.
+ */
+export type ToolTurnContext = {
+  channel: "sms" | "web";
+  address: string;
+  threadId: string;
+  provider?: SmsProvider;
+  /** The message being answered, and so the only one a tapback may land on. */
+  inboundMessageHandle?: string;
+  /** Set by `reply_in_thread`, read by the caller once the turn ends. */
+  replyToMessageHandle?: string;
+  /** How a tool that texts mid-turn sends; the active provider unless a test supplies one. */
+  sendSms?: SmsSender;
+};
+
+/**
+ * Catalog search goes to Algolia when it is configured and falls back to the
+ * local ranking otherwise, or when Algolia fails. A shopping question on stage
+ * should get an answer either way, and the result names which store answered.
+ */
+async function searchStoreProducts(
+  db: Db,
+  search: SearchWriter,
+  options: { query: string; category: string | null; maxPriceCents: number | null; limit: number },
+): Promise<{ source: "algolia" | "local"; rows: StoreProductRow[] }> {
+  if (search.client && search.searchProducts) {
+    try {
+      const ids = await search.searchProducts(options.query, {
+        category: options.category,
+        maxPriceCents: options.maxPriceCents,
+        limit: options.limit,
+      });
+      const rows = ids.map(productId => getStoreProduct(db, productId))
+        .filter((row): row is StoreProductRow => Boolean(row));
+      return { source: "algolia", rows };
+    } catch (error) {
+      console.warn("Product search fell back to SQLite:", error instanceof Error ? error.message : error);
+    }
+  }
+  return { source: "local", rows: searchStoreProductsLocally(db, options) };
+}
+
+/**
+ * A turn that has a message to act on, or the reason it does not. The browser
+ * chat and Twilio both reach here, and so does an SMS turn the app composed
+ * itself, none of which is answering an iMessage.
+ */
+function imessageTurn(
+  context: ToolTurnContext | undefined,
+): ToolTurnContext & { inboundMessageHandle: string } {
+  if (!context || context.channel !== "sms" || context.provider !== "sendblue") {
+    throw new Error("This turn has no iMessage to act on: the conversation is not on iMessage");
+  }
+  if (!context.inboundMessageHandle) {
+    throw new Error("This turn has no iMessage to act on: the user did not send the message that started it");
+  }
+  return context as ToolTurnContext & { inboundMessageHandle: string };
+}
+
 export async function executeAgentTool(
   db: Db,
   search: SearchWriter,
   name: string,
   input: Input,
+  context?: ToolTurnContext,
 ): Promise<unknown> {
   // Tool arguments come from a model, so they get the same Zod validation as
   // the REST API instead of ad-hoc presence checks. A ZodError here surfaces
   // as a 400 through the shared error handler.
   const schema = toolInput[name as ToolName];
   if (schema) input = schema.parse(input) as Input;
+
+  if (name === "react_to_message") {
+    const turn = imessageTurn(context);
+    const reaction = input.reaction as string;
+    await sendSendblueReaction(db, turn.inboundMessageHandle, reaction);
+    // Filed only once Sendblue has taken it, so the archive never shows a
+    // tapback on a message that never got one.
+    recordMessageReaction(db, turn.threadId, turn.inboundMessageHandle, reaction);
+    return { reacted: true, reaction };
+  }
+  if (name === "reply_in_thread") {
+    // Nothing is sent here. The turn's own answer is what gets threaded, and it
+    // has not been written yet, so this records the intent for whoever delivers
+    // it once the loop finishes.
+    const turn = imessageTurn(context);
+    turn.replyToMessageHandle = turn.inboundMessageHandle;
+    return { threaded: true };
+  }
+
+  /*
+   * The shopping tools read a demo catalog rather than the user's records. They
+   * never buy anything: the search returns store links, and the cards tool
+   * texts those links with a picture so the user can tap through themselves.
+   */
+  if (name === "search_store_products") {
+    const maxPrice = input.max_price as number | null | undefined;
+    const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 10);
+    const result = await searchStoreProducts(db, search, {
+      query: input.query as string,
+      category: (input.category as string | null | undefined) ?? null,
+      maxPriceCents: maxPrice == null ? null : Math.round(maxPrice * 100),
+      limit,
+    });
+    return {
+      store: STORE_NAME,
+      source: result.source,
+      products: result.rows.map(productJson),
+    };
+  }
+  if (name === "send_product_cards") {
+    const productIds = input.product_ids as string[];
+    const note = typeof input.note === "string" && input.note.trim() ? input.note.trim() : null;
+    const found: StoreProductRow[] = [];
+    const failed: Array<{ id: string; error: string }> = [];
+    for (const productId of new Set(productIds)) {
+      const row = getStoreProduct(db, productId);
+      if (row) found.push(row);
+      else failed.push({ id: productId, error: "Product not found" });
+    }
+    const cards = found.map(row => ({ ...productJson(row), caption: productCaption(row) }));
+    // The browser has no Messages thread to drop a picture into, so the cards
+    // come back for the agent to describe instead of being sent nowhere.
+    if (!context || context.channel !== "sms") {
+      return { store: STORE_NAME, channel: "web", sent: 0, cards, failed };
+    }
+    const send = context.sendSms ?? sendSms;
+    const sent: Array<Record<string, unknown>> = [];
+    if (note && found.length) {
+      const delivered = await send(db, context.address, note);
+      insertOutboundChannelMessage(db, context.threadId, note, delivered.sid, delivered.status, {
+        kind: "product_note",
+      });
+    }
+    // One message per product, in the order the agent ranked them. Sequential
+    // rather than parallel so the cards land in that order too.
+    for (const row of found) {
+      const caption = productCaption(row);
+      try {
+        const delivered = await send(db, context.address, caption, { mediaUrl: row.image_url });
+        insertOutboundChannelMessage(db, context.threadId, caption, delivered.sid, delivered.status, {
+          kind: "product_card",
+          productCard: productJson(row),
+          mediaUrl: row.image_url,
+        });
+        sent.push({ id: row.id, name: row.name, message_handle: delivered.sid, status: delivered.status });
+      } catch (error) {
+        failed.push({ id: row.id, error: error instanceof Error ? error.message : "Send failed" });
+      }
+    }
+    return { store: STORE_NAME, channel: "sms", sent: sent.length, cards: sent, failed };
+  }
 
   if (name === "get_todo") {
     const todo = getTodo(db, input.id as string);

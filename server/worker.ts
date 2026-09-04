@@ -1,5 +1,5 @@
 import type { AlgoliaSync } from "./algolia.ts";
-import { getNotificationPreferences } from "./integrations.ts";
+import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { pruneExpiredSessions } from "./auth.ts";
 import { id, now, USER_ID } from "./db.ts";
 import { recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "./agent-runner.ts";
@@ -37,8 +37,14 @@ export type WorkerDependencies = {
  * sending, so a reply to yesterday's reminder is still answered after a switch.
  */
 const INBOUND_SOURCES: Array<{
-  source: string;
-  read: (payload: Record<string, unknown>) => { from?: string; body?: string; messageId?: string };
+  source: SmsProvider;
+  read: (payload: Record<string, unknown>) => {
+    from?: string;
+    body?: string;
+    messageId?: string;
+    replyTo?: string;
+    threadOriginator?: string;
+  };
 }> = [
   {
     source: "twilio",
@@ -55,9 +61,20 @@ const INBOUND_SOURCES: Array<{
         : typeof payload.number === "string" ? payload.number : undefined,
       body: typeof payload.content === "string" ? payload.content : undefined,
       messageId: typeof payload.message_handle === "string" ? payload.message_handle : undefined,
+      // A text sent as an inline reply names the message it answers, which is
+      // often not the one directly above it. Without these two, "yes, that one"
+      // arrives with nothing to attach it to.
+      replyTo: messageHandleOf(payload.reply_to),
+      threadOriginator: messageHandleOf(payload.thread_originator),
     }),
   },
 ];
+
+function messageHandleOf(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const handle = (value as { message_handle?: unknown }).message_handle;
+  return typeof handle === "string" && handle ? handle : undefined;
+}
 
 function inQuietHours(time: string, start: string | null, end: string | null): boolean {
   if (!start || !end || start === end) return false;
@@ -365,10 +382,18 @@ export async function runWorkerOnce(
         // is out rather than in between, so the wait is covered end to end and no
         // bubble outlives the answer.
         stopTyping = showTyping(db, message.from);
-        const response = await runAgent(db, search, message.from, message.body, message.messageId);
-        const sent = await send(db, message.from, response.text);
+        const response = await runAgent(db, search, message.from, message.body, message.messageId, {
+          inbound: {
+            provider: source,
+            replyTo: message.replyTo,
+            threadOriginator: message.threadOriginator,
+          },
+          sendSms: send,
+        });
+        // The agent threads its answer only when it asked to, via reply_in_thread.
+        const sent = await send(db, message.from, response.text, { replyTo: response.replyTo });
         stopTyping();
-        recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status);
+        recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status, sent.replyTo);
         completeExternalEvent(db, event.id, "processed");
       } catch (error) {
         stopTyping?.();
