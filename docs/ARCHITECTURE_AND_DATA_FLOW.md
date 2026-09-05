@@ -130,7 +130,7 @@ SQLite is strongly consistent for this app's reads and writes. Algolia is eventu
 
 Todos carry `objectID`, `userId`, `title`, `notes`, `status`, `priority`, `category_id`, `category_name`, `parent_id`, `due_at`, `reminder_at`, `extra_reminders`, `started_at`, `completed_at`, `created_at`, `updated_at`, and the resolved life area (`life_area_id`, `life_area_name`, `life_area_slug`, `life_area_source`). A subtask is a todo whose `parent_id` points at another todo.
 
-Memories carry `objectID`, `userId`, `kind` (exactly `fact`, `note`, or `journal`), `title`, `content`, `mood_label`, `mood_score`, `category_id`, `category_name`, `tags`, `occurred_at`, `review_worthy`, `created_at`, `updated_at`, and the same life-area fields.
+Memories carry `objectID`, `userId`, `kind` (exactly `fact`, `note`, or `journal`), `title`, `content`, `mood_label`, `mood_score`, `category_id`, `category_name`, `tags`, `occurred_at`, `occurred_on` and `occurred_on_text` (the local day, as `2026-07-31` and `Friday, July 31, 2026`, searchable so a date works as a query term), `review_worthy`, `created_at`, `updated_at`, and the same life-area fields.
 
 Messages carry `objectID`, `userId`, `threadId`, `channel`, `role`, `content`, and `created_at`. Phone numbers, provider message IDs, delivery metadata, tool inputs and results, and the raw `metadata_json` stay in SQLite only.
 

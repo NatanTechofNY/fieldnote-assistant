@@ -23,6 +23,10 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
   const [lifeAreaId, setLifeAreaId] = useState(memory?.life_area_id || "");
   const [occurredAt, setOccurredAt] = useState(toZonedDateTimeLocal(memory?.occurred_at, timezone));
   const [reviewWorthy, setReviewWorthy] = useState(Boolean(memory?.review_worthy));
+  // A journal entry always has a mood. A fact or note normally does not, but the
+  // agent can attach one ("grateful" on the day the cats were saved), and an
+  // edit to the wording must not silently strip it.
+  const hasMood = kind === "journal" || memory?.mood_score != null;
   const save = useMutation({
     mutationFn: () => {
       const input = {
@@ -30,8 +34,8 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
         title: title || null,
         content,
         tags: tags.split(",").map(t => t.trim()).filter(Boolean),
-        mood_score: kind === "journal" ? mood : null,
-        mood_label: kind === "journal" ? (moodLabel.trim() || defaultMoodLabel(mood)) : null,
+        mood_score: hasMood ? mood : null,
+        mood_label: hasMood ? (moodLabel.trim() || defaultMoodLabel(mood)) : null,
         life_area_id: lifeAreaId || null,
         life_area_source: lifeAreaId ? "user" as const : null,
         occurred_at: occurredAt ? zonedDateTimeLocalToIso(occurredAt, timezone) : null,
@@ -52,7 +56,7 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
       </div>
       <label className="toggle-row"><input type="checkbox" checked={reviewWorthy} onChange={e => setReviewWorthy(e.target.checked)}/><span>Highlight this for future reflections</span></label>
       <Field label="Tags"><input className="input" value={tags} onChange={e => setTags(e.target.value)} placeholder="work, idea, family" /></Field>
-      {kind === "journal" && <>
+      {hasMood && <>
         <Field label="Mood"><div style={{ display: "flex", justifyContent: "space-between" }}>{[1,2,3,4,5].map(score => <button type="button" key={score} aria-label={`Mood ${score} of 5, ${defaultMoodLabel(score)}`} aria-pressed={mood === score} className={`button icon ${mood === score ? "dark" : "ghost"}`} onClick={() => setMood(score)} style={{ fontSize: 20 }}>{moodEmoji(score)}</button>)}</div></Field>
         <Field label="In your own words"><input className="input" value={moodLabel} onChange={e => setMoodLabel(e.target.value)} maxLength={100} placeholder={defaultMoodLabel(mood)} /></Field>
       </>}

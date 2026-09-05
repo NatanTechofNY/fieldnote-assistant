@@ -91,7 +91,7 @@
     },
     {
       "index": "devcon_assistant_memories",
-      "description": "Durable knowledge the local devcon-demo user asked to be remembered: fact, note, and journal memories with title, content, kind, mood, category, life area, and tags. Use for anything the user said to remember, including people, relationships, recurring meetings, schedules, dates, preferences, and habits, even when the wording sounds like a task. Search here before answering that something is not stored.",
+      "description": "Durable knowledge the local devcon-demo user asked to be remembered: fact, note, and journal memories with title, content, kind, mood, category, life area, and tags. Use for anything the user said to remember, including people, relationships, recurring meetings, schedules, dates, preferences, and habits, even when the wording sounds like a task. Search here before answering that something is not stored. Every record also carries the local day it belongs to as searchable text, as 2026-07-31 and as Friday, July 31, 2026, so a date is a query term rather than a filter.",
       "searchParameters": {
         "filters": "userId:\"devcon-demo\"",
         "hitsPerPage": 10,
@@ -108,6 +108,7 @@
           "life_area_name",
           "life_area_slug",
           "occurred_at",
+          "occurred_on",
           "review_worthy",
           "tags"
         ],
@@ -148,6 +149,7 @@
             "life_area_name",
             "life_area_slug",
             "occurred_at",
+            "occurred_on",
             "review_worthy",
             "tags"
           ],
@@ -165,6 +167,7 @@
               "life_area_name",
               "life_area_slug",
               "occurred_at",
+              "occurred_on",
               "review_worthy",
               "tags"
             ]

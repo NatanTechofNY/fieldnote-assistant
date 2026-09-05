@@ -477,6 +477,44 @@ describe("frontend API contract", () => {
     assert.equal(search.queueReindex(), before - 1, "and it stops being counted as indexable");
   });
 
+  /*
+   * "What was my mood on July 31" found nothing because the only place the date
+   * lived was a timestamp the index returns but never matches. The day goes into
+   * the record as text, in the user's own timezone, so a date is a search term.
+   */
+  it("indexes the local day a memory belongs to as searchable text", async () => {
+    const { db, api } = fixture();
+    saveNotificationPreferences(db, {
+      smsEnabled: false,
+      recipientPhone: null,
+      timezone: "America/New_York",
+      dailyDigestEnabled: false,
+      dailyDigestTime: "09:00",
+      quietHoursStart: null,
+      quietHoursEnd: null,
+    });
+    const search = new AlgoliaSync(db, { client: null });
+
+    // 03:30Z is still the evening before in New York.
+    const dated = (await api.post("/api/memories").send({
+      kind: "journal", content: "Long day.", mood_score: 3, mood_label: "tired",
+      occurred_at: "2026-07-31T03:30:00.000Z",
+    }).expect(201)).body.data;
+    const datedRecord = search.projection("memory", dated.id) as Record<string, unknown>;
+    assert.equal(datedRecord.occurred_on, "2026-07-30");
+    assert.equal(datedRecord.occurred_on_text, "Thursday, July 30, 2026");
+
+    // A fact has no occurred_at, so the day it was saved is the day it is about.
+    const fact = (await api.post("/api/memories").send({
+      kind: "fact", content: "Two cats, Nut and Kid.", mood_score: 5, mood_label: "grateful",
+    }).expect(201)).body.data;
+    db.prepare("UPDATE memories SET created_at='2026-07-31T04:12:03.905Z' WHERE id=?").run(fact.id);
+    const factRecord = search.projection("memory", fact.id) as Record<string, unknown>;
+    assert.equal(factRecord.occurred_on, "2026-07-31");
+    assert.equal(factRecord.occurred_on_text, "Friday, July 31, 2026");
+    assert.equal(factRecord.mood_label, "grateful", "a mood on a fact is indexed like any other");
+  });
+
   it("supports atomic subtasks, agenda filters, and reminder mutation tools", async () => {
     const { api } = fixture();
     const tomorrow = new Date(Date.now() + 86_400_000);

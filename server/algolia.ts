@@ -4,7 +4,8 @@ import { algoliasearch } from "algoliasearch";
 import {
   getChannelMessage, getMemory, getStoreProduct, getTodo, now, queueIndexJob, USER_ID,
 } from "./db.ts";
-import { getSearchPreferences } from "./integrations.ts";
+import { getNotificationPreferences, getSearchPreferences } from "./integrations.ts";
+import { localParts } from "./local-time.ts";
 import type { ChannelMessageRow, Db, EntityType, IndexJobRow } from "./types.ts";
 
 type SearchRecord = Record<string, unknown> & { objectID: string };
@@ -20,6 +21,28 @@ function isInternalChannelMessage(row: ChannelMessageRow): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The day a memory belongs to, written the two ways a person asks for it.
+ *
+ * Timestamps are retrieved with a hit but never matched, so "what was my mood
+ * on July 31" had no query that could reach a record whose text never names the
+ * date — the agent searched "July 31" and "2026-07-31", got nothing, and said
+ * nothing was stored. Putting the day into the record as text makes the date a
+ * search term like any other, and soft: a query that misses on the day still
+ * ranks on the rest of its words instead of hiding the record the way a facet
+ * filter would. The day is local to the user, since that is the day they lived.
+ */
+function memoryDay(anchor: string, timezone: string): { occurred_on: string; occurred_on_text: string } | null {
+  const date = new Date(anchor);
+  if (Number.isNaN(date.getTime())) return null;
+  return {
+    occurred_on: localParts(date, timezone).date,
+    occurred_on_text: new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone, weekday: "long", month: "long", day: "numeric", year: "numeric",
+    }).format(date),
+  };
 }
 
 /** The three searchable surfaces, named the way the UI refers to them. */
@@ -38,7 +61,7 @@ const RETRIEVED_ATTRIBUTES: Record<SearchEntityType, string[]> = {
   ],
   memory: [
     "objectID", "title", "content", "kind", "mood_label", "mood_score",
-    "tags", "category_name", "life_area_name", "occurred_at", "updated_at",
+    "tags", "category_name", "life_area_name", "occurred_at", "occurred_on", "updated_at",
   ],
   message: ["objectID", "threadId", "channel", "role", "content", "created_at"],
 };
@@ -205,6 +228,8 @@ export class AlgoliaSync {
         life_area_slug: row.life_area_slug,
         life_area_source: row.life_area_source,
         occurred_at: row.occurred_at,
+        // A fact has no occurred_at; the day it was saved is the day it is about.
+        ...memoryDay(row.occurred_at || row.created_at, getNotificationPreferences(this.db).timezone),
         review_worthy: Boolean(row.review_worthy),
         tags: JSON.parse(row.tags_json),
         created_at: row.created_at,

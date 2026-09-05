@@ -3,7 +3,9 @@
     "unordered(title)",
     "unordered(content)",
     "unordered(mood_label)",
-    "unordered(tags)"
+    "unordered(tags)",
+    "unordered(occurred_on_text)",
+    "unordered(occurred_on)"
   ],
   "attributesForFaceting": [
     "filterOnly(userId)",
@@ -31,6 +33,7 @@
     "life_area_name",
     "life_area_slug",
     "occurred_at",
+    "occurred_on",
     "review_worthy",
     "tags"
   ],

@@ -59,11 +59,15 @@ Memory retrieval record:
   "mood_label": null,
   "mood_score": null,
   "category_id": "preferences",
-  "tags": ["communication", "demo"]
+  "tags": ["communication", "demo"],
+  "occurred_on": "2026-07-31",
+  "occurred_on_text": "Friday, July 31, 2026"
 }
 ```
 
 These are denormalized retrieval projections. Do not put secrets, tokens, private notes, or full audit history in Algolia.
+
+`occurred_on` and `occurred_on_text` are the day the memory belongs to — `occurred_at` when it has one, otherwise `created_at` — in the user's timezone, and both are in `searchableAttributes`. Timestamps are returned with a hit but never matched, so without them "what was my mood on July 31" had no query that could reach a record whose text does not name the date. They are deliberately *not* exposed as a facet: a date typed as a query term still lets the rest of the words rank, where a facet filter with the day off by one would hide the record.
 
 ## 3. Apply index settings
 
