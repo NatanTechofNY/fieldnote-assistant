@@ -1028,7 +1028,7 @@
     "type": "function",
     "function": {
       "name": "react_to_message",
-      "description": "Puts an iMessage tapback on the message the user just sent. Pass love, like, dislike, laugh, emphasize, question, or exactly one emoji. Prefix with - to take a reaction back.",
+      "description": "Puts an iMessage tapback on the message the user just sent, alongside a reply or alone when nothing more is needed. Use love, like, dislike, laugh, emphasize, question, or one emoji; - prefix removes.",
       "strict": true,
       "parameters": {
         "type": "object",

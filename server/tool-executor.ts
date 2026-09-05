@@ -203,6 +203,12 @@ export type ToolTurnContext = {
   inboundMessageHandle?: string;
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
   replyToMessageHandle?: string;
+  /**
+   * Set once a tapback has landed on the inbound message. A turn that reacted
+   * and then had nothing to add has answered, so the caller sends no text
+   * rather than a filler sentence.
+   */
+  reacted?: boolean;
   /** How a tool that texts mid-turn sends; the active provider unless a test supplies one. */
   sendSms?: SmsSender;
 };
@@ -271,6 +277,9 @@ export async function executeAgentTool(
     // Filed only once Sendblue has taken it, so the archive never shows a
     // tapback on a message that never got one.
     recordMessageReaction(db, turn.threadId, turn.inboundMessageHandle, reaction);
+    // Taking a reaction back is not an acknowledgement, so it does not earn the
+    // turn the right to say nothing.
+    if (!reaction.startsWith("-")) turn.reacted = true;
     return { reacted: true, reaction };
   }
   if (name === "reply_in_thread") {

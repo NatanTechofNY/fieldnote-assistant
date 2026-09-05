@@ -228,6 +228,7 @@ function PaletteRow({ hit, index, active, onHover, onSelect }: {
     </div>
     <span className="palette-meta">
       {label}
+      {hit.type === "memory" && hit.mood_label ? ` · ${hit.mood_label}` : ""}
       {hit.life_area_name ? ` · ${hit.life_area_name}` : ""}
     </span>
   </div>;

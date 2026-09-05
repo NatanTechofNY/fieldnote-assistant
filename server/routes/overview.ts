@@ -62,9 +62,18 @@ export function registerOverviewRoutes({ app, db }: RouteContext): void {
         .filter((reminder) => reminder.status === "pending" && reminder.scheduled_for >= timestamp)
         .slice(0, 20)
         .map(reminderJson),
-      mood_trend: memories
-        .filter((memory) => memory.mood_score !== null)
-        .map((memory) => ({ at: memory.created_at, score: memory.mood_score, label: memory.mood_label }))
+      /*
+       * The last two weeks of entries that carry a mood, oldest first, placed on
+       * the day they happened rather than the day they were typed: a reflection
+       * saved after midnight is still about the day before. Read from the whole
+       * table, not the six recent memories above, which are mostly facts and
+       * notes and left this empty most of the time.
+       */
+      mood_trend: (db.prepare(`
+        SELECT id,title,COALESCE(occurred_at,created_at) at,mood_score score,mood_label label
+        FROM memories WHERE user_id=? AND mood_score IS NOT NULL
+        ORDER BY COALESCE(occurred_at,created_at) DESC LIMIT 14
+      `).all(USER_ID) as Array<{ id: string; title: string | null; at: string; score: number; label: string | null }>)
         .reverse(),
       subtask_progress: Object.fromEntries(
         progressRows.map((row) => [row.parent_id, { done: row.done, total: row.total }]),

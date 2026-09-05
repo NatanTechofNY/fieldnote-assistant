@@ -447,6 +447,18 @@ export async function runChannelAgent(
           .map(part => part.text)
           .join("\n")
           .trim();
+        /*
+         * A tapback with nothing after it is a complete answer to "thanks" or
+         * "ok", the way it is between people. The reaction is already filed on
+         * the message it landed on and as a tool row, so no assistant bubble is
+         * written: an empty one would read as a turn that said nothing, and a
+         * filler sentence would undo the gesture. Without a reaction, silence is
+         * a model that forgot to answer, and the fallback says so.
+         */
+        if (!text && context.reacted) {
+          search.flushSoon();
+          return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle };
+        }
         const finalText = text || "I completed that request, but did not receive a text response.";
         saveChannelMessage(db, thread.id, "outbound", "assistant", finalText, undefined, {
           parts: response.parts,

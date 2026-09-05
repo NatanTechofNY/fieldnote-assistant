@@ -511,6 +511,28 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 .kpi-strip strong { display: block; margin-top: 7px; font-size: 27px; font-weight: 600; line-height: 1; letter-spacing: -.025em; font-variant-numeric: tabular-nums; }
 .row-icon { flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: var(--radius-sm); color: var(--accent); background: var(--accent-subtle); }
 .stack { display: grid; gap: 18px; }
+/* Mood over the last fortnight: one column per journal entry, bar height from
+   its 1–5 score, and the column is the link back into that entry. */
+.mood-chart {
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px;
+  align-items: end; height: 112px; padding-top: 4px;
+}
+.mood-col {
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 5px;
+  height: 100%; min-width: 0; color: inherit; text-decoration: none; border-radius: var(--radius-sm);
+}
+.mood-col:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mood-face { font-size: 14px; line-height: 1; }
+.mood-bar {
+  width: 100%; max-width: 34px; height: calc(var(--h, .2) * 62px);
+  border-radius: var(--radius-sm) var(--radius-sm) 2px 2px;
+  background: color-mix(in oklab, var(--accent) calc(var(--h, .2) * 100%), var(--accent-subtle));
+  transition: filter .12s ease;
+}
+.mood-col:hover .mood-bar { filter: brightness(1.1); }
+.mood-day { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: 10px; }
+.mood-latest { margin: 12px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.mood-latest strong { color: var(--text); font-weight: 500; }
 /* A grid track refuses to go below the min-content of its contents, and a
    nowrap line has no min-content to speak of, so the track has to be told it may
    shrink or the row grows past the card instead of ellipsising. */
@@ -593,13 +615,19 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 /* Scoped to the title itself: the cell also holds the disclosure control, and a
    chevron told to fill the row leaves no width for the name beside it. */
 .data-table .cell-title > button,
+.data-table .title-row > button,
 .data-table .title-open {
   display:block; width:100%; min-width:0; padding:0; background:none; border:0; color:inherit;
   font:inherit; font-weight:500; text-align:left; cursor:pointer;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 .data-table .cell-title > button:hover,
+.data-table .title-row > button:hover,
 .data-table .title-open:hover { color:var(--accent); }
+/* A title with a mood beside it: the name takes what is left after the pill. */
+.data-table .title-row { display:flex; align-items:center; gap:8px; min-width:0; }
+.data-table .title-row > button { flex:1; width:auto; }
+.data-table .title-row .mood-pill { flex:none; max-width:45%; }
 /* A row used to say "2/3" and stop there, which named work it would not show.
    The chevron and the count are the same control, so either one opens the
    steps as their own rows under the task they belong to. */
@@ -922,6 +950,12 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 }
 .life-area-pill.personal { color:var(--warn); background:var(--warn-subtle); }
 .life-area-pill.side-project { color:var(--accent); background:var(--accent-subtle); }
+/* The mood the entry was saved with, in the words it was saved with. */
+.mood-pill {
+  display:inline-flex; align-items:center; gap:4px; width:max-content; max-width:100%; padding:2px 6px;
+  border-radius:var(--radius-sm); color:var(--text-secondary); background:var(--surface-raised);
+  border:1px solid var(--border); font-size:11px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
 .area-filter { display:flex; gap:4px; margin:-4px 0 14px; overflow:auto; }
 .area-filter button {
   flex:none; padding:4px 9px; border:1px solid var(--border); border-radius:var(--radius-pill); color:var(--text-secondary);

@@ -5,7 +5,7 @@ import type {
   LifeArea, Memory, MemoryKind,
 } from "../../types";
 import { Field, MarkdownEditor, Modal } from "../../components/ui";
-import { moodEmoji } from "../../lib/mood";
+import { defaultMoodLabel, moodEmoji } from "../../lib/mood";
 import { toZonedDateTimeLocal, useTimezone, zonedDateTimeLocalToIso } from "../../lib/timezone";
 import { invalidateContent } from "../../lib/invalidate";
 
@@ -17,6 +17,9 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
   const [content, setContent] = useState(memory?.content || "");
   const [tags, setTags] = useState(memory?.tags.join(", ") || "");
   const [mood, setMood] = useState(memory?.mood_score || 3);
+  // The label is the user's or the agent's own words for the mood ("grateful
+  // and relaxed"), kept as written; the score word is only a fallback.
+  const [moodLabel, setMoodLabel] = useState(memory?.mood_label || "");
   const [lifeAreaId, setLifeAreaId] = useState(memory?.life_area_id || "");
   const [occurredAt, setOccurredAt] = useState(toZonedDateTimeLocal(memory?.occurred_at, timezone));
   const [reviewWorthy, setReviewWorthy] = useState(Boolean(memory?.review_worthy));
@@ -28,7 +31,7 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
         content,
         tags: tags.split(",").map(t => t.trim()).filter(Boolean),
         mood_score: kind === "journal" ? mood : null,
-        mood_label: kind === "journal" ? ["", "terrible", "rough", "neutral", "good", "great"][mood] : null,
+        mood_label: kind === "journal" ? (moodLabel.trim() || defaultMoodLabel(mood)) : null,
         life_area_id: lifeAreaId || null,
         life_area_source: lifeAreaId ? "user" as const : null,
         occurred_at: occurredAt ? zonedDateTimeLocalToIso(occurredAt, timezone) : null,
@@ -49,7 +52,10 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
       </div>
       <label className="toggle-row"><input type="checkbox" checked={reviewWorthy} onChange={e => setReviewWorthy(e.target.checked)}/><span>Highlight this for future reflections</span></label>
       <Field label="Tags"><input className="input" value={tags} onChange={e => setTags(e.target.value)} placeholder="work, idea, family" /></Field>
-      {kind === "journal" && <Field label="Mood"><div style={{ display: "flex", justifyContent: "space-between" }}>{[1,2,3,4,5].map(score => <button type="button" key={score} className={`button icon ${mood === score ? "dark" : "ghost"}`} onClick={() => setMood(score)} style={{ fontSize: 20 }}>{moodEmoji(score)}</button>)}</div></Field>}
+      {kind === "journal" && <>
+        <Field label="Mood"><div style={{ display: "flex", justifyContent: "space-between" }}>{[1,2,3,4,5].map(score => <button type="button" key={score} aria-label={`Mood ${score} of 5, ${defaultMoodLabel(score)}`} aria-pressed={mood === score} className={`button icon ${mood === score ? "dark" : "ghost"}`} onClick={() => setMood(score)} style={{ fontSize: 20 }}>{moodEmoji(score)}</button>)}</div></Field>
+        <Field label="In your own words"><input className="input" value={moodLabel} onChange={e => setMoodLabel(e.target.value)} maxLength={100} placeholder={defaultMoodLabel(mood)} /></Field>
+      </>}
       <div className="modal-actions"><button type="button" className="button ghost" onClick={onClose}>Cancel</button><button className="button primary" disabled={save.isPending}>Save memory</button></div>
     </form>
   </Modal>;

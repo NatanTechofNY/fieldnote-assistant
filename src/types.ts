@@ -137,6 +137,15 @@ export interface Message {
   created_at: string;
 }
 
+/** One journal entry's place on the mood chart: when, how it scored, and in whose words. */
+export interface MoodPoint {
+  id: string;
+  title?: string | null;
+  at: string;
+  score: number;
+  label?: string | null;
+}
+
 export interface Overview {
   counts: Record<TodoStatus, number> & { active: number; memories: number };
   in_progress: Todo[];
@@ -144,7 +153,7 @@ export interface Overview {
   due_today: Todo[];
   recent_memories: Memory[];
   upcoming_reminders: Reminder[];
-  mood_trend: Array<{ at: string; score: number; label?: string | null }>;
+  mood_trend: MoodPoint[];
   subtask_progress: Record<string, { done: number; total: number }>;
 }
 

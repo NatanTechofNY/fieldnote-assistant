@@ -7,7 +7,7 @@ import type {
   Memory, MemoryKind,
 } from "../../types";
 import { PageHead } from "../../components/layout/PageHead";
-import { AttachButton, Empty, ErrorState, Loading, MarkdownContent, MemoryIcon } from "../../components/ui";
+import { AttachButton, Empty, ErrorState, Loading, MarkdownContent, MemoryIcon, MoodPill } from "../../components/ui";
 import { memoryAttachment } from "../../lib/agent-attachments";
 import { moodEmoji } from "../../lib/mood";
 import { useDebounced } from "../../lib/use-debounced";
@@ -58,7 +58,7 @@ export function MemoriesPage() {
     </div>
     <LifeAreaFilter areas={lifeAreas} value={lifeAreaId} onChange={setLifeAreaId}/>
     <div className="tabs">{(["all", "fact", "note", "journal"] as const).map(k => <button key={k} className={`tab ${kind === k ? "active" : ""}`} onClick={() => setKind(k)}>{k === "all" ? "Everything" : `${k[0].toUpperCase()}${k.slice(1)}s`}</button>)}</div>
-    {isLoading ? <Loading/> : error ? <ErrorState error={error}/> : kind === "journal" ? <div className="journal">{journalGroups.map(([date, entries]) => <section className="journal-day" key={date}><div className="journal-date">{date}</div><div>{entries.map(memory => <article className="journal-entry" key={memory.id} onDoubleClick={() => setEditor(memory)}><h3><button type="button" className="card-open" onClick={() => setEditor(memory)}>{memory.mood_score ? moodEmoji(memory.mood_score) : "·"} {memory.title || "Untitled entry"}</button><AttachButton item={memoryAttachment(memory)}/></h3><MarkdownContent content={memory.content}/><div className="todo-meta"><LifeAreaPill name={memory.life_area_name} slug={memory.life_area_slug}/>{memory.tags.join(" · ")}</div></article>)}</div></section>)}</div> :
+    {isLoading ? <Loading/> : error ? <ErrorState error={error}/> : kind === "journal" ? <div className="journal">{journalGroups.map(([date, entries]) => <section className="journal-day" key={date}><div className="journal-date">{date}</div><div>{entries.map(memory => <article className="journal-entry" key={memory.id} onDoubleClick={() => setEditor(memory)}><h3><button type="button" className="card-open" onClick={() => setEditor(memory)}>{memory.mood_score ? moodEmoji(memory.mood_score) : "·"} {memory.title || "Untitled entry"}</button><AttachButton item={memoryAttachment(memory)}/></h3><MarkdownContent content={memory.content}/><div className="todo-meta"><MoodPill label={memory.mood_label}/><LifeAreaPill name={memory.life_area_name} slug={memory.life_area_slug}/>{memory.tags.join(" · ")}</div></article>)}</div></section>)}</div> :
       memories.length ? <div className="table-wrap">
         <table className="data-table">
           <thead>
@@ -74,7 +74,7 @@ export function MemoriesPage() {
           <tbody>
             {memories.map(memory => <tr key={memory.id}>
               <td><span className="memory-kind"><MemoryIcon kind={memory.kind}/>{memory.kind}{memory.mood_score ? ` · ${moodEmoji(memory.mood_score)}` : ""}{memory.review_worthy ? " · review" : ""}</span></td>
-              <td className="cell-title"><button type="button" onClick={() => setEditor(memory)}>{memory.title || "Untitled"}</button></td>
+              <td className="cell-title"><div className="title-row"><button type="button" onClick={() => setEditor(memory)}>{memory.title || "Untitled"}</button><MoodPill label={memory.mood_label}/></div></td>
               <td className="cell-optional"><LifeAreaPill name={memory.life_area_name} slug={memory.life_area_slug}/></td>
               <td className="cell-quiet cell-optional">{memory.tags.slice(0, 2).join(" · ") || "—"}</td>
               <td className="cell-quiet">{format(new Date(memory.occurred_at || memory.created_at), "MMM d, yyyy")}</td>

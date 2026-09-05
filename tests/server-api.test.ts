@@ -3304,6 +3304,81 @@ describe("Sendblue provider", () => {
   });
 
   /*
+   * "Thanks!" answered with a heart and nothing else is how people text. The
+   * fallback sentence exists for a model that forgot to answer; after a
+   * reaction, silence is the answer, and a filler line would undo the gesture.
+   */
+  it("sends only the tapback when the agent has nothing to add", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let response;
+    try {
+      response = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "thanks!", "SB_thanks", {
+        fetcher: agentCalling("react_to_message", { reaction: "love" }, ""),
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.equal(response?.text, "", "a reacted turn with no words sends no text");
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM channel_messages WHERE role='assistant'").get() as { count: number }).count,
+      0,
+      "no empty assistant bubble is filed; the reaction on the inbound row is the record",
+    );
+    const reacted = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_thanks'
+    `).get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(reacted.metadata_json).reactions, ["love"]);
+  });
+
+  it("still falls back to a sentence when the only reaction was a removal", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let response;
+    try {
+      response = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "never mind", "SB_nm", {
+        fetcher: agentCalling("react_to_message", { reaction: "-love" }, ""),
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+    assert.match(response?.text ?? "", /did not receive a text response/, "taking a tapback back is not an acknowledgement");
+  });
+
+  it("delivers nothing for a turn a tapback answered on its own", async () => {
+    const { db, api } = connectedFixture();
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send({
+      from_number: RECIPIENT,
+      number: RECIPIENT,
+      to_number: LINE,
+      content: "thanks!",
+      message_handle: "SB_thanks",
+      is_outbound: false,
+      service: "iMessage",
+    }).expect(200);
+
+    const sends: string[] = [];
+    const typing: string[] = [];
+    await runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async (_db: Db, _to: string, body: string) => {
+        sends.push(body);
+        return { sid: "SB_reply", status: "queued" };
+      },
+      runSmsAgent: async () => ({ text: "", threadId: "thread_sb" }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => { typing.push("start"); return () => typing.push("stop"); },
+    });
+
+    assert.deepEqual(sends, [], "an empty reply is not sent as a message");
+    assert.deepEqual(typing, ["start", "stop"], "the bubble still comes down");
+    assert.equal(
+      (db.prepare("SELECT status FROM external_events WHERE external_id='SB_thanks'").get() as { status: string }).status,
+      "processed",
+    );
+  });
+
+  /*
    * Sendblue spells a removal `-love`, and the archive has to follow it back off
    * rather than leaving a tapback drawn on a message that no longer carries one.
    */

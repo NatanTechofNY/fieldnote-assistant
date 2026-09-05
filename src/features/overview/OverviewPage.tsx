@@ -8,9 +8,10 @@ import type {
   Reminder, Todo,
 } from "../../types";
 import { PageHead } from "../../components/layout/PageHead";
-import { Empty, ErrorState, Loading, MemoryIcon } from "../../components/ui";
+import { Empty, ErrorState, Loading, MemoryIcon, MoodPill } from "../../components/ui";
 import { friendlyDate, friendlyDueDate, useTimezone } from "../../lib/timezone";
 import { reminderKindLabels, statusMeta } from "../../lib/todo-meta";
+import { MoodTrend } from "./MoodTrend";
 import { TodayHero } from "./TodayHero";
 
 export function OverviewPage() {
@@ -73,11 +74,13 @@ export function OverviewPage() {
             ? data.recent_memories.slice(0, 4).map(memory => <div className="list-row" key={memory.id}>
               <MemoryIcon kind={memory.kind} />
               <div className="list-main"><strong>{memory.title || memory.content.slice(0, 48)}</strong><small>{memory.content}</small></div>
+              <MoodPill score={memory.mood_score} label={memory.mood_label}/>
               <span className="badge">{memory.kind}</span>
             </div>)
             : <Empty label="Tell the agent something worth keeping." />}
         </div>
       </article>
+      <MoodTrend points={data.mood_trend} />
       <article className="card card-pad">
         <div className="card-title"><h3>Coming up</h3><Clock3 size={17} /></div>
         <div className="list">

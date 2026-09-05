@@ -6,6 +6,7 @@ export { MarkdownContent } from "./MarkdownContent";
 export { MarkdownEditor } from "./MarkdownEditor";
 export { MemoryIcon } from "./MemoryIcon";
 export { Modal } from "./Modal";
+export { MoodPill } from "./MoodPill";
 export { Empty, ErrorState, Loading } from "./states";
 export { ThemeToggle } from "./ThemeToggle";
 export { Toast } from "./Toast";

@@ -390,10 +390,14 @@ export async function runWorkerOnce(
           },
           sendSms: send,
         });
-        // The agent threads its answer only when it asked to, via reply_in_thread.
-        const sent = await send(db, message.from, response.text, { replyTo: response.replyTo });
+        // An empty reply is a turn a tapback answered on its own; there is
+        // nothing to send and no outbound row to file a provider id on.
+        if (response.text) {
+          // The agent threads its answer only when it asked to, via reply_in_thread.
+          const sent = await send(db, message.from, response.text, { replyTo: response.replyTo });
+          recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status, sent.replyTo);
+        }
         stopTyping();
-        recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status, sent.replyTo);
         completeExternalEvent(db, event.id, "processed");
       } catch (error) {
         stopTyping?.();
