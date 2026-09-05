@@ -233,6 +233,63 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
   });
 }
 
+/**
+ * The writes an earlier attempt at this same turn already made, shaped as the
+ * assistant message that would have carried them.
+ *
+ * A turn that times out after its `update_todo` has changed the record but never
+ * written the assistant row `threadHistory()` replays, so the retry two seconds
+ * later saw the user's request and nothing else, made the same write again, and
+ * a third attempt — finding the notes already in place — reported them as
+ * something that had always been there. The tool rows survive the failure, so
+ * the retry can be shown what it already did and pick up from there; the same
+ * rule as `assistantParts()`, that a write result beside the request is the only
+ * evidence a write happened. Reads are left out for the same reason they are
+ * left out of the replay: repeating one is cheap, and a stale one is misleading.
+ */
+function priorAttemptWrites(db: Db, threadId: string, inboundId: string): AgentPart[] {
+  const inbound = db.prepare("SELECT rowid FROM channel_messages WHERE id=?")
+    .get(inboundId) as { rowid: number } | undefined;
+  if (!inbound) return [];
+  // Insertion order, not the clock: two turns can land in the same millisecond,
+  // and the earlier one's write is not this turn's.
+  const rows = db.prepare(`
+    SELECT content,metadata_json FROM channel_messages
+    WHERE thread_id=? AND role='tool' AND rowid>? ORDER BY rowid
+  `).all(threadId, inbound.rowid) as Array<{ content: string; metadata_json: string }>;
+  return rows.flatMap(row => {
+    if (!WRITE_TOOLS.has(row.content)) return [];
+    let trace: { input?: Record<string, unknown>; output?: unknown; toolCallId?: string };
+    try {
+      trace = JSON.parse(row.metadata_json) as typeof trace;
+    } catch {
+      return [];
+    }
+    if (!trace.toolCallId || (trace.output as { success?: boolean } | undefined)?.success !== true) return [];
+    return [{
+      type: `tool-${row.content}`,
+      toolCallId: trace.toolCallId,
+      state: "output-available",
+      input: trace.input,
+      output: trace.output,
+    }];
+  });
+}
+
+/** Whether the inbound message already carries a given tapback, per the archive. */
+function hasReaction(db: Db, threadId: string, providerMessageId: string, reaction: string): boolean {
+  const row = db.prepare(`
+    SELECT metadata_json FROM channel_messages WHERE thread_id=? AND provider_message_id=?
+  `).get(threadId, providerMessageId) as { metadata_json: string | null } | undefined;
+  if (!row) return false;
+  try {
+    const reactions = (JSON.parse(row.metadata_json || "{}") as { reactions?: unknown }).reactions;
+    return Array.isArray(reactions) && reactions.includes(reaction);
+  } catch {
+    return false;
+  }
+}
+
 function saveChannelMessage(
   db: Db,
   threadId: string,
@@ -441,13 +498,24 @@ export async function runChannelAgent(
       },
     };
   }
+  // A retry resumes the turn rather than restarting it.
+  const priorWrites = priorAttemptWrites(db, thread.id, inboundId);
+  if (priorWrites.length) {
+    messages.push({
+      id: `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`,
+      role: "assistant",
+      parts: priorWrites,
+    });
+  }
 
   // Best effort at both ends: a progress tapback that fails to land, or to lift,
-  // is not a reason to lose the answer.
+  // is not a reason to lose the answer. The archive is what says whether it is
+  // up, so a retried attempt neither sends it twice nor takes it down between
+  // attempts: the turn is still being worked, and the mark stays until it ends.
   const progressHandle = channel === "sms" && options.inbound?.provider === "sendblue"
     ? context.inboundMessageHandle
     : undefined;
-  let progressShown = false;
+  let progressShown = progressHandle ? hasReaction(db, thread.id, progressHandle, PROGRESS_REACTION) : false;
   const setProgress = async (on: boolean): Promise<void> => {
     if (!progressHandle || progressShown === on) return;
     const reaction = on ? PROGRESS_REACTION : `-${PROGRESS_REACTION}`;
@@ -534,8 +602,13 @@ export async function runChannelAgent(
     }
     throw new Error("Agent exceeded the maximum tool-call iterations");
   } catch (error) {
-    // A 🔍 left on a message nobody answered reads as a search still running.
-    await setProgress(false);
+    /*
+     * The 🔍 is deliberately left up. Every failed inbound turn is retried
+     * behind a short backoff, so the search really is still running as far as
+     * the user is concerned, and lifting and replacing it on every attempt is
+     * the flicker that made a two-minute turn look like six tapbacks. The
+     * attempt that finally answers takes it down.
+     */
     /*
      * An app-composed turn is written again from scratch on the next attempt, so
      * the abandoned copy leaves the recent window rather than being read twice.

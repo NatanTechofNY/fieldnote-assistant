@@ -401,12 +401,11 @@ export async function runWorkerOnce(
         completeExternalEvent(db, event.id, "processed");
       } catch (error) {
         stopTyping?.();
-        completeExternalEvent(
-          db,
-          event.id,
-          "failed",
-          error instanceof Error ? error.message : "Inbound SMS processing failed",
-        );
+        const message = error instanceof Error ? error.message : "Inbound SMS processing failed";
+        // The row's last_error is overwritten by the attempt that succeeds, so
+        // without this line a turn that took three tries leaves no trace of why.
+        console.warn(`Inbound ${source} turn failed on attempt ${event.attempts}, will retry: ${message}`);
+        completeExternalEvent(db, event.id, "failed", message);
       }
     }
   }

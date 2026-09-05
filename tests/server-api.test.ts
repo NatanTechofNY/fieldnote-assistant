@@ -3407,6 +3407,71 @@ describe("Sendblue provider", () => {
     assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, ["like"]);
   });
 
+  /*
+   * A turn that timed out after its write was retried from scratch: the retry
+   * saw the request and none of what the first attempt did, wrote again, and the
+   * attempt after that described the change as something that had always been
+   * there. The tool rows outlive the failure, so the retry resumes from them —
+   * and the 🔍 stays up between attempts instead of blinking on every one.
+   */
+  it("resumes a retried turn from the writes its first attempt made", async () => {
+    const { db, api } = connectedFixture();
+    agentStudioEnv();
+    const todo = (await api.post("/api/todos").send({ title: "Edit the deck" }).expect(201)).body.data;
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    const requests: Array<{ messages: Array<{ role: string; parts: Array<Record<string, unknown>> }> }> = [];
+    try {
+      let call = 0;
+      await assert.rejects(
+        runSmsAgent(db, fakeSearch(db), RECIPIENT, "mark the deck done", "SB_deck", {
+          fetcher: async () => {
+            call += 1;
+            if (call === 1) {
+              return new Response(JSON.stringify({
+                role: "assistant",
+                parts: [{ type: "tool-set_todo_status", tool_call_id: "call_w", state: "input-available", input: { id: todo.id, status: "done" } }],
+              }), { status: 200 });
+            }
+            return new Response("upstream timeout", { status: 503 });
+          },
+          inbound: { provider: "sendblue" },
+        }),
+        /unavailable \(503\)/,
+        "the first attempt dies after its write",
+      );
+
+      const response = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "mark the deck done", "SB_deck", {
+        fetcher: async (_url, init) => {
+          requests.push(JSON.parse(String(init?.body)) as (typeof requests)[number]);
+          return new Response(JSON.stringify({
+            role: "assistant", parts: [{ type: "text", text: "Marked it done." }],
+          }), { status: 200 });
+        },
+        inbound: { provider: "sendblue" },
+      });
+      assert.equal(response.text, "Marked it done.");
+    } finally { stub.restore(); }
+
+    const [retry] = requests;
+    const last = retry.messages[retry.messages.length - 1];
+    assert.equal(last.role, "assistant", "the retry is shown its own earlier attempt");
+    assert.equal(last.parts.length, 1);
+    assert.equal(last.parts[0].type, "tool-set_todo_status");
+    assert.equal(last.parts[0].state, "output-available");
+    assert.equal((last.parts[0].output as { success: boolean }).success, true);
+    assert.equal(retry.messages[retry.messages.length - 2].role, "user", "placed after the request it answers");
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM channel_messages WHERE role='tool'").get() as { count: number }).count,
+      1,
+      "one write, one trace",
+    );
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["🔍", "-🔍"],
+      "the mark goes up once, survives the failed attempt, and comes down with the answer",
+    );
+  });
+
   it("does not mark a message the agent answers without tools", async () => {
     const { db } = connectedFixture();
     agentStudioEnv();
