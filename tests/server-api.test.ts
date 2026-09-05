@@ -3342,6 +3342,87 @@ describe("Sendblue provider", () => {
   });
 
   /*
+   * A turn that goes off to look something up says so on the message itself: a
+   * 🔍 from the moment the first tool call comes back until the answer is ready.
+   * It is the runtime's gesture, not the model's, and it never outlives the turn.
+   */
+  it("marks the message with a searching tapback while tools run and lifts it before answering", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let response;
+    try {
+      response = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "which areas do I have?", "SB_areas", {
+        fetcher: agentCalling("list_life_areas", {}, "Work, Personal, and Side Project."),
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.equal(response?.text, "Work, Personal, and Side Project.");
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["🔍", "-🔍"],
+      "on when work starts, off before the reply",
+    );
+    const inbound = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_areas'
+    `).get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, [], "the archive does not keep the placeholder");
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM channel_messages WHERE role='tool'").get() as { count: number }).count,
+      1,
+      "the placeholder is not a tool call and leaves no trace row",
+    );
+  });
+
+  it("lets the agent's own tapback take the searching one's place", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let call = 0;
+    const turns = [
+      [{ type: "tool-list_life_areas", tool_call_id: "call_1", state: "input-available", input: {} }],
+      [{ type: "tool-react_to_message", tool_call_id: "call_2", state: "input-available", input: { reaction: "like" } }],
+      [{ type: "text", text: "All set." }],
+    ];
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "sort my areas out", "SB_sort", {
+        fetcher: async () => {
+          const parts = turns[call];
+          call += 1;
+          return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+        },
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["🔍", "-🔍", "like"],
+      "the placeholder comes off before the agent's reaction lands, and is not lifted twice",
+    );
+    const inbound = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_sort'
+    `).get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, ["like"]);
+  });
+
+  it("does not mark a message the agent answers without tools", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "hi", "SB_hi", {
+        fetcher: async () => new Response(JSON.stringify({
+          role: "assistant", parts: [{ type: "text", text: "Hey. What's up?" }],
+        }), { status: 200 }),
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+    assert.deepEqual(stub.calls.filter(call => call.url.pathname === "/api/send-reaction"), []);
+  });
+
+  /*
    * "Thanks!" answered with a heart and nothing else is how people text. The
    * fallback sentence exists for a model that forgot to answer; after a
    * reaction, silence is the answer, and a filler line would undo the gesture.

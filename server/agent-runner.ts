@@ -1,7 +1,8 @@
 import type { AlgoliaSync } from "./algolia.ts";
-import { id, now, queueIndexJob, USER_ID } from "./db.ts";
+import { id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import type { SmsSender } from "./messaging.ts";
+import { sendSendblueReaction } from "./sendblue-service.ts";
 import { executeAgentTool, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
 import type { Db } from "./types.ts";
@@ -113,6 +114,24 @@ const WRITE_TOOLS = new Set([
   // second.
   "react_to_message",
 ]);
+
+/**
+ * Tools that act on the conversation itself rather than look something up or
+ * change a record. None of them is "working on it": a tapback and a threaded
+ * reply are the answer's own gestures, and the product cards are messages.
+ */
+const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_product_cards"]);
+
+/**
+ * The tapback that sits on the user's message while the turn is looking things
+ * up. The typing bubble says someone is there; this says what they are doing,
+ * which on a turn of two or three tool rounds is the difference between a pause
+ * and a stall. It is placed by the runtime rather than the model so it costs no
+ * completion, arrives the moment the first tool call comes back, and is always
+ * taken off again — either before the reply, or before the agent's own tapback
+ * so that one stands alone.
+ */
+const PROGRESS_REACTION = "🔍";
 
 /**
  * Rebuilds one stored assistant turn for the replayed window.
@@ -423,6 +442,24 @@ export async function runChannelAgent(
     };
   }
 
+  // Best effort at both ends: a progress tapback that fails to land, or to lift,
+  // is not a reason to lose the answer.
+  const progressHandle = channel === "sms" && options.inbound?.provider === "sendblue"
+    ? context.inboundMessageHandle
+    : undefined;
+  let progressShown = false;
+  const setProgress = async (on: boolean): Promise<void> => {
+    if (!progressHandle || progressShown === on) return;
+    const reaction = on ? PROGRESS_REACTION : `-${PROGRESS_REACTION}`;
+    try {
+      await sendSendblueReaction(db, progressHandle, reaction);
+      recordMessageReaction(db, thread.id, progressHandle, reaction);
+      progressShown = on;
+    } catch (error) {
+      console.warn("Progress tapback failed:", error instanceof Error ? error.message : error);
+    }
+  };
+
   try {
     for (let iteration = 0; iteration < 8; iteration += 1) {
       const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch);
@@ -442,6 +479,7 @@ export async function runChannelAgent(
         && (part.toolCallId || part.tool_call_id),
       );
       if (!toolParts.length) {
+        await setProgress(false);
         const text = response.parts
           .filter(part => part.type === "text" && typeof part.text === "string")
           .map(part => part.text)
@@ -469,8 +507,16 @@ export async function runChannelAgent(
         return { text: finalText, threadId: thread.id, replyTo: context.replyToMessageHandle };
       }
 
+      // Real work is about to start. A batch that already carries the agent's
+      // own tapback needs no placeholder in front of it.
+      const toolNames = toolParts.map(part => String(part.type).slice(5));
+      if (toolNames.some(name => !GESTURE_TOOLS.has(name)) && !toolNames.includes("react_to_message")) {
+        await setProgress(true);
+      }
       for (const part of toolParts) {
         const toolName = String(part.type).slice(5);
+        // The agent's tapback is the one that stays; the placeholder comes off first.
+        if (toolName === "react_to_message") await setProgress(false);
         try {
           const data = await executeAgentTool(db, search, toolName, part.input || {}, context);
           // An undefined payload disappears from the serialized body, leaving a
@@ -488,6 +534,8 @@ export async function runChannelAgent(
     }
     throw new Error("Agent exceeded the maximum tool-call iterations");
   } catch (error) {
+    // A 🔍 left on a message nobody answered reads as a search still running.
+    await setProgress(false);
     /*
      * An app-composed turn is written again from scratch on the next attempt, so
      * the abandoned copy leaves the recent window rather than being read twice.
