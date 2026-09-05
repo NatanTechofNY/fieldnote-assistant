@@ -1703,6 +1703,62 @@ describe("SMS, reminders, and channel agent execution", () => {
   });
 
   /*
+   * Agent Studio continues a trailing assistant message rather than answering it
+   * with a new one: same id, accumulated parts. Every earlier fake here let the
+   * runner mint its own ids, which is how a turn of two tool rounds — the third
+   * completion — went unexercised while it failed in production with
+   * `Messages must have unique ids` on every first attempt.
+   */
+  it("continues an accumulated assistant message instead of duplicating it", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    type Part = Record<string, unknown>;
+    type Message = { id: string; role: string; parts: Part[] };
+    const requests: Message[][] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] };
+      requests.push(messages);
+      const last = messages[messages.length - 1];
+      const next = (parts: Part[]): Response => new Response(JSON.stringify({
+        id: last.role === "assistant" ? last.id : "alg_msg_studio_1",
+        role: "assistant",
+        parts: last.role === "assistant" ? [...last.parts, ...parts] : parts,
+      }), { status: 200 });
+      const rounds = messages.filter(message => message.role === "assistant").length;
+      const tools = last.role === "assistant" ? last.parts.filter(part => String(part.type).startsWith("tool-")).length : 0;
+      if (rounds === 0) return next([{ type: "tool-list_life_areas", tool_call_id: "call_1", state: "input-available", input: {} }]);
+      if (tools === 1) return next([{ type: "tool-list_life_areas", tool_call_id: "call_2", state: "input-available", input: {} }]);
+      return next([{ type: "text", text: "Three areas, twice over." }]);
+    };
+
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "areas?", undefined, { fetcher });
+
+    assert.equal(response.text, "Three areas, twice over.");
+    assert.equal(requests.length, 3, "two tool rounds and an answer");
+    for (const [index, messages] of requests.entries()) {
+      const ids = messages.map(message => message.id);
+      assert.equal(new Set(ids).size, ids.length, `request ${index + 1} sends no duplicate message ids`);
+    }
+    assert.equal(
+      requests[2].filter(message => message.role === "assistant").length,
+      1,
+      "the continued message replaces the one it continued",
+    );
+    assert.deepEqual(
+      requests[2][requests[2].length - 1].parts.map(part => `${part.type}:${part.state}`),
+      ["tool-list_life_areas:output-available", "tool-list_life_areas:output-available"],
+      "and carries every executed part with its result",
+    );
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM channel_messages WHERE role='tool'").get() as { count: number }).count,
+      2,
+      "each tool call is traced once even though it is handed back on every pass",
+    );
+  });
+
+  /*
    * Agent Studio titles a conversation from its first message and never retitles,
    * so one id pinned to a phone number for life collected three weeks of texts
    * into a single record named after whatever was said first. A conversation now

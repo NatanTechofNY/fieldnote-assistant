@@ -598,7 +598,21 @@ export async function runChannelAgent(
         part.state = "output-available";
         saveToolTrace(db, thread.id, part);
       }
-      messages.push(response);
+      /*
+       * Agent Studio does not answer a trailing assistant message with a new
+       * one; it continues it, handing back the same id with the accumulated
+       * parts. Pushed as a second message, the two copies shared an id and the
+       * next completion was refused with `Messages must have unique ids`, so
+       * every turn that needed two tool rounds failed on its first attempt and
+       * was rescued, slowly, by the retry. The continuation replaces what it
+       * continued.
+       */
+      const trailing = messages[messages.length - 1];
+      if (trailing?.role === "assistant" && trailing.id === response.id) {
+        messages[messages.length - 1] = response;
+      } else {
+        messages.push(response);
+      }
     }
     throw new Error("Agent exceeded the maximum tool-call iterations");
   } catch (error) {
