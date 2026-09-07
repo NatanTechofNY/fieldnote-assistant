@@ -2181,6 +2181,16 @@ tr:hover .attach-button,
 .reminder-editor { padding:12px; border:1px solid var(--border); border-radius:var(--radius); }
 .reminder-editor > .eyebrow { display:block; margin-bottom:8px; }
 .reminder-extra { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+/* A repeat is picked by day rather than typed, so the days sit in one row of
+   toggles the way a phone alarm lays them out. */
+.weekday-picker { display:flex; gap:4px; margin-bottom:10px; }
+.weekday-toggle {
+  flex:1; min-width:0; padding:5px 0; border:1px solid var(--border); border-radius:var(--radius);
+  background:transparent; color:var(--text-secondary); font:inherit; font-size:11px; cursor:pointer;
+}
+.weekday-toggle.on { border-color:var(--accent-border); background:var(--accent-subtle); color:var(--text); }
+.repeat-summary { display:flex; align-items:center; gap:6px; margin:0 0 8px; color:var(--text-secondary); font-size:12px; }
+.repeat-cell { display:inline-flex; align-items:center; gap:4px; }
 /* The editor is where a task's steps are actually managed, so the list is open
    rather than folded behind a count. */
 .subtask-editor { padding:12px; margin-bottom:12px; border:1px solid var(--border); border-radius:var(--radius); }

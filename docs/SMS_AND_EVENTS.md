@@ -7,9 +7,10 @@ The web app, the webhook API, and one background worker all run in the same Node
 The worker ([`server/worker.ts`](../server/worker.ts)) ticks once at startup and then every 60 seconds, with a `running` flag so ticks cannot overlap. An inbound webhook also wakes it directly through `requestWorkerWake()`, so a text is answered in the seconds the agent takes rather than waiting out the interval; the timer stays as the safety net for retries, reminders, and anything queued while the process was down. A wake raised while a tick is already draining schedules one more pass, because an event enqueued mid-tick arrives too late for the claim already in flight. Each tick, in order:
 
 1. Claim up to 20 inbound events per provider (Twilio, then Sendblue) and run the agent on each.
-2. If outbound SMS is allowed right now, send due reminders, then the daily digest, then any due digest briefs.
-3. Poll Granola.
-4. Run maintenance: flush pending or failed index jobs, prune finished ones.
+2. Roll repeating todos forward (see [below](#repeating-todos)). This happens whether or not texting is on, because it is scheduling rather than delivery.
+3. If outbound SMS is allowed right now, send due reminders, then the daily digest, then any due digest briefs.
+4. Poll Granola.
+5. Run maintenance: flush pending or failed index jobs, prune finished ones.
 
 ## Environment
 
@@ -156,6 +157,14 @@ Two things worth knowing:
 
 - **Opt-out and quiet hours gate scheduled outbound only.** An inbound text is still enqueued, still runs the agent, and still gets a reply. If you need STOP to mean total silence, that check does not exist yet.
 - Reminders with `kind = 'due'` are never sent. They exist for scheduling and UI purposes; the worker only claims other kinds. A todo whose reminder lands on its own due date therefore keeps both rows — "remind me to take out the trash at 9pm" writes the same instant to `due_at` and `reminder_at`, and collapsing the pair would leave only the row the worker skips. `syncTodoReminders` dedupes per delivery bucket for that reason: a `pre` and an `escalation` sharing an instant still become one text, but a due date never stands in for the reminder itself. `GET /api/reminders/due`, which drives the in-app toast, collapses the pair at read time so one moment is one interruption.
+
+## Repeating todos
+
+A todo that repeats — "give the cat her medicine every day at 8" — is one row carrying a `recurrence_json` rule (`freq` daily or weekly, `interval`, `weekdays`, a local `time`, and `lead_minutes`). The row's `due_at` always holds the **current occurrence**, computed from the rule in the user's `notification_preferences.timezone`, and `reminder_at` holds `due_at` minus `lead_minutes` (or nothing when `lead_minutes` is null). Everything downstream then works unchanged: `syncTodoReminders` writes the usual `due` and `pre` rows, the worker texts the `pre` row, and the calendar, Overview, digest, and Algolia all read `due_at` as they would for any other task. Any `due_at`, `reminder_at`, or `extra_reminders` a request supplies for a repeating todo is ignored in favour of the derived values, and a repeating todo cannot have a `parent_id`.
+
+Completing one is an ordinary `status = 'done'` write. Alongside it the server logs the occurrence in `todo_completions` (unique on todo and occurrence) and refreshes `last_completed_at`; moving the status back off `done` removes that log entry, so undoing a tap on the checkbox costs nothing. The row stays `done` for the rest of that local day, which is what the list shows as "Done for today".
+
+The worker's `rollRecurringTodos()` is the only thing that advances a series. On each tick it looks for repeating rows, other than `cancelled` ones, whose `due_at` falls on an earlier local date than today, and moves each to the next occurrence on or after the start of today: new `due_at` and `reminder_at`, `status` back to `pending`, `completed_at` cleared, reminder rows rebuilt, and an index job queued. A missed day therefore rolls forward at midnight rather than sitting overdue for ever, and a worker that was asleep overnight still lands on today's slot — late, and so texted at once — rather than skipping to tomorrow. Setting `cancelled` stops the series; clearing the rule leaves the current occurrence in place as a one-off. A change to the user's timezone takes effect at the next roll.
 
 ## Idempotency
 

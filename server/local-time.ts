@@ -20,3 +20,28 @@ export function localParts(date: Date, timezone: string): { date: string; time: 
     time: `${value("hour")}:${value("minute")}`,
   };
 }
+
+/** A local `YYYY-MM-DD` and `HH:MM` read as if they were UTC, in epoch milliseconds. */
+function wallClockMillis(date: string, time: string): number {
+  const [year, month, day] = date.split("-").map(Number);
+  const [hour, minute] = time.split(":").map(Number);
+  return Date.UTC(year, month - 1, day, hour, minute);
+}
+
+/**
+ * The instant at which a wall clock in `timezone` reads `date` `time`. The
+ * inverse of `localParts`: guess that the wall clock is UTC, read what the zone
+ * says at that guess, and shift by the difference. Two passes settle the guess
+ * across a DST change; a time that does not exist on that day (inside the
+ * spring-forward gap) lands on the hour the zone actually has.
+ */
+export function zonedToInstant(date: string, time: string, timezone: string): Date {
+  const target = wallClockMillis(date, time);
+  let guess = target;
+  for (let pass = 0; pass < 2; pass += 1) {
+    const local = localParts(new Date(guess), timezone);
+    const offset = wallClockMillis(local.date, local.time) - guess;
+    guess = target - offset;
+  }
+  return new Date(guess);
+}

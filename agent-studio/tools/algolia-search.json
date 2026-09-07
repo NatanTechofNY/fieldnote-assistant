@@ -4,7 +4,7 @@
   "indices": [
     {
       "index": "devcon_assistant_todos",
-      "description": "Work the local devcon-demo user intends to do: todos and subtasks with canonical status, priority, category, life area, parent, due, and reminder fields. Use for outstanding tasks, what is on the list, and deadlines. Do not use for background knowledge the user asked to be remembered, which lives in the memory index even when it involves dates or meetings.",
+      "description": "Work the local devcon-demo user intends to do: todos and subtasks with canonical status, priority, category, life area, parent, due, and reminder fields, plus repeating tasks (is_recurring true, with the rule in recurrence and the current occurrence in due_at). Use for outstanding tasks, what is on the list, deadlines, and daily or weekly routines. Do not use for background knowledge the user asked to be remembered, which lives in the memory index even when it involves dates or meetings.",
       "searchParameters": {
         "filters": "userId:\"devcon-demo\"",
         "hitsPerPage": 20,
@@ -22,7 +22,10 @@
           "parent_id",
           "due_at",
           "reminder_at",
-          "extra_reminders"
+          "extra_reminders",
+          "recurrence",
+          "is_recurring",
+          "last_completed_at"
         ],
         "attributesToHighlight": [],
         "facets": ["status", "priority"],
@@ -62,7 +65,10 @@
             "parent_id",
             "due_at",
             "reminder_at",
-            "extra_reminders"
+            "extra_reminders",
+            "recurrence",
+            "is_recurring",
+            "last_completed_at"
           ],
           "constraint": {
             "values": [
@@ -79,7 +85,10 @@
               "parent_id",
               "due_at",
               "reminder_at",
-              "extra_reminders"
+              "extra_reminders",
+              "recurrence",
+              "is_recurring",
+              "last_completed_at"
             ]
           }
         },

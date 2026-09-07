@@ -18,6 +18,22 @@ export interface Category {
   icon?: string | null;
 }
 
+/**
+ * How a repeating todo repeats, in the user's wall clock. The server derives
+ * `due_at` and `reminder_at` from this for the current occurrence.
+ */
+export interface Recurrence {
+  freq: "daily" | "weekly";
+  /** Every N days for daily, every N weeks for weekly. */
+  interval: number;
+  /** Sunday = 0 through Saturday = 6; empty for daily. */
+  weekdays: number[];
+  /** Local `HH:MM`. */
+  time: string;
+  /** Minutes before `time` to text; 0 at the time, null never. */
+  lead_minutes: number | null;
+}
+
 export interface Todo {
   id: string;
   title: string;
@@ -36,6 +52,8 @@ export interface Todo {
   status: TodoStatus;
   started_at?: string | null;
   completed_at?: string | null;
+  recurrence?: Recurrence | null;
+  last_completed_at?: string | null;
   created_at: string;
   updated_at: string;
 }

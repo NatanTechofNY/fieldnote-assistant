@@ -47,6 +47,26 @@ export const timezone = z.string().min(1).max(100).refine(value => {
   }
 }, "Select a valid IANA timezone");
 
+/**
+ * How a repeating todo repeats, in the user's wall clock. The row's `due_at`
+ * and `reminder_at` are derived from this, so a request that carries both is
+ * read for the rule alone.
+ */
+export const recurrence = z.object({
+  freq: z.enum(["daily", "weekly"]),
+  interval: z.coerce.number().int().min(1).max(365).nullable().optional().transform(value => value ?? 1),
+  weekdays: z.array(z.coerce.number().int().min(0).max(6)).max(7).nullable().optional()
+    .transform(value => [...new Set(value ?? [])].sort()),
+  time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time"),
+  lead_minutes: z.coerce.number().int().min(0).max(1440).nullable().optional().transform(value => value ?? null),
+}).strict().superRefine((value, context) => {
+  if (value.freq === "weekly" && value.weekdays.length === 0) {
+    context.addIssue({ code: "custom", path: ["weekdays"], message: "Pick at least one weekday" });
+  }
+});
+export type RecurrenceInput = z.infer<typeof recurrence>;
+export const nullableRecurrence = recurrence.nullable().optional();
+
 /* REST request schemas ------------------------------------------------------- */
 
 export const subtaskCreate = z.object({
@@ -70,6 +90,7 @@ export const todoCreate = z.object({
   status: status.default("pending"),
   started_at: nullableIso,
   completed_at: nullableIso,
+  recurrence: nullableRecurrence,
   subtasks: z.array(subtaskCreate).max(50).nullable().optional(),
 }).strict();
 
@@ -250,6 +271,7 @@ const todoToolFields = {
   due_at: nullableIso,
   reminder_at: nullableIso,
   extra_reminders: z.array(iso).max(20).nullable().optional(),
+  recurrence: nullableRecurrence,
 };
 
 const memoryToolFields = {
@@ -314,6 +336,7 @@ export const toolInput = {
     parent_id: nullableId,
     due_from: nullableIso,
     due_to: nullableIso,
+    recurring: z.boolean().nullable().optional(),
     limit: z.coerce.number().int().min(1).max(200).nullable().optional(),
   }),
   create_todo: z.object({
@@ -332,7 +355,7 @@ export const toolInput = {
       ...todoToolFields,
       clear_fields: clearFields([
         "notes", "priority", "category_id", "life_area_id",
-        "parent_id", "due_at", "reminder_at", "extra_reminders",
+        "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence",
       ]),
     }).default({}),
     ...overridable,

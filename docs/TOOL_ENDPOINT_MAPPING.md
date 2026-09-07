@@ -72,6 +72,12 @@ Statuses are exactly `pending`, `in_progress`, `blocked`, `done`, `cancelled`. P
 
 Two limits differ between the tool schema and the server, and the tighter one wins in practice: the tool JSON caps `list_todos.limit` at 100 (server allows 200) and title length at 200 characters (server allows 300, content 50,000).
 
+### Repeating todos
+
+`create_todo` and `update_todo.patch` accept a `recurrence` object — `freq` (`daily` or `weekly`), `interval`, `weekdays` (Sunday = 0), a local `time` as `HH:MM`, and `lead_minutes` — and `POST /api/todos` and `PATCH /api/todos/:id` take the same shape. Both paths call the same `planRecurrenceWrite()` ([`server/recurrence.ts`](../server/recurrence.ts)): when a rule is set, `due_at` and `reminder_at` are derived from it for the next occurrence and `extra_reminders` is emptied, whatever the request said; a request that omits `recurrence` leaves a repeating todo's derived times alone; a repeating todo is refused a `parent_id`. In the tool dialect a null `recurrence` means unchanged, so stopping a repeat is `clear_fields: ["recurrence"]`, while the REST route reads `recurrence: null` as the same clear. `list_todos.recurring` and `GET /api/todos?recurring=` filter on whether a rule is set.
+
+Completing an occurrence is the ordinary status write on either path, and both call `syncOccurrenceCompletion()` ([`server/todo-status.ts`](../server/todo-status.ts)) to log the occurrence in `todo_completions` and refresh `last_completed_at`. `get_todo` and `GET /api/todos/:id` return `completions`, `completion_count`, and `streak` for a repeating todo. Rolling the row on to its next occurrence is the worker's job alone; see [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#repeating-todos).
+
 ## Memories
 
 `kind` is exactly `fact`, `note`, or `journal`. `mood_score` is null or an integer 1–5.

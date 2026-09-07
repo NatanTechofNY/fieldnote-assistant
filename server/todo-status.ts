@@ -1,6 +1,57 @@
-import { USER_ID, getTodo, now, queueIndexJob, syncTodoReminders } from "./db.ts";
+import {
+  USER_ID, getTodo, getTodoCompletions, id, instant, now, queueIndexJob, syncTodoReminders, userTimezone,
+} from "./db.ts";
 import { getTaskPreferences } from "./integrations.ts";
-import type { Db, TodoRow } from "./types.ts";
+import { completionStreak, parseRecurrence } from "./recurrence.ts";
+import type { Db, TodoCompletionRow, TodoRow } from "./types.ts";
+
+/**
+ * Keeps the completion log in step with a repeating todo's status. Marking the
+ * row done records the occurrence it currently holds, so the worker can roll
+ * the row forward later without losing the fact that today's dose was given;
+ * moving it back off done takes that record away again, which is what undoing
+ * a tap on the checkbox should mean. Called after every status write, and a
+ * no-op for a todo that does not repeat.
+ */
+export function syncOccurrenceCompletion(db: Db, todo: TodoRow): void {
+  if (!todo.recurrence_json || !todo.due_at) return;
+  const occurrence = instant(todo.due_at);
+  if (todo.status === "done") {
+    const completedAt = todo.completed_at ?? now();
+    db.prepare(`
+      INSERT OR IGNORE INTO todo_completions(id,user_id,todo_id,occurrence_at,completed_at,created_at)
+      VALUES(?,?,?,?,?,?)
+    `).run(id("completion"), USER_ID, todo.id, occurrence, completedAt, now());
+  } else {
+    db.prepare("DELETE FROM todo_completions WHERE todo_id=? AND occurrence_at=?").run(todo.id, occurrence);
+  }
+  db.prepare(`
+    UPDATE todos SET last_completed_at=(
+      SELECT MAX(completed_at) FROM todo_completions WHERE todo_id=todos.id
+    ) WHERE id=? AND user_id=?
+  `).run(todo.id, USER_ID);
+}
+
+/** The completion history a detail view or the agent reads for a repeating todo. */
+export function completionStats(
+  db: Db,
+  todo: TodoRow,
+): { completion_count: number; streak: number; completions: TodoCompletionRow[] } | null {
+  const rule = parseRecurrence(todo.recurrence_json);
+  if (!rule) return null;
+  const completions = getTodoCompletions(db, todo.id);
+  const count = db.prepare(
+    "SELECT count(*) total FROM todo_completions WHERE todo_id=?",
+  ).get(todo.id) as { total: number };
+  const all = db.prepare(
+    "SELECT occurrence_at FROM todo_completions WHERE todo_id=?",
+  ).all(todo.id) as Array<{ occurrence_at: string }>;
+  return {
+    completion_count: count.total,
+    streak: completionStreak(rule, all.map(row => row.occurrence_at), todo.due_at, userTimezone(db)),
+    completions,
+  };
+}
 
 /**
  * Closing the last step of a task often means the task itself is finished, but
@@ -27,6 +78,7 @@ export function completeParentIfSettled(db: Db, child: TodoRow): TodoRow | null 
   `).run(timestamp, timestamp, parent.id, USER_ID);
   const closed = getTodo(db, parent.id) as TodoRow;
   syncTodoReminders(db, closed);
+  syncOccurrenceCompletion(db, closed);
   queueIndexJob(db, "todo", parent.id);
   return closed;
 }

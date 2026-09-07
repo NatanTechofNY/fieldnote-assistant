@@ -1,17 +1,18 @@
 import type { AlgoliaSync } from "./algolia.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { pruneExpiredSessions } from "./auth.ts";
-import { id, now, USER_ID } from "./db.ts";
+import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
+import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import { recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "./agent-runner.ts";
 import { composeDigestTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
 import { claimExternalEvents, completeExternalEvent, pollGranola } from "./event-ingestion.ts";
-import { localParts } from "./local-time.ts";
+import { localParts, zonedToInstant } from "./local-time.ts";
 import { sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
 import type { StopTypingIndicator } from "./sendblue-service.ts";
-import type { Db, DigestBriefRow, ReminderRow } from "./types.ts";
+import type { Db, DigestBriefRow, ReminderRow, TodoRow } from "./types.ts";
 
 type SearchWriter = Pick<AlgoliaSync, "flushSoon" | "flush">;
 
@@ -79,6 +80,45 @@ function messageHandleOf(value: unknown): string | undefined {
 function inQuietHours(time: string, start: string | null, end: string | null): boolean {
   if (!start || !end || start === end) return false;
   return start < end ? time >= start && time < end : time >= start || time < end;
+}
+
+/**
+ * Moves each repeating todo on to its next occurrence once the local day of the
+ * one it holds is over. Completing the row marks it done for the rest of that
+ * day, which is what the list should show; a miss simply rolls forward at
+ * midnight rather than sitting overdue for ever. The worker is the only writer
+ * that does this, so the row cannot be rolled twice, and it happens whether or
+ * not texting is enabled because it is scheduling, not delivery.
+ */
+export function rollRecurringTodos(db: Db, search: SearchWriter, timezone: string, at = new Date()): number {
+  const today = localParts(at, timezone).date;
+  // The next occurrence is searched from the start of today rather than from
+  // now, so a worker that was down overnight still lands on today's slot (late,
+  // and so texted at once) instead of skipping to tomorrow's.
+  const from = new Date(zonedToInstant(today, "00:00", timezone).getTime() - 1);
+  const rows = db.prepare(`
+    SELECT * FROM todos
+    WHERE user_id=? AND recurrence_json IS NOT NULL AND due_at IS NOT NULL AND status<>'cancelled'
+  `).all(USER_ID) as TodoRow[];
+  let rolled = 0;
+  for (const row of rows) {
+    const rule = parseRecurrence(row.recurrence_json);
+    if (!rule || !row.due_at) continue;
+    if (localParts(new Date(row.due_at), timezone).date >= today) continue;
+    const next = materializeRecurrence(rule, timezone, from);
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE todos SET due_at=?,reminder_at=?,extra_reminders_json='[]',status='pending',
+          started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND user_id=?
+      `).run(next.due_at, next.reminder_at, now(), row.id, USER_ID);
+      const updated = getTodo(db, row.id);
+      if (updated) syncTodoReminders(db, updated);
+      queueIndexJob(db, "todo", row.id);
+    })();
+    rolled += 1;
+  }
+  if (rolled) search.flushSoon();
+  return rolled;
 }
 
 /*
@@ -411,6 +451,11 @@ export async function runWorkerOnce(
   }
   const preferences = getNotificationPreferences(db);
   const local = localParts(new Date(), preferences.timezone);
+  try {
+    rollRecurringTodos(db, search, preferences.timezone);
+  } catch (error) {
+    console.error("Rolling recurring todos failed", error);
+  }
   if (
     preferences.smsEnabled
     && preferences.recipientPhone
