@@ -60,11 +60,22 @@ export interface TodoRow {
   status: TodoStatus;
   started_at: string | null;
   completed_at: string | null;
+  recurrence_json: string | null;
+  last_completed_at: string | null;
   created_at: string;
   updated_at: string;
   category_name?: string | null;
   life_area_name?: string | null;
   life_area_slug?: string | null;
+}
+
+export interface TodoCompletionRow {
+  id: string;
+  user_id: string;
+  todo_id: string;
+  occurrence_at: string;
+  completed_at: string;
+  created_at: string;
 }
 
 export interface MemoryRow {

@@ -1,7 +1,8 @@
 import type { AlgoliaSync } from "./algolia.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { pruneExpiredSessions } from "./auth.ts";
-import { id, now, USER_ID } from "./db.ts";
+import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
+import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import { recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "./agent-runner.ts";
 import { composeDigestTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
@@ -11,7 +12,7 @@ import { sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
 import type { StopTypingIndicator } from "./sendblue-service.ts";
-import type { Db, DigestBriefRow, ReminderRow } from "./types.ts";
+import type { Db, DigestBriefRow, ReminderRow, TodoRow } from "./types.ts";
 
 type SearchWriter = Pick<AlgoliaSync, "flushSoon" | "flush">;
 
@@ -79,6 +80,55 @@ function messageHandleOf(value: unknown): string | undefined {
 function inQuietHours(time: string, start: string | null, end: string | null): boolean {
   if (!start || !end || start === end) return false;
   return start < end ? time >= start && time < end : time >= start || time < end;
+}
+
+/**
+ * Moves each repeating todo on to its next occurrence once the local day of the
+ * one it holds is over. Completing the row marks it done for the rest of that
+ * day, which is what the list should show; a miss simply rolls forward at
+ * midnight rather than sitting overdue for ever. The worker is the only writer
+ * that does this, so the row cannot be rolled twice, and it happens whether or
+ * not texting is enabled because it is scheduling, not delivery.
+ *
+ * Each row is rolled on its own: a rule the engine cannot walk is logged and
+ * skipped rather than allowed to stop every row behind it, on every tick.
+ */
+export function rollRecurringTodos(db: Db, search: SearchWriter, timezone: string, at = new Date()): number {
+  const today = localParts(at, timezone).date;
+  const rows = db.prepare(`
+    SELECT * FROM todos
+    WHERE user_id=? AND recurrence_json IS NOT NULL AND status<>'cancelled'
+  `).all(USER_ID) as TodoRow[];
+  let rolled = 0;
+  for (const row of rows) {
+    try {
+      const rule = parseRecurrence(row.recurrence_json);
+      if (!rule) continue;
+      if (row.due_at && localParts(new Date(row.due_at), timezone).date >= today) continue;
+      // The next occurrence is the first on today's date or later, decided on
+      // dates so a worker that was down overnight still lands on today's slot
+      // (late, and so texted at once) instead of skipping to tomorrow's. A row
+      // that has lost its date altogether is put back on the series from now.
+      const next = materializeRecurrence(rule, timezone, row.due_at ? { date: today } : at);
+      // A block is about the task, not the day, so it survives the roll; a
+      // finished or started occurrence does not.
+      const status = row.status === "blocked" ? "blocked" : "pending";
+      db.transaction(() => {
+        db.prepare(`
+          UPDATE todos SET due_at=?,reminder_at=?,extra_reminders_json='[]',status=?,
+            started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND user_id=?
+        `).run(next.due_at, next.reminder_at, status, now(), row.id, USER_ID);
+        const updated = getTodo(db, row.id);
+        if (updated) syncTodoReminders(db, updated);
+        queueIndexJob(db, "todo", row.id);
+      })();
+      rolled += 1;
+    } catch (error) {
+      console.error(`Rolling repeating todo ${row.id} failed`, error);
+    }
+  }
+  if (rolled) search.flushSoon();
+  return rolled;
 }
 
 /*
@@ -411,6 +461,11 @@ export async function runWorkerOnce(
   }
   const preferences = getNotificationPreferences(db);
   const local = localParts(new Date(), preferences.timezone);
+  try {
+    rollRecurringTodos(db, search, preferences.timezone);
+  } catch (error) {
+    console.error("Rolling recurring todos failed", error);
+  }
   if (
     preferences.smsEnabled
     && preferences.recipientPhone

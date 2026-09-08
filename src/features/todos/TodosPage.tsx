@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type DragEndEvent, DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
-import { Archive, BellRing, CalendarDays, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus } from "lucide-react";
+import { Archive, BellRing, CalendarDays, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus, Repeat } from "lucide-react";
 import { api } from "../../api";
 import type {
   Todo, TodoStatus,
@@ -14,6 +14,7 @@ import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck } from "./SubtaskCheck";
 import { TodoModal } from "./TodoModal";
 import { CalendarView } from "./calendar/CalendarView";
+import { describeRecurrence } from "../../lib/recurrence";
 import { friendlyDate, friendlyDueDate, useTimezone } from "../../lib/timezone";
 import { boardStatuses, statusMeta } from "../../lib/todo-meta";
 import { todoAttachment } from "../../lib/agent-attachments";
@@ -185,10 +186,14 @@ function TodoTable({ todos, children, onOpen, onStatus }: {
               </div></td>
               <td className="cell-optional"><LifeAreaPill name={todo.life_area_name} slug={todo.life_area_slug}/></td>
               <td className="cell-quiet">
-                {todo.due_at ? friendlyDueDate(todo.due_at, timezone) : "—"}
-                {todo.reminder_at && <span className="cell-reminder" title="Reminder">
-                  <BellRing size={11}/>{friendlyDate(todo.reminder_at, timezone)}{todo.extra_reminders?.length ? ` +${todo.extra_reminders.length}` : ""}
-                </span>}
+                {todo.recurrence
+                  ? <RepeatSummary todo={todo} timezone={timezone}/>
+                  : <>
+                    {todo.due_at ? friendlyDueDate(todo.due_at, timezone) : "—"}
+                    {todo.reminder_at && <span className="cell-reminder" title="Reminder">
+                      <BellRing size={11}/>{friendlyDate(todo.reminder_at, timezone)}{todo.extra_reminders?.length ? ` +${todo.extra_reminders.length}` : ""}
+                    </span>}
+                  </>}
               </td>
               <td className="cell-quiet cell-optional">{todo.priority ? `! ${todo.priority}` : "—"}</td>
               <td className="cell-quiet cell-optional">{subtasks.length
@@ -213,6 +218,22 @@ function TodoTable({ todos, children, onOpen, onStatus }: {
       </tbody>
     </table>
   </div>;
+}
+
+/**
+ * A repeating task is described by its rule rather than by one date. Once it
+ * is done the row says so for the rest of the day, and names when it comes
+ * round again, so a checked-off task does not read as finished for good.
+ */
+function RepeatSummary({ todo, timezone }: { todo: Todo; timezone: string }) {
+  if (!todo.recurrence) return null;
+  const finished = todo.status === "done";
+  return <span className="repeat-cell" title={describeRecurrence(todo.recurrence)}>
+    <Repeat size={11} aria-hidden="true"/>
+    {finished
+      ? <>Done for today{todo.due_at ? ` · ${describeRecurrence(todo.recurrence)}` : ""}</>
+      : <>{todo.due_at ? `Next ${friendlyDate(todo.due_at, timezone)}` : describeRecurrence(todo.recurrence)}</>}
+  </span>;
 }
 
 /**
@@ -315,7 +336,9 @@ function DraggableTodo({ todo, subtasks, onOpen, onStatus }: { todo: Todo; subta
   const done = subtasks.filter(t => t.status === "done").length;
   return <article ref={setNodeRef} className={`todo-card ${isDragging ? "dragging" : ""}`} style={{ transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined }} onDoubleClick={() => onOpen(todo)}>
     <div style={{ display: "flex", gap: 8 }}><button aria-label="Drag task" className="button icon ghost" {...listeners} {...attributes}><GripVertical size={13}/></button><div style={{ flex: 1 }}><h4><button type="button" className="card-open" onClick={() => onOpen(todo)}>{todo.title}</button></h4><div className="todo-meta">
-      <LifeAreaPill name={todo.life_area_name} slug={todo.life_area_slug}/>{todo.category_name && <span>{todo.category_name}</span>} {todo.due_at && <span>Due {friendlyDueDate(todo.due_at, timezone)}</span>} {todo.reminder_at && <span title="Reminder"><BellRing size={11}/>{friendlyDate(todo.reminder_at, timezone)}{todo.extra_reminders?.length ? ` +${todo.extra_reminders.length}` : ""}</span>} {todo.priority && <span>! {todo.priority}</span>}
+      <LifeAreaPill name={todo.life_area_name} slug={todo.life_area_slug}/>{todo.category_name && <span>{todo.category_name}</span>} {todo.recurrence
+        ? <span title="Repeats"><Repeat size={11}/>{todo.status === "done" ? "Done for today" : describeRecurrence(todo.recurrence)}</span>
+        : <>{todo.due_at && <span>Due {friendlyDueDate(todo.due_at, timezone)}</span>} {todo.reminder_at && <span title="Reminder"><BellRing size={11}/>{friendlyDate(todo.reminder_at, timezone)}{todo.extra_reminders?.length ? ` +${todo.extra_reminders.length}` : ""}</span>}</>} {todo.priority && <span>! {todo.priority}</span>}
     </div></div><AttachButton item={todoAttachment(todo, subtasks)} size={13}/></div>
     {subtasks.length > 0 && <div className="card-subtasks" onDoubleClick={event => event.stopPropagation()}>
       <div className="progress"><span style={{ width: `${(done / subtasks.length) * 100}%` }}/></div>

@@ -1,5 +1,6 @@
 import { id, now, USER_ID } from "./db.ts";
-import type { Db, MemoryRow, MessageRow, ReminderRow, TodoRow, TodoStatus } from "./types.ts";
+import { parseRecurrence, recurrenceJson } from "./recurrence.ts";
+import type { Db, MemoryRow, MessageRow, ReminderRow, TodoCompletionRow, TodoRow, TodoStatus } from "./types.ts";
 
 export function todoJson(row: TodoRow): Record<string, unknown> {
   return {
@@ -20,9 +21,20 @@ export function todoJson(row: TodoRow): Record<string, unknown> {
     status: row.status,
     started_at: row.started_at,
     completed_at: row.completed_at,
+    recurrence: recurrenceOf(row),
+    last_completed_at: row.last_completed_at ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+function recurrenceOf(row: TodoRow): Record<string, unknown> | null {
+  const rule = parseRecurrence(row.recurrence_json);
+  return rule ? recurrenceJson(rule) : null;
+}
+
+export function completionJson(row: TodoCompletionRow): Record<string, unknown> {
+  return { id: row.id, occurrence_at: row.occurrence_at, completed_at: row.completed_at };
 }
 
 export function memoryJson(row: MemoryRow): Record<string, unknown> {

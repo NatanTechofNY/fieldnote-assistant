@@ -6,6 +6,7 @@ import {
 } from "./db.ts";
 import { getNotificationPreferences, getSearchPreferences } from "./integrations.ts";
 import { localParts } from "./local-time.ts";
+import { parseRecurrence, recurrenceJson } from "./recurrence.ts";
 import type { ChannelMessageRow, Db, EntityType, IndexJobRow } from "./types.ts";
 
 type SearchRecord = Record<string, unknown> & { objectID: string };
@@ -187,6 +188,7 @@ export class AlgoliaSync {
     if (entityType === "todo") {
       const row = getTodo(this.db, entityId);
       if (!row) return null;
+      const recurrenceRule = parseRecurrence(row.recurrence_json);
       return {
         objectID: row.id,
         userId: row.user_id,
@@ -206,6 +208,9 @@ export class AlgoliaSync {
         extra_reminders: JSON.parse(row.extra_reminders_json),
         started_at: row.started_at,
         completed_at: row.completed_at,
+        recurrence: recurrenceRule ? recurrenceJson(recurrenceRule) : null,
+        is_recurring: Boolean(recurrenceRule),
+        last_completed_at: row.last_completed_at ?? null,
         created_at: row.created_at,
         updated_at: row.updated_at,
       };

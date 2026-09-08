@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import { useDraggable } from "@dnd-kit/core";
-import { BellRing, CornerDownRight, GitBranch } from "lucide-react";
+import { BellRing, CornerDownRight, GitBranch, Repeat } from "lucide-react";
 import type { Todo } from "../../../types";
 import type { ScheduleChip as Chip } from "../../../lib/calendar";
 import { friendlyDate, friendlyDueDate } from "../../../lib/timezone";
@@ -33,7 +33,17 @@ export function ScheduleChip({
   onMoveStart: (chip: Chip) => void;
   onChainHover: (chainId: string | null) => void;
 }) {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: chip.key, data: { chip } });
+  // A repeating task's time comes from its rule, so dragging it to another slot
+  // would be undone by the server; the rule is edited from the task itself.
+  const repeats = Boolean(chip.todo.recurrence);
+  const draggable = useDraggable({ id: chip.key, data: { chip }, disabled: repeats });
+  const { setNodeRef, isDragging } = draggable;
+  // A disabled draggable still hands back aria-disabled and "press space to
+  // pick up" instructions. The chip stays a live button that opens the task, so
+  // a repeating one is not announced as disabled, or as something to pick up.
+  const attributes = repeats ? {} : draggable.attributes;
+  const listeners = repeats ? {} : draggable.listeners;
+  const dragDescribedBy = repeats ? undefined : draggable.attributes["aria-describedby"];
   const isSubtask = Boolean(parentTitle);
   const when = chip.at
     ? (chip.kind === "due" ? friendlyDueDate(chip.at, timezone) : friendlyDate(chip.at, timezone))
@@ -42,13 +52,14 @@ export function ScheduleChip({
     kindWord[chip.kind],
     parentTitle ? `${chip.todo.title}, step of ${parentTitle}` : chip.todo.title,
     when,
+    ...(repeats ? ["repeats"] : []),
   ].join(" · ");
   return <button
     type="button"
     ref={node => { setNodeRef(node); register(chip.key, node); }}
     {...attributes}
     {...listeners}
-    aria-describedby={[attributes["aria-describedby"], describedBy].filter(Boolean).join(" ") || undefined}
+    aria-describedby={[dragDescribedBy, describedBy].filter(Boolean).join(" ") || undefined}
     aria-label={label}
     className={`cal-chip kind-${chip.kind}${compact ? " compact" : ""}${dense ? " dense" : ""}`
       + `${isSubtask ? " subtask" : ""}${isDragging ? " dragging" : ""}${linked ? " linked" : ""}`
@@ -60,7 +71,7 @@ export function ScheduleChip({
     onFocus={() => onChainHover(chainId)}
     onBlur={() => onChainHover(null)}
     onKeyDown={event => {
-      if (event.key !== "m" && event.key !== "M") return;
+      if (repeats || (event.key !== "m" && event.key !== "M")) return;
       event.preventDefault();
       onMoveStart(chip);
     }}
@@ -69,6 +80,7 @@ export function ScheduleChip({
         told apart by their ends, and a clipped one has to be opened to read. */}
     <span className="cal-chip-title">
       {isSubtask && <CornerDownRight className="cal-chip-sub" size={12} aria-hidden="true" />}
+      {repeats && <Repeat className="cal-chip-sub" size={11} aria-hidden="true" />}
       {chip.todo.title}
     </span>
     {/* Folded down to the title alone: the accessible label still carries the

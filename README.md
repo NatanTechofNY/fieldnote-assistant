@@ -19,7 +19,7 @@ Because Algolia holds only derived projections, reindexing is always safe to rep
 
 ## Features
 
-- Todos, memories, conversations, and reminders backed by local SQLite
+- Todos, memories, conversations, and reminders backed by local SQLite, including repeating todos ("every day at 8", "Mon/Wed/Fri at 9pm") that text you ahead of time and roll forward on their own
 - Full-text search over your own notes via Algolia, with an optional NeuralSearch toggle for hybrid semantic retrieval (off by default, since it is a paid add-on)
 - An agent that calls typed action tools, executed server-side
 - Two-way messaging through Twilio SMS or Sendblue iMessage, switchable from Settings, with quiet hours, daily digests, and retry with backoff

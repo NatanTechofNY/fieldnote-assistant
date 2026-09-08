@@ -1,6 +1,64 @@
-import { USER_ID, getTodo, now, queueIndexJob, syncTodoReminders } from "./db.ts";
+import {
+  USER_ID, getTodo, getTodoCompletions, id, instant, now, queueIndexJob, syncTodoReminders, userTimezone,
+} from "./db.ts";
 import { getTaskPreferences } from "./integrations.ts";
-import type { Db, TodoRow } from "./types.ts";
+import { completionStreak, parseRecurrence } from "./recurrence.ts";
+import type { Db, TodoCompletionRow, TodoRow } from "./types.ts";
+
+/**
+ * Keeps the completion log in step with a repeating todo's status. Marking the
+ * row done records the occurrence it currently holds, so the worker can roll
+ * the row forward later without losing the fact that today's dose was given;
+ * moving it back to open takes that record away again, which is what undoing
+ * a tap on the checkbox should mean. Cancelling is neither: it ends the series,
+ * and a dose that was given before it ended still was. Called after every
+ * status write, and a no-op for a todo that does not repeat.
+ */
+export function syncOccurrenceCompletion(db: Db, todo: TodoRow): void {
+  if (!todo.recurrence_json || !todo.due_at) return;
+  const occurrence = instant(todo.due_at);
+  if (todo.status === "done") {
+    // Stored in one spelling so the MAX below orders by time, not by text.
+    const completedAt = instant(todo.completed_at ?? now());
+    db.prepare(`
+      INSERT OR IGNORE INTO todo_completions(id,user_id,todo_id,occurrence_at,completed_at,created_at)
+      VALUES(?,?,?,?,?,?)
+    `).run(id("completion"), USER_ID, todo.id, occurrence, completedAt, now());
+  } else if (todo.status !== "cancelled") {
+    db.prepare("DELETE FROM todo_completions WHERE user_id=? AND todo_id=? AND occurrence_at=?")
+      .run(USER_ID, todo.id, occurrence);
+  }
+  db.prepare(`
+    UPDATE todos SET last_completed_at=(
+      SELECT MAX(completed_at) FROM todo_completions WHERE user_id=todos.user_id AND todo_id=todos.id
+    ) WHERE id=? AND user_id=?
+  `).run(todo.id, USER_ID);
+}
+
+/** The completion history a detail view or the agent reads for a repeating todo. */
+export function completionStats(
+  db: Db,
+  todo: TodoRow,
+): { completion_count: number; streak: number; completions: TodoCompletionRow[] } | null {
+  const rule = parseRecurrence(todo.recurrence_json);
+  if (!rule) return null;
+  const completions = getTodoCompletions(db, todo.id);
+  const count = db.prepare(
+    "SELECT count(*) total FROM todo_completions WHERE user_id=? AND todo_id=?",
+  ).get(USER_ID, todo.id) as { total: number };
+  const all = db.prepare(
+    "SELECT occurrence_at FROM todo_completions WHERE user_id=? AND todo_id=?",
+  ).all(USER_ID, todo.id) as Array<{ occurrence_at: string }>;
+  let streak = 0;
+  try {
+    streak = completionStreak(rule, all.map(row => row.occurrence_at), todo.due_at, userTimezone(db));
+  } catch (error) {
+    // The count and the log are still worth showing when the walk back cannot
+    // be made; a detail view should not fail over a number in its corner.
+    console.error(`Streak for repeating todo ${todo.id} could not be computed`, error);
+  }
+  return { completion_count: count.total, streak, completions };
+}
 
 /**
  * Closing the last step of a task often means the task itself is finished, but
@@ -27,6 +85,7 @@ export function completeParentIfSettled(db: Db, child: TodoRow): TodoRow | null 
   `).run(timestamp, timestamp, parent.id, USER_ID);
   const closed = getTodo(db, parent.id) as TodoRow;
   syncTodoReminders(db, closed);
+  syncOccurrenceCompletion(db, closed);
   queueIndexJob(db, "todo", parent.id);
   return closed;
 }
@@ -36,6 +95,13 @@ export function completeParentIfSettled(db: Db, child: TodoRow): TodoRow | null 
  * while these are open leaves them alive but unreachable, so both the REST layer
  * and the UI ask about them first.
  */
+/** Whether any step, open or closed, is filed under the todo. */
+export function hasSubtasks(db: Db, todoId: string): boolean {
+  return Boolean(db.prepare(
+    "SELECT 1 found FROM todos WHERE user_id=? AND parent_id=? LIMIT 1",
+  ).get(USER_ID, todoId));
+}
+
 export function openSubtasks(db: Db, todoId: string): TodoRow[] {
   return db.prepare(`
     SELECT * FROM todos

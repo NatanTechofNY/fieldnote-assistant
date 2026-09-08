@@ -146,6 +146,10 @@
             "type": ["string", "null"],
             "description": "Inclusive RFC 3339 upper bound or null"
           },
+          "recurring": {
+            "type": ["boolean", "null"],
+            "description": "True for repeating todos only, false for one-off todos only, null for both"
+          },
           "limit": {
             "type": "integer",
             "minimum": 1,
@@ -153,7 +157,7 @@
             "description": "Maximum records"
           }
         },
-        "required": ["status", "priority", "category_id", "life_area_id", "parent_id", "due_from", "due_to", "limit"],
+        "required": ["status", "priority", "category_id", "life_area_id", "parent_id", "due_from", "due_to", "recurring", "limit"],
         "additionalProperties": false
       }
     }
@@ -212,6 +216,45 @@
             },
             "description": "Additional RFC 3339 reminder times or null"
           },
+          "recurrence": {
+            "type": ["object", "null"],
+            "properties": {
+              "freq": {
+                "type": "string",
+                "enum": ["daily", "weekly"],
+                "description": "daily repeats every N days; weekly repeats on the listed weekdays"
+              },
+              "interval": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "maximum": 365,
+                "description": "Every N days or weeks; null means 1"
+              },
+              "weekdays": {
+                "type": ["array", "null"],
+                "maxItems": 7,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 6
+                },
+                "description": "Weekdays for weekly, Sunday is 0; null for daily"
+              },
+              "time": {
+                "type": "string",
+                "description": "Local 24-hour HH:MM in the user's timezone"
+              },
+              "lead_minutes": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": 1440,
+                "description": "Minutes before the time to text a reminder; 0 texts at the time; null sends no text. Must not reach back past the midnight before the occurrence: at most the minutes into the day of `time` for a daily rule, plus 1440 for each further day between occurrences"
+              }
+            },
+            "required": ["freq", "interval", "weekdays", "time", "lead_minutes"],
+            "additionalProperties": false,
+            "description": "Repeat rule for a recurring todo, or null. When set, due_at, reminder_at, and extra_reminders are derived from it and must be null, and subtasks must be null or empty."
+          },
           "subtasks": {
             "type": ["array", "null"],
             "maxItems": 50,
@@ -245,7 +288,7 @@
             "description": "Executable child todos or null"
           }
         },
-        "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "subtasks"],
+        "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence", "subtasks"],
         "additionalProperties": false
       }
     }
@@ -311,17 +354,56 @@
                 },
                 "description": "Full replacement additional reminders or null for unchanged"
               },
+              "recurrence": {
+                "type": ["object", "null"],
+                "properties": {
+                  "freq": {
+                    "type": "string",
+                    "enum": ["daily", "weekly"],
+                    "description": "daily repeats every N days; weekly repeats on the listed weekdays"
+                  },
+                  "interval": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": 365,
+                    "description": "Every N days or weeks; null means 1"
+                  },
+                  "weekdays": {
+                    "type": ["array", "null"],
+                    "maxItems": 7,
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 6
+                    },
+                    "description": "Weekdays for weekly, Sunday is 0; null for daily"
+                  },
+                  "time": {
+                    "type": "string",
+                    "description": "Local 24-hour HH:MM in the user's timezone"
+                  },
+                  "lead_minutes": {
+                    "type": ["integer", "null"],
+                    "minimum": 0,
+                    "maximum": 1440,
+                    "description": "Minutes before the time to text a reminder; 0 texts at the time; null sends no text. Must not reach back past the midnight before the occurrence: at most the minutes into the day of `time` for a daily rule, plus 1440 for each further day between occurrences"
+                  }
+                },
+                "required": ["freq", "interval", "weekdays", "time", "lead_minutes"],
+                "additionalProperties": false,
+                "description": "Full replacement repeat rule, or null for unchanged. The same rule sent back changes nothing; a changed rule opens the next occurrence. Use clear_fields to stop repeating. While a rule is set, due_at and reminder_at in the patch are refused."
+              },
               "clear_fields": {
                 "type": "array",
                 "uniqueItems": true,
                 "items": {
                   "type": "string",
-                  "enum": ["notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders"]
+                  "enum": ["notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence"]
                 },
                 "description": "Nullable fields to set to null; empty when none"
               }
             },
-            "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "clear_fields"],
+            "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence", "clear_fields"],
             "additionalProperties": false
           },
           "override_user_classification": {
@@ -653,7 +735,7 @@
     "type": "function",
     "function": {
       "name": "create_reminder",
-      "description": "Creates a primary or additional reminder for an exact todo. Resolve the date-time before calling.",
+      "description": "Creates a primary or additional reminder for an exact todo. Resolve the date-time first. A repeating todo's primary reminder is its rule's lead_minutes and is refused here.",
       "strict": true,
       "parameters": {
         "type": "object",
@@ -711,7 +793,7 @@
     "type": "function",
     "function": {
       "name": "update_reminder",
-      "description": "Moves one exact reminder to a new time after resolving which reminder the user means.",
+      "description": "Moves one exact reminder to a new time after resolving which one the user means. A repeating todo's due and primary reminders come from its rule and are refused; use update_todo.",
       "strict": true,
       "parameters": {
         "type": "object",
@@ -735,7 +817,7 @@
     "type": "function",
     "function": {
       "name": "delete_reminder",
-      "description": "Deletes one exact reminder after explicit user confirmation.",
+      "description": "Deletes one exact reminder after explicit user confirmation. A repeating todo's due and primary reminders come from its rule and are refused; null its lead_minutes with update_todo.",
       "strict": true,
       "parameters": {
         "type": "object",

@@ -2029,6 +2029,58 @@ it("edits the reminder and its extras from the task editor", async () => {
   });
 });
 
+it("describes a repeating task by its rule and sends the rule instead of dates", async () => {
+  renderAt("/todos");
+  await userEvent.click(await screen.findByRole("button", { name: "Review RFC for Alex" }));
+  const dialog = await screen.findByRole("dialog");
+
+  // Choosing a repeat swaps the dated fields for the rule's own controls.
+  await userEvent.selectOptions(within(dialog).getByLabelText("Repeats"), "weekly");
+  expect(within(dialog).queryByLabelText(/Remind me/)).not.toBeInTheDocument();
+  expect(within(dialog).queryByLabelText(/^Due/)).not.toBeInTheDocument();
+  expect(within(dialog).getByLabelText("Parent")).toBeDisabled();
+
+  // Weekly without a day is not a schedule, so it is refused before the write.
+  const writes = todoWrites.length;
+  fireEvent.change(within(dialog).getByLabelText(/^At/), { target: { value: "21:00" } });
+  await userEvent.click(within(dialog).getByRole("button", { name: /Save/ }));
+  expect(await within(dialog).findByText("Pick at least one day of the week.")).toBeInTheDocument();
+  expect(todoWrites.length).toBe(writes);
+
+  await userEvent.click(within(dialog).getByRole("button", { name: "Monday" }));
+  await userEvent.click(within(dialog).getByRole("button", { name: "Friday" }));
+  // Mon and Fri are three days apart, so a text the day before still lands after
+  // the previous occurrence is over; a daily task at 9pm cannot offer that.
+  expect(within(dialog).getByRole("option", { name: "1 day before" })).toBeInTheDocument();
+  await userEvent.selectOptions(within(dialog).getByLabelText("Text me"), "15");
+  expect(within(dialog).getByText("Mon, Fri at 9:00 PM · 15 minutes before")).toBeInTheDocument();
+
+  await userEvent.click(within(dialog).getByRole("button", { name: /Save/ }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  const write = todoWrites.at(-1) as { method: string; body: Record<string, unknown> };
+  expect(write.method).toBe("PATCH");
+  expect(write.body.recurrence).toEqual({ freq: "weekly", interval: 1, weekdays: [1, 5], time: "21:00", lead_minutes: 15 });
+  // The rule owns the schedule, so no stale wall-clock values ride along.
+  expect(write.body).not.toHaveProperty("due_at");
+  expect(write.body).not.toHaveProperty("reminder_at");
+});
+
+it("keeps a daily task's text within the day and offers no checklist for it", async () => {
+  renderAt("/todos");
+  await userEvent.click(await screen.findByRole("button", { name: "Review RFC for Alex" }));
+  const dialog = await screen.findByRole("dialog");
+
+  await userEvent.selectOptions(within(dialog).getByLabelText("Repeats"), "daily");
+  fireEvent.change(within(dialog).getByLabelText(/^At/), { target: { value: "09:00" } });
+  // Every day at 9 rolls on at midnight, so a text a day ahead would already be
+  // late when it was scheduled; an hour ahead is fine.
+  expect(within(dialog).queryByRole("option", { name: "1 day before" })).not.toBeInTheDocument();
+  expect(within(dialog).getByRole("option", { name: "1 hour before" })).toBeInTheDocument();
+  // Its steps would stay ticked while the task came round again, so it has none.
+  expect(within(dialog).getByText(/A repeating task carries no checklist/)).toBeInTheDocument();
+  expect(within(dialog).queryByLabelText("New subtask")).not.toBeInTheDocument();
+});
+
 it("opens a task from the keyboard and traps focus in the editor", async () => {
   renderAt("/todos");
   const title = await screen.findByRole("button", { name: "Prepare the DevCon demo" });

@@ -4,9 +4,10 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type {
   CatalogProduct, ChannelMessageRow, Db, EntityType, IndexOperation, MemoryRow, ReminderRow,
-  StoreProductRow, TodoRow,
+  StoreProductRow, TodoCompletionRow, TodoRow,
 } from "./types.ts";
 import { USER_ID } from "./types.ts";
+import { anchorRecurrence, materializeRecurrence, type RecurrenceRule } from "./recurrence.ts";
 
 export { USER_ID };
 export const now = (): string => new Date().toISOString();
@@ -51,11 +52,25 @@ CREATE TABLE IF NOT EXISTS todos (
     CHECK(status IN ('pending','in_progress','blocked','done','cancelled')),
   started_at TEXT,
   completed_at TEXT,
+  recurrence_json TEXT,
+  last_completed_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS todos_user_status ON todos(user_id, status);
 CREATE INDEX IF NOT EXISTS todos_due ON todos(user_id, due_at);
+CREATE TABLE IF NOT EXISTS todo_completions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+  occurrence_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(todo_id, occurrence_at)
+);
+-- The UNIQUE constraint above already indexes (todo_id, occurrence_at); the
+-- separate index an earlier build created only duplicated it.
+DROP INDEX IF EXISTS todo_completions_todo;
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -700,6 +715,19 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
     }
     db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(13,?)").run(now());
   }
+  // Recurring todos: the rule lives on the row, and each completed occurrence
+  // is logged separately so a streak can be read back later.
+  const recurrenceApplied = db.prepare(
+    "SELECT 1 found FROM schema_migrations WHERE version=14",
+  ).get();
+  if (!recurrenceApplied) {
+    db.transaction(() => {
+      const todoColumns = columns(db, "todos");
+      if (!todoColumns.has("recurrence_json")) db.exec("ALTER TABLE todos ADD COLUMN recurrence_json TEXT");
+      if (!todoColumns.has("last_completed_at")) db.exec("ALTER TABLE todos ADD COLUMN last_completed_at TEXT");
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(14,?)").run(now());
+    })();
+  }
   // NeuralSearch is opt-in: it is a paid add-on, so an application without the
   // entitlement gets plain keyword search rather than a failed setup.
   const searchPreferenceTimestamp = now();
@@ -911,6 +939,25 @@ export function getChannelMessage(db: Db, messageId: string): ChannelMessageRow 
   `).get(messageId, USER_ID) as ChannelMessageRow | undefined;
 }
 
+/**
+ * The IANA zone a recurring todo's wall-clock time is read in. Lives here
+ * rather than in `integrations.ts` so the seed and the row writers can reach
+ * it without a cycle; `UTC` is the same default the preferences row carries.
+ */
+export function userTimezone(db: Db): string {
+  const row = db.prepare(
+    "SELECT timezone FROM notification_preferences WHERE user_id=?",
+  ).get(USER_ID) as { timezone: string } | undefined;
+  return row?.timezone || "UTC";
+}
+
+export function getTodoCompletions(db: Db, todoId: string, limit = 30): TodoCompletionRow[] {
+  return db.prepare(`
+    SELECT * FROM todo_completions WHERE user_id=? AND todo_id=?
+    ORDER BY occurrence_at DESC LIMIT ?
+  `).all(USER_ID, todoId, limit) as TodoCompletionRow[];
+}
+
 export function getReminders(db: Db, todoId?: string): ReminderRow[] {
   const where = todoId ? "AND r.todo_id=?" : "";
   const args = todoId ? [USER_ID, todoId] : [USER_ID];
@@ -977,7 +1024,7 @@ export function resetDatabase(db: Db): void {
   db.transaction(() => {
     for (const table of [
       "scheduled_dispatches", "external_events", "channel_messages", "channel_threads",
-      "reflection_selections", "reflection_exclusions", "index_jobs", "reminders", "messages", "conversations", "memories", "todos", "categories",
+      "reflection_selections", "reflection_exclusions", "index_jobs", "reminders", "todo_completions", "messages", "conversations", "memories", "todos", "categories",
     ]) {
       db.prepare(`DELETE FROM ${table}`).run();
     }
@@ -1006,6 +1053,23 @@ export function seedDatabase(db: Db): { seeded: true } {
       "Try the overview, chat, and search experiences.", "cat_work", due, reminder, timestamp, timestamp);
     const todo = getTodo(db, "todo_welcome");
     if (todo) syncTodoReminders(db, todo);
+    // A repeating task shows the schedule rolling forward without anyone
+    // having to set one up first.
+    const timezone = userTimezone(db);
+    const medicineRule: RecurrenceRule = anchorRecurrence(
+      { freq: "daily", interval: 1, weekdays: [], time: "08:00", lead_minutes: 10 }, null, timezone,
+    );
+    const medicine = materializeRecurrence(medicineRule, timezone);
+    db.prepare(`
+      INSERT INTO todos(
+        id,user_id,title,notes,category_id,life_area_id,life_area_source,due_at,reminder_at,extra_reminders_json,
+        priority,status,recurrence_json,created_at,updated_at
+      ) VALUES(?,?,?,?,?,?,'user',?,?,'[]','normal','pending',?,?,?)
+    `).run("todo_cat_medicine", USER_ID, "Give the cat her medicine",
+      "One pill with breakfast, every morning.", "cat_personal", "area_personal",
+      medicine.due_at, medicine.reminder_at, JSON.stringify(medicineRule), timestamp, timestamp);
+    const recurring = getTodo(db, "todo_cat_medicine");
+    if (recurring) syncTodoReminders(db, recurring);
     db.prepare(`
       INSERT INTO memories(
         id,user_id,title,content,kind,mood_label,mood_score,category_id,tags_json,created_at,updated_at
@@ -1022,6 +1086,7 @@ export function seedDatabase(db: Db): { seeded: true } {
       ) VALUES(?,?,'assistant',?,NULL,NULL,NULL,?)
     `).run("message_welcome", "conversation_current", "How can I help today?", timestamp);
     queueIndexJob(db, "todo", "todo_welcome");
+    queueIndexJob(db, "todo", "todo_cat_medicine");
     queueIndexJob(db, "memory", "memory_welcome");
     // The reset emptied the outbox, and the catalog rows it left in place still
     // need to reach the index.

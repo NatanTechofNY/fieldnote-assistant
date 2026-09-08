@@ -1,16 +1,25 @@
 import { type FormEvent, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, LoaderCircle, Plus, Square, Trash2, TriangleAlert, X } from "lucide-react";
+import { Check, LoaderCircle, Plus, Repeat, Square, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "../../api";
 import type {
-  LifeArea, Todo, TodoStatus,
+  LifeArea, Recurrence, Todo, TodoStatus,
 } from "../../types";
 import { Field, MarkdownEditor, Modal } from "../../components/ui";
-import { friendlyDueDate, toZonedDateTimeLocal, useTimezone, zonedDateTimeLocalToIso } from "../../lib/timezone";
+import { LEAD_OPTIONS, WEEKDAYS, describeLead, describeRecurrence, maxLeadMinutes } from "../../lib/recurrence";
+import { friendlyDate, friendlyDueDate, toZonedDateTimeLocal, useTimezone, zonedDateTimeLocalToIso } from "../../lib/timezone";
 import { boardStatuses, statusMeta } from "../../lib/todo-meta";
 import { invalidateContent } from "../../lib/invalidate";
 import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck } from "./SubtaskCheck";
+
+type RepeatMode = "never" | "daily" | "interval" | "weekly";
+
+function repeatModeOf(rule: Recurrence | null | undefined): RepeatMode {
+  if (!rule) return "never";
+  if (rule.freq === "weekly") return "weekly";
+  return rule.interval > 1 ? "interval" : "daily";
+}
 
 export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, onClose }: { todo?: Todo; defaultDueAt?: string; subtasks: Todo[]; allTodos: Todo[]; lifeAreas: LifeArea[]; onClose: () => void }) {
   const timezone = useTimezone();
@@ -25,6 +34,31 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
     () => (todo?.extra_reminders || []).map(value => toZonedDateTimeLocal(value, timezone)),
   );
   const [scheduleError, setScheduleError] = useState("");
+  // A repeating task is described by a rule rather than a date. The rule's
+  // pieces are held apart here so switching "Repeats" between shapes keeps
+  // whatever the user has already typed.
+  const [repeat, setRepeat] = useState<RepeatMode>(repeatModeOf(todo?.recurrence));
+  const [intervalDays, setIntervalDays] = useState(String(todo?.recurrence?.interval || 2));
+  const [weekdays, setWeekdays] = useState<number[]>(todo?.recurrence?.weekdays || []);
+  const [repeatTime, setRepeatTime] = useState(todo?.recurrence?.time || "08:00");
+  const [lead, setLead] = useState<string>(
+    todo?.recurrence ? String(todo.recurrence.lead_minutes ?? "") : "",
+  );
+  const repeating = repeat !== "never";
+  const recurrence: Recurrence | null = repeating ? {
+    freq: repeat === "weekly" ? "weekly" : "daily",
+    interval: repeat === "interval" ? Math.max(1, Number(intervalDays) || 1) : 1,
+    weekdays: repeat === "weekly" ? [...weekdays].sort((a, b) => a - b) : [],
+    time: repeatTime,
+    lead_minutes: lead === "" ? null : Number(lead),
+  } : null;
+  // A text has to land after the previous occurrence is over, so "1 day before"
+  // is offered for a weekly task and not for a daily one. The value already
+  // chosen stays listed even once the time makes it too far ahead, so the
+  // select never shows something the form did not hold; submit says why.
+  const maxLead = recurrence ? maxLeadMinutes(recurrence) : Infinity;
+  const leadOptions = LEAD_OPTIONS.filter(option =>
+    option.value === null || option.value <= maxLead || String(option.value) === lead);
   const [status, setStatus] = useState<TodoStatus>(todo?.status || "pending");
   const [priority, setPriority] = useState<NonNullable<Todo["priority"]>>(todo?.priority || "normal");
   const [parentId, setParentId] = useState(todo?.parent_id || "");
@@ -35,18 +69,27 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
   const [drafts, setDrafts] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   // Existing children win over a parent the record also has: the agent can
-  // write a middle node, and its steps still have to be reachable.
+  // write a middle node, and its steps still have to be reachable. A repeating
+  // task has no checklist either: its steps would stay ticked while the task
+  // itself came round again.
   const nested = Boolean(parentId) && subtasks.length === 0;
+  const checklistless = nested || (repeating && subtasks.length === 0);
   const save = useMutation({
     mutationFn: () => {
-      const input = {
-        title,
-        notes,
+      // The server derives a repeating task's times from its rule, so the
+      // date fields are left out rather than sent as stale wall-clock values.
+      const schedule = repeating ? {} : {
         due_at: dueAt ? zonedDateTimeLocalToIso(dueAt, timezone) : null,
         reminder_at: reminderAt ? zonedDateTimeLocalToIso(reminderAt, timezone) : null,
         extra_reminders: [...new Set(
           extraReminders.filter(Boolean).map(value => zonedDateTimeLocalToIso(value, timezone)),
         )],
+      };
+      const input = {
+        title,
+        notes,
+        ...schedule,
+        recurrence,
         status,
         priority,
         parent_id: parentId || null,
@@ -55,7 +98,7 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
       };
       return todo
         ? api.updateTodo(todo.id, input)
-        : api.createTodo({ ...input, subtasks: nested ? [] : drafts.map(subtask => ({ title: subtask })) });
+        : api.createTodo({ ...input, subtasks: checklistless ? [] : drafts.map(subtask => ({ title: subtask })) });
     },
     onSuccess: () => { invalidateContent(queryClient); onClose(); },
   });
@@ -104,10 +147,25 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
   });
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const added = [reminderAt, ...extraReminders].filter(value => value && !scheduled.has(value));
-    if (added.some(value => new Date(zonedDateTimeLocalToIso(value, timezone)) <= new Date())) {
-      setScheduleError("A new reminder has to be in the future.");
-      return;
+    if (repeating) {
+      if (!/^\d{2}:\d{2}$/.test(repeatTime)) {
+        setScheduleError("Pick a time for the repeat.");
+        return;
+      }
+      if (repeat === "weekly" && weekdays.length === 0) {
+        setScheduleError("Pick at least one day of the week.");
+        return;
+      }
+      if (recurrence?.lead_minutes != null && recurrence.lead_minutes > maxLead) {
+        setScheduleError("That text would go out before the previous occurrence is over. Pick a shorter lead.");
+        return;
+      }
+    } else {
+      const added = [reminderAt, ...extraReminders].filter(value => value && !scheduled.has(value));
+      if (added.some(value => new Date(zonedDateTimeLocalToIso(value, timezone)) <= new Date())) {
+        setScheduleError("A new reminder has to be in the future.");
+        return;
+      }
     }
     setScheduleError("");
     if (status === "done" && todo?.status !== "done" && stillOpen.length) setConfirming(true);
@@ -145,6 +203,7 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
           {/* Steps under a step would be stored happily and drawn nowhere, so a
               task filed under another one is not offered a list. */}
           {nested && <p className="subtask-empty">Filed under another task, so this one carries no checklist of its own.</p>}
+          {checklistless && !nested && <p className="subtask-empty">A repeating task carries no checklist: each time it comes round is one step.</p>}
           {subtasks.length > 0 && <ul className="subtask-list">{subtasks.map(subtask => <li key={subtask.id} className={subtask.status === "done" ? "done" : ""}>
             <SubtaskCheck
               todo={subtask}
@@ -155,13 +214,13 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
             {subtask.due_at && <span className="subtask-due">{friendlyDueDate(subtask.due_at, timezone)}</span>}
             <button type="button" className="button icon ghost" aria-label={`Delete subtask ${subtask.title}`} onClick={() => removeSubtask.mutate(subtask.id)}><Trash2 size={13}/></button>
           </li>)}</ul>}
-          {!nested && drafts.length > 0 && <ul className="subtask-list">{drafts.map((subtask, index) => <li key={index}>
+          {!checklistless && drafts.length > 0 && <ul className="subtask-list">{drafts.map((subtask, index) => <li key={index}>
             <span className="subtask-check" aria-hidden="true"><Square size={14}/></span>
             <span className="subtask-name">{subtask}</span>
             <button type="button" className="button icon ghost" aria-label={`Remove subtask ${subtask}`} onClick={() => setDrafts(drafts.filter((_, at) => at !== index))}><X size={13}/></button>
           </li>)}</ul>}
-          {!nested && !subtasks.length && !drafts.length && <p className="subtask-empty">No subtasks yet. Each one you add gets its own line under this task on the board.</p>}
-          {!nested && <div className="subtask-add">
+          {!checklistless && !subtasks.length && !drafts.length && <p className="subtask-empty">No subtasks yet. Each one you add gets its own line under this task on the board.</p>}
+          {!checklistless && <div className="subtask-add">
             <input
               className="input"
               aria-label="New subtask"
@@ -180,27 +239,74 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
       <aside className="task-form-side">
         <section className="task-panel">
           <span className="eyebrow">Schedule</span>
-          <Field label={`Due · ${timezone}`}><input type="datetime-local" className="input" value={dueAt} onChange={e => setDueAt(e.target.value)} /></Field>
-          <Field label={`Remind me · ${timezone}`} hint="A due date on its own never notifies you. Reminders do.">
-            <input type="datetime-local" className="input" value={reminderAt} onChange={e => setReminderAt(e.target.value)} />
-          </Field>
-          {extraReminders.length > 0 && <span className="eyebrow">Extra reminders</span>}
-          {extraReminders.map((value, index) => <div className="reminder-extra" key={index}>
-            <input
-              type="datetime-local"
-              className="input"
-              aria-label={`Extra reminder ${index + 1}`}
-              value={value}
-              onChange={e => setExtraReminders(extraReminders.map((entry, at) => at === index ? e.target.value : entry))}
-            />
-            <button
-              type="button"
-              className="button icon ghost"
-              aria-label={`Remove extra reminder ${index + 1}`}
-              onClick={() => setExtraReminders(extraReminders.filter((_, at) => at !== index))}
-            ><X size={13}/></button>
-          </div>)}
-          <button type="button" className="button ghost" onClick={() => setExtraReminders([...extraReminders, ""])}><Plus size={13}/>Add a reminder</button>
+          {/* A step under another task cannot repeat, and neither can a task
+              with steps of its own, so the choice is offered to a top-level
+              task without a checklist (or one that already repeats). */}
+          {!parentId && (subtasks.length === 0 || repeating) && <Field label="Repeats">
+            <select className="select" value={repeat} onChange={e => setRepeat(e.target.value as RepeatMode)}>
+              <option value="never">Never</option>
+              <option value="daily">Every day</option>
+              <option value="interval">Every few days</option>
+              <option value="weekly">Weekly, on chosen days</option>
+            </select>
+          </Field>}
+          {repeating ? <>
+            {repeat === "interval" && <Field label="Every how many days">
+              <input type="number" className="input" min={2} max={365} value={intervalDays} onChange={e => setIntervalDays(e.target.value)} />
+            </Field>}
+            {repeat === "weekly" && <div className="weekday-picker" role="group" aria-label="Days of the week">
+              {WEEKDAYS.map(day => {
+                const on = weekdays.includes(day.value);
+                return <button
+                  key={day.value}
+                  type="button"
+                  className={`weekday-toggle${on ? " on" : ""}`}
+                  aria-pressed={on}
+                  aria-label={day.long}
+                  onClick={() => setWeekdays(on ? weekdays.filter(value => value !== day.value) : [...weekdays, day.value])}
+                >{day.short}</button>;
+              })}
+            </div>}
+            <Field label={`At · ${timezone}`}>
+              <input type="time" className="input" value={repeatTime} onChange={e => setRepeatTime(e.target.value)} required />
+            </Field>
+            <Field label="Text me" hint="One text per occurrence, ahead of the time you chose.">
+              <select className="select" aria-label="Text me" value={lead} onChange={e => setLead(e.target.value)}>
+                {leadOptions.map(option => <option key={String(option.value)} value={option.value === null ? "" : String(option.value)}>{option.label}</option>)}
+              </select>
+            </Field>
+            {recurrence && <p className="repeat-summary">
+              <Repeat size={12} aria-hidden="true"/>
+              {describeRecurrence(recurrence)}
+              {recurrence.lead_minutes !== null ? ` · ${describeLead(recurrence.lead_minutes)}` : ""}
+            </p>}
+            {todo?.recurrence && todo.due_at && <p className="subtask-empty">
+              Next up {friendlyDate(todo.due_at, timezone)}
+              {todo.last_completed_at ? ` · last done ${friendlyDate(todo.last_completed_at, timezone)}` : ""}
+            </p>}
+          </> : <>
+            <Field label={`Due · ${timezone}`}><input type="datetime-local" className="input" value={dueAt} onChange={e => setDueAt(e.target.value)} /></Field>
+            <Field label={`Remind me · ${timezone}`} hint="A due date on its own never notifies you. Reminders do.">
+              <input type="datetime-local" className="input" value={reminderAt} onChange={e => setReminderAt(e.target.value)} />
+            </Field>
+            {extraReminders.length > 0 && <span className="eyebrow">Extra reminders</span>}
+            {extraReminders.map((value, index) => <div className="reminder-extra" key={index}>
+              <input
+                type="datetime-local"
+                className="input"
+                aria-label={`Extra reminder ${index + 1}`}
+                value={value}
+                onChange={e => setExtraReminders(extraReminders.map((entry, at) => at === index ? e.target.value : entry))}
+              />
+              <button
+                type="button"
+                className="button icon ghost"
+                aria-label={`Remove extra reminder ${index + 1}`}
+                onClick={() => setExtraReminders(extraReminders.filter((_, at) => at !== index))}
+              ><X size={13}/></button>
+            </div>)}
+            <button type="button" className="button ghost" onClick={() => setExtraReminders([...extraReminders, ""])}><Plus size={13}/>Add a reminder</button>
+          </>}
         </section>
         <section className="task-panel">
           <span className="eyebrow">Filing</span>
@@ -211,8 +317,8 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
           <Field label="Life area"><select className="select" value={lifeAreaId} onChange={e => setLifeAreaId(e.target.value)}><option value="">Unclassified</option>{lifeAreas.map(area => <option value={area.id} key={area.id}>{area.name}</option>)}</select></Field>
           {/* Only one level of nesting is ever drawn, so a task that already has
               steps of its own cannot be filed under another one and disappear. */}
-          <Field label="Parent" hint={subtasks.length ? "A task with its own subtasks stays top level." : undefined}>
-            <select className="select" value={parentId} disabled={subtasks.length > 0} onChange={e => setParentId(e.target.value)}><option value="">Top-level task</option>{allTodos.filter(t => t.id !== todo?.id).map(t => <option value={t.id} key={t.id}>{t.title}</option>)}</select>
+          <Field label="Parent" hint={subtasks.length ? "A task with its own subtasks stays top level." : repeating ? "A repeating task stays top level." : undefined}>
+            <select className="select" value={parentId} disabled={subtasks.length > 0 || repeating} onChange={e => setParentId(e.target.value)}><option value="">Top-level task</option>{allTodos.filter(t => t.id !== todo?.id && !t.recurrence).map(t => <option value={t.id} key={t.id}>{t.title}</option>)}</select>
           </Field>
         </section>
       </aside>
