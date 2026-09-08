@@ -46,10 +46,12 @@ export async function sendTwilioSms(
   db: Db,
   to: string,
   body: string,
-  options: { mediaUrl?: string } = {},
+  options: { mediaUrl?: string; groupId?: string } = {},
 ): Promise<{ sid: string; status: string }> {
   const config = getTwilioSecret(db);
   if (!config) throw new Error("Twilio is not configured");
+  // SMS has no group threads; a message bound for one cannot be delivered here.
+  if (options.groupId) throw new Error("Twilio cannot send to an iMessage group chat");
   const statusCallback = config.webhookBaseUrl
     ? `${config.webhookBaseUrl.replace(/\/$/, "")}/api/webhooks/twilio/status`
     : undefined;

@@ -1,7 +1,8 @@
 import { now } from "../db.ts";
 import { enqueueExternalEvent } from "../event-ingestion.ts";
 import { getNotificationPreferences, getSendblueSecret, getTwilioSecret, recordSendblueNotice, setSmsOptOut } from "../integrations.ts";
-import { normalizeSendblueStatus, SENDBLUE_INBOUND_PATH, SENDBLUE_LINE_ASSIGNED_PATH, SENDBLUE_LINE_BLOCKED_PATH, SENDBLUE_STATUS_PATH, verifySendblueWebhook } from "../sendblue-service.ts";
+import { isInboundSenderAllowed } from "../messaging.ts";
+import { normalizeSendblueStatus, readSendblueInbound, SENDBLUE_INBOUND_PATH, SENDBLUE_LINE_ASSIGNED_PATH, SENDBLUE_LINE_BLOCKED_PATH, SENDBLUE_STATUS_PATH, verifySendblueWebhook } from "../sendblue-service.ts";
 import { validateTwilioSignature } from "../twilio-service.ts";
 import { requestWorkerWake } from "../worker.ts";
 import type { Db } from "../types.ts";
@@ -47,7 +48,8 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
     const body = params.Body?.trim();
     if (!from || !messageSid || !body) return res.status(400).send("Missing SMS fields");
     const preferences = getNotificationPreferences(db);
-    if (preferences.recipientPhone && preferences.recipientPhone !== from) {
+    // SMS has no group chats, so Twilio only ever hears from the recipient.
+    if (!isInboundSenderAllowed(preferences, { from, participants: [] })) {
       return res.status(403).send("Phone number is not allowed");
     }
     if (STOP_WORDS.test(body)) setSmsOptOut(db, true);
@@ -94,17 +96,19 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
     // The `outbound` webhook and the inbound one can share a URL, and an echo of
     // our own message must not be answered as if the user had written it.
     if (payload.is_outbound === true) return res.json({ received: true, ignored: "outbound" });
-    const from = typeof payload.from_number === "string" ? payload.from_number
-      : typeof payload.number === "string" ? payload.number : undefined;
-    const messageHandle = typeof payload.message_handle === "string" ? payload.message_handle : undefined;
-    const body = typeof payload.content === "string" ? payload.content.trim() : "";
+    const inbound = readSendblueInbound(payload);
+    const { from, messageHandle, groupId, participants } = inbound;
+    const body = inbound.body?.trim() ?? "";
     if (!from || !messageHandle || !body) return res.status(400).json({ received: false });
     const preferences = getNotificationPreferences(db);
-    if (preferences.recipientPhone && preferences.recipientPhone !== from) {
+    if (!isInboundSenderAllowed(preferences, { from, groupId, participants })) {
       return res.status(403).json({ received: false });
     }
-    if (STOP_WORDS.test(body)) setSmsOptOut(db, true);
-    else if (START_WORDS.test(body)) setSmsOptOut(db, false);
+    // Opting out is the recipient's call. A trusted contact in a group is heard
+    // by the assistant but cannot switch the owner's texts off or on.
+    const ownerSpeaking = !groupId || from === preferences.recipientPhone;
+    if (ownerSpeaking && STOP_WORDS.test(body)) setSmsOptOut(db, true);
+    else if (ownerSpeaking && START_WORDS.test(body)) setSmsOptOut(db, false);
     else {
       enqueueExternalEvent(db, "sendblue", messageHandle, "sendblue.message.received", payload);
       requestWorkerWake();

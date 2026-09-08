@@ -38,6 +38,66 @@ export type SendblueLine = {
 };
 
 /**
+ * The prefix a group chat's thread address carries in `channel_threads`, so a
+ * group and a phone number can never collide and callers can tell them apart
+ * without another column.
+ */
+export const GROUP_ADDRESS_PREFIX = "group:";
+
+export function groupAddress(groupId: string): string {
+  return `${GROUP_ADDRESS_PREFIX}${groupId}`;
+}
+
+/** The Sendblue group id behind a thread address, or undefined for a 1:1 thread. */
+export function groupIdOfAddress(address: string): string | undefined {
+  return address.startsWith(GROUP_ADDRESS_PREFIX) ? address.slice(GROUP_ADDRESS_PREFIX.length) || undefined : undefined;
+}
+
+/**
+ * What an inbound `receive` webhook says, in the shape the app reasons about.
+ * `group_id` arrives as an empty string on a 1:1 message and `participants`
+ * lists every number in the conversation including the Sendblue line, which is
+ * what lets the webhook check that the recipient is present in a group.
+ */
+export type SendblueInbound = {
+  from?: string;
+  body?: string;
+  messageHandle?: string;
+  replyTo?: string;
+  threadOriginator?: string;
+  groupId?: string;
+  groupName?: string;
+  participants: string[];
+};
+
+export function readSendblueInbound(payload: Record<string, unknown>): SendblueInbound {
+  const groupId = typeof payload.group_id === "string" ? payload.group_id.trim() : "";
+  const groupName = typeof payload.group_display_name === "string" ? payload.group_display_name.trim() : "";
+  return {
+    from: typeof payload.from_number === "string" ? payload.from_number
+      : typeof payload.number === "string" ? payload.number : undefined,
+    body: typeof payload.content === "string" ? payload.content : undefined,
+    messageHandle: typeof payload.message_handle === "string" ? payload.message_handle : undefined,
+    // A text sent as an inline reply names the message it answers, which is
+    // often not the one directly above it. Without these two, "yes, that one"
+    // arrives with nothing to attach it to.
+    replyTo: messageHandleOf(payload.reply_to),
+    threadOriginator: messageHandleOf(payload.thread_originator),
+    ...(groupId ? { groupId } : {}),
+    ...(groupName ? { groupName } : {}),
+    participants: Array.isArray(payload.participants)
+      ? payload.participants.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+      : [],
+  };
+}
+
+function messageHandleOf(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const handle = (value as { message_handle?: unknown }).message_handle;
+  return typeof handle === "string" && handle ? handle : undefined;
+}
+
+/**
  * The headers Sendblue may carry a webhook secret on. It documents that a
  * configured secret is "included in the request headers" without naming the
  * header, so every plausible spelling is accepted and the query token below is
@@ -347,12 +407,17 @@ export function startSendblueTypingIndicator(db: Db, to: string): StopTypingIndi
  * `mediaUrl` must be a public URL Sendblue can fetch itself; it goes out as an
  * iMessage attachment, or over RCS or MMS for a recipient without iMessage.
  * `sendStyle` is a purely cosmetic iMessage effect and is dropped elsewhere.
+ *
+ * `groupId` sends into an existing iMessage group chat through the group
+ * endpoint, which addresses the group rather than a number; `to` is then the
+ * group's thread address and is not sent. The line must already be a member of
+ * the group — on an inbound-initiated plan the owner adds it from their phone.
  */
 export async function sendSendblueSms(
   db: Db,
   to: string,
   body: string,
-  options: { replyTo?: string; mediaUrl?: string; sendStyle?: string } = {},
+  options: { replyTo?: string; mediaUrl?: string; sendStyle?: string; groupId?: string } = {},
 ): Promise<{ sid: string; status: string; replyTo?: string }> {
   const config = getSendblueSecret(db);
   if (!config) throw new Error("Sendblue is not configured");
@@ -361,10 +426,10 @@ export async function sendSendblueSms(
       + `?token=${encodeURIComponent(config.webhookSecret)}`
     : undefined;
   const post = async (replyTo: string | undefined) => {
-    const payload = await sendblueRequest(config, "/api/send-message", {
+    const payload = await sendblueRequest(config, options.groupId ? "/api/send-group-message" : "/api/send-message", {
       method: "POST",
       body: {
-        number: to,
+        ...(options.groupId ? { group_id: options.groupId } : { number: to }),
         from_number: config.fromPhone,
         content: body.slice(0, MAX_BODY_LENGTH),
         ...(statusCallback ? { status_callback: statusCallback } : {}),

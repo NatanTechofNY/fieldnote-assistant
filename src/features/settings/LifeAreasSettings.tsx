@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
+import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../../api";
 import { invalidateTaxonomy } from "../../lib/invalidate";
+import type { LifeArea } from "../../types";
 
 /**
  * A colour input cannot take a `var()`, and the chosen colour is stored as area
@@ -16,12 +17,23 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
   const { data: areas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
   const [name, setName] = useState("");
   const [color, setColor] = useState(defaultAreaColor);
+  const [editing, setEditing] = useState<{ id: string; name: string } | null>(null);
   const create = useMutation({
     mutationFn: () => api.createLifeArea({ name, color }),
     onSuccess: () => {
       setName("");
       void queryClient.invalidateQueries({ queryKey: ["life-areas"] });
       notify("Classification added");
+    },
+    onError: (error: Error) => notify(error.message),
+  });
+  const rename = useMutation({
+    mutationFn: (input: { id: string; name: string }) => api.updateLifeArea(input.id, { name: input.name }),
+    onSuccess: () => {
+      setEditing(null);
+      // The name sits on every todo and memory card of the area, not only here.
+      invalidateTaxonomy(queryClient);
+      notify("Classification renamed");
     },
     onError: (error: Error) => notify(error.message),
   });
@@ -33,12 +45,33 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
     },
     onError: (error: Error) => notify(error.message),
   });
+  const submitRename = () => {
+    if (!editing) return;
+    const trimmed = editing.name.trim();
+    if (!trimmed) return;
+    rename.mutate({ id: editing.id, name: trimmed });
+  };
+  const subtitle = (area: LifeArea) => area.is_builtin ? "Default classification" : area.is_group ? "Group chat" : area.slug;
   return <div>
-    <p className="integration-copy">Life areas classify todos and memories across the app. The Agent discovers custom areas automatically before assigning them.</p>
+    <p className="integration-copy">Life areas classify todos and memories across the app. The Agent discovers custom areas automatically before assigning them, and gives each group chat its own.</p>
     <div className="life-area-settings-list">
       {areas.map(area => <div className="life-area-setting" key={area.id}>
         <i style={{ background: area.color }}/>
-        <div><strong>{area.name}</strong><small>{area.is_builtin ? "Default classification" : area.slug}</small></div>
+        {editing?.id === area.id
+          ? <form className="life-area-rename" onSubmit={event => { event.preventDefault(); submitRename(); }}>
+            <input
+              className="input"
+              value={editing.name}
+              aria-label={`New name for ${area.name}`}
+              autoFocus
+              onChange={event => setEditing({ id: area.id, name: event.target.value })}
+              onKeyDown={event => { if (event.key === "Escape") setEditing(null); }}
+            />
+            <button type="submit" className="button icon ghost" aria-label="Save name" disabled={rename.isPending || !editing.name.trim()}><Check size={13}/></button>
+            <button type="button" className="button icon ghost" aria-label="Cancel rename" onClick={() => setEditing(null)}><X size={13}/></button>
+          </form>
+          : <div><strong>{area.name}</strong><small>{subtitle(area)}</small></div>}
+        {!area.is_builtin && editing?.id !== area.id && <button className="button icon ghost" aria-label={`Rename ${area.name}`} onClick={() => setEditing({ id: area.id, name: area.name })}><Pencil size={13}/></button>}
         {!area.is_builtin && <button className="button icon ghost" aria-label={`Remove ${area.name}`} disabled={remove.isPending} onClick={() => confirm(`Remove ${area.name}? Existing records will become unclassified.`) && remove.mutate(area.id)}><Trash2 size={13}/></button>}
       </div>)}
     </div>
@@ -47,6 +80,6 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
       <input className="input" value={name} onChange={event => setName(event.target.value)} placeholder="New classification name" required/>
       <button className="button primary" disabled={create.isPending || !name.trim()}><Plus size={14}/>Add</button>
     </form>
-    <small className="field-hint">Work, Personal, and Side Project are stable defaults and cannot be deleted. Custom classifications can be removed here.</small>
+    <small className="field-hint">Work, Personal, and Side Project are stable defaults and cannot be deleted. Custom classifications can be renamed or removed here. A group chat's classification is created by the assistant when the group first writes in; rename it here or ask the assistant, and if it is removed while the chat is still active, the next message there creates a fresh one.</small>
   </div>;
 }

@@ -13,7 +13,7 @@ import { PageHead } from "../../components/layout/PageHead";
 import { ErrorState, HighlightedText, Loading, MarkdownContent } from "../../components/ui";
 import { HistoryToolGroup } from "./HistoryToolTrace";
 import { historyTimeline } from "./tool-traces";
-import { threadLabel } from "./thread-label";
+import { isGroupAddress, threadLabel, threadTitle } from "./thread-label";
 import { friendlyDate, historyTimestamp, useTimezone } from "../../lib/timezone";
 import { searchTerms, snippetAround } from "../../lib/highlight";
 import { useDebounced } from "../../lib/use-debounced";
@@ -190,7 +190,8 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
   const messagesRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef(new Map<string, HTMLElement>());
   const selected = conversations.find(item => item.id === selectedId) || conversations[0];
-  const selectedWorkflow = threadLabel(selected.address);
+  const selectedWorkflow = threadLabel(selected.address, selected.displayName);
+  const selectedIsGroup = isGroupAddress(selected.address);
   const { data: messages = [], isLoading } = useQuery({
     queryKey: ["channel-messages", selected.id],
     queryFn: () => api.channelMessages(selected.id),
@@ -256,13 +257,13 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
           {searchGroups.map(([threadId, hits]) => {
             const thread = conversations.find(item => item.id === threadId);
             return <section className="history-result-group" key={threadId}>
-              <header>{thread?.channel === "sms" ? <Phone size={11}/> : <MessageSquareText size={11}/>}<span>{thread?.channel === "sms" ? 'Text Messages (' + redact.phone(thread.address) + ')' : "Web Agent"}</span></header>
+              <header>{thread?.channel === "sms" ? <Phone size={11}/> : <MessageSquareText size={11}/>}<span>{thread ? threadTitle(thread, redact.phone, "Web Agent") : "Web Agent"}</span></header>
               {hits.map(hit => <button
                 key={hit.objectID}
                 className={jump?.messageId === hit.objectID ? "opened" : ""}
                 onClick={() => openSearchHit(hit)}
               >
-                <small>{hit.role} · {friendlyDate(hit.created_at, timezone)}</small>
+                <small>{hit.speaker_name ?? hit.role} · {friendlyDate(hit.created_at, timezone)}</small>
                 <span><HighlightedText text={snippetAround(hit.content, terms)} terms={terms}/></span>
               </button>)}
             </section>;
@@ -273,18 +274,18 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
         </> : <>
           <div className="history-section-title">Conversations <span>{conversations.length}</span></div>
           {conversations.map((thread) => {
-            const workflow = threadLabel(thread.address);
+            const workflow = threadLabel(thread.address, thread.displayName);
             return <button
               key={thread.id}
               className={`history-thread ${thread.id === selected.id ? "active" : ""}`}
               onClick={() => { setSelectedId(thread.id); setJump(null); }}
             >
               <span className="history-channel">
-                {workflow ? <Sparkles size={13}/> : thread.channel === "sms" ? <Phone size={13}/> : <MessageSquareText size={13}/>}
+                {workflow && !isGroupAddress(thread.address) ? <Sparkles size={13}/> : thread.channel === "sms" ? <Phone size={13}/> : <MessageSquareText size={13}/>}
               </span>
               <span className="history-thread-copy">
                 <strong>{workflow?.title ?? (thread.channel === "sms" ? 'Text Messages (Phone Number: ' + redact.phone(thread.address) + ')' : "Web Agent")}</strong>
-                <small>{workflow?.subtitle ?? (thread.lastMessage || "No messages")}</small>
+                <small>{isGroupAddress(thread.address) ? (thread.lastMessage || "No messages") : (workflow?.subtitle ?? (thread.lastMessage || "No messages"))}</small>
               </span>
               <span className="history-count">{thread.messageCount}</span>
             </button>;
@@ -295,7 +296,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
         <header className="history-header">
           <div>
             <div className="eyebrow">{selectedWorkflow?.eyebrow ?? `${selected.channel} conversation`}</div>
-            <strong>{selectedWorkflow?.title ?? (selected.channel === "sms" ? 'Text Messages (' + redact.phone(selected.address) + ')' : "Fieldnote web agent")}</strong>
+            <strong>{threadTitle(selected, redact.phone, "Fieldnote web agent")}</strong>
           </div>
           <span>{selected.messageCount} messages</span>
         </header>
@@ -315,8 +316,13 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
             const isJumpTarget = jump?.messageId === message.id;
             const parent = replyParent(message, byProviderId);
             const reactions = messageReactions(message);
+            // Several people write into a group, so each of their bubbles says who.
+            const speakerName = selectedIsGroup && message.role === "user" && typeof message.metadata.speakerName === "string"
+              ? message.metadata.speakerName
+              : null;
             return <article key={message.id} ref={node => { if (node) messageRefs.current.set(message.id, node); else messageRefs.current.delete(message.id); }} className={`history-message ${message.direction} role-${message.role} ${isJumpTarget ? "search-hit" : ""}`}>
               <div className="history-bubble">
+                {speakerName && <div className="history-speaker">{speakerName}</div>}
                 {parent && <div className="history-reply-quote">
                   <CornerUpLeft size={11}/>
                   <span>{parent.content}</span>

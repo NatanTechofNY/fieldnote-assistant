@@ -29,6 +29,11 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       // turn, which the browser chat does not have. Retrying from here cannot
       // produce one.
       if (/^This turn has no iMessage /.test(message)) return failure(res, 400, message);
+      // The same for a bubble sent mid-turn or a group's name: the browser has
+      // no text conversation and is nobody's group chat.
+      if (/^This is not a text conversation|^This conversation is not a group chat/.test(message)) {
+        return failure(res, 400, message);
+      }
       // An unconfigured integration is the same shape of problem: retrying cannot
       // help, and the agent should say the tool is unavailable instead.
       if (/ is not configured$/i.test(message)) return failure(res, 503, message);

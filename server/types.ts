@@ -62,6 +62,8 @@ export interface TodoRow {
   completed_at: string | null;
   recurrence_json: string | null;
   last_completed_at: string | null;
+  /** The chat thread whose reminders should be answered in place; null means the recipient phone. */
+  reply_thread_id: string | null;
   created_at: string;
   updated_at: string;
   category_name?: string | null;
@@ -105,6 +107,8 @@ export interface LifeAreaRow {
   slug: string;
   name: string;
   color: string;
+  /** The group chat this area belongs to, when it is a group's own area. */
+  thread_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -125,6 +129,8 @@ export interface ReminderRow {
   created_at: string;
   updated_at: string;
   todo_title?: string;
+  /** The thread address the todo was made in, when it was a group chat; joined on claim. */
+  reply_address?: string | null;
 }
 
 export interface IntegrationSettingRow {
@@ -151,6 +157,8 @@ export interface NotificationPreferencesRow {
   quiet_hours_start: string | null;
   quiet_hours_end: string | null;
   opted_out_at: string | null;
+  trusted_contacts_json: string;
+  group_allow_all: 0 | 1;
   created_at: string;
   updated_at: string;
 }
@@ -213,6 +221,9 @@ export interface ChannelMessageRow {
   updated_at: string;
   user_id?: string;
   channel?: "web" | "sms";
+  address?: string;
+  /** The thread's title when it is a group chat: its life area's name, else the name iMessage gave it. */
+  group_name?: string | null;
 }
 
 export interface IndexJobRow {

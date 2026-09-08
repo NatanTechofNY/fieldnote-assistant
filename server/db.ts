@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS life_areas (
   slug TEXT NOT NULL,
   name TEXT NOT NULL,
   color TEXT NOT NULL,
+  thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, slug)
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS todos (
   completed_at TEXT,
   recurrence_json TEXT,
   last_completed_at TEXT,
+  reply_thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -197,6 +199,8 @@ CREATE TABLE IF NOT EXISTS notification_preferences (
   quiet_hours_start TEXT,
   quiet_hours_end TEXT,
   opted_out_at TEXT,
+  trusted_contacts_json TEXT NOT NULL DEFAULT '[]',
+  group_allow_all INTEGER NOT NULL DEFAULT 0 CHECK(group_allow_all IN (0,1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -206,6 +210,7 @@ CREATE TABLE IF NOT EXISTS channel_threads (
   channel TEXT NOT NULL CHECK(channel IN ('web','sms')),
   address TEXT NOT NULL,
   agent_conversation_id TEXT NOT NULL,
+  display_name TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, channel, address)
@@ -426,6 +431,31 @@ function migrateMessaging(db: Db): void {
       ADD COLUMN sms_provider TEXT NOT NULL DEFAULT 'twilio' CHECK(sms_provider IN ('twilio','sendblue'))
     `);
   }
+  // Group chats arrived after the single-recipient allowlist. An existing
+  // database trusts nobody but the recipient until a contact is added.
+  if (!preferenceColumns.has("trusted_contacts_json")) {
+    db.exec("ALTER TABLE notification_preferences ADD COLUMN trusted_contacts_json TEXT NOT NULL DEFAULT '[]'");
+  }
+  if (!preferenceColumns.has("group_allow_all")) {
+    db.exec(`
+      ALTER TABLE notification_preferences
+      ADD COLUMN group_allow_all INTEGER NOT NULL DEFAULT 0 CHECK(group_allow_all IN (0,1))
+    `);
+  }
+  // A todo made in a group chat remembers the thread so its reminders land
+  // there. Older rows have no thread and keep going to the recipient phone.
+  if (!columns(db, "todos").has("reply_thread_id")) {
+    db.exec("ALTER TABLE todos ADD COLUMN reply_thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL");
+  }
+  // A group chat carries the name iMessage gave it, and owns one life area
+  // that everything said in it is filed under. Neither existed for 1:1 threads.
+  if (!columns(db, "channel_threads").has("display_name")) {
+    db.exec("ALTER TABLE channel_threads ADD COLUMN display_name TEXT");
+  }
+  if (!columns(db, "life_areas").has("thread_id")) {
+    db.exec("ALTER TABLE life_areas ADD COLUMN thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL");
+  }
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS life_areas_thread ON life_areas(thread_id) WHERE thread_id IS NOT NULL");
   const timestamp = now();
   db.prepare(`
     INSERT OR IGNORE INTO notification_preferences(
@@ -931,12 +961,88 @@ export function getMemory(db: Db, memoryId: string): MemoryRow | undefined {
   `).get(memoryId, USER_ID) as MemoryRow | undefined;
 }
 
+/**
+ * What a group chat is called, for a query that has `channel_threads t` and
+ * `LEFT JOIN life_areas la ON la.thread_id=t.id` in scope. The group's own life
+ * area is named by the assistant or the owner and wins; the name iMessage
+ * reported is what there is before that.
+ */
+export const GROUP_NAME_SQL = "COALESCE(la.name,t.display_name)";
+
 export function getChannelMessage(db: Db, messageId: string): ChannelMessageRow | undefined {
   return db.prepare(`
-    SELECT m.*,t.user_id,t.channel
+    SELECT m.*,t.user_id,t.channel,t.address,${GROUP_NAME_SQL} group_name
     FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+    LEFT JOIN life_areas la ON la.thread_id=t.id
     WHERE m.id=? AND t.user_id=?
   `).get(messageId, USER_ID) as ChannelMessageRow | undefined;
+}
+
+/** The slug a new life area gets: the name flattened, made unique with a counter. */
+export function lifeAreaSlug(db: Db, name: string): string {
+  const base = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "area";
+  let slug = base;
+  let suffix = 2;
+  while (db.prepare("SELECT 1 found FROM life_areas WHERE user_id=? AND slug=?").get(USER_ID, slug)) {
+    slug = `${base}-${suffix++}`;
+  }
+  return slug;
+}
+
+/**
+ * Colours for group areas, so two groups are told apart at a glance. None of
+ * them is a default area's colour.
+ */
+const GROUP_AREA_COLORS = ["#2f7d6d", "#b0473f", "#5e6ad2", "#8a6d1f", "#3f7fb0", "#a3508e"];
+
+/**
+ * The life area a group chat files everything under, created on the group's
+ * first message. One per thread: the unique index on `thread_id` is what makes
+ * two concurrent first messages agree. `isNew` is the assistant's cue to name it.
+ */
+export function ensureGroupLifeArea(
+  db: Db,
+  threadId: string,
+  seedName: string | null | undefined,
+): { id: string; name: string; isNew: boolean } {
+  const existing = db.prepare("SELECT id,name FROM life_areas WHERE user_id=? AND thread_id=?")
+    .get(USER_ID, threadId) as { id: string; name: string } | undefined;
+  if (existing) return { ...existing, isNew: false };
+  const name = seedName?.trim() || "Group chat";
+  const groupAreas = (db.prepare("SELECT count(*) count FROM life_areas WHERE user_id=? AND thread_id IS NOT NULL")
+    .get(USER_ID) as { count: number }).count;
+  const areaId = id("area");
+  const timestamp = now();
+  db.prepare(`
+    INSERT INTO life_areas(id,user_id,slug,name,color,thread_id,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?)
+  `).run(
+    areaId, USER_ID, lifeAreaSlug(db, name), name,
+    GROUP_AREA_COLORS[groupAreas % GROUP_AREA_COLORS.length], threadId, timestamp, timestamp,
+  );
+  return { id: areaId, name, isNew: true };
+}
+
+/**
+ * Renames a life area everywhere the name is kept. Todo and memory records in
+ * the index carry `life_area_name`, so each one is queued for a rewrite; a group
+ * area's thread takes the same name, since the area is what the group is called.
+ */
+export function renameLifeArea(db: Db, areaId: string, name: string): void {
+  db.transaction(() => {
+    const area = db.prepare("SELECT thread_id FROM life_areas WHERE id=? AND user_id=?")
+      .get(areaId, USER_ID) as { thread_id: string | null } | undefined;
+    if (!area) throw new Error("Life area not found");
+    const timestamp = now();
+    db.prepare("UPDATE life_areas SET name=?,updated_at=? WHERE id=? AND user_id=?").run(name, timestamp, areaId, USER_ID);
+    if (area.thread_id) {
+      db.prepare("UPDATE channel_threads SET display_name=?,updated_at=? WHERE id=?").run(name, timestamp, area.thread_id);
+    }
+    const todos = db.prepare("SELECT id FROM todos WHERE user_id=? AND life_area_id=?").all(USER_ID, areaId) as Array<{ id: string }>;
+    const memories = db.prepare("SELECT id FROM memories WHERE user_id=? AND life_area_id=?").all(USER_ID, areaId) as Array<{ id: string }>;
+    for (const todo of todos) queueIndexJob(db, "todo", todo.id);
+    for (const memory of memories) queueIndexJob(db, "memory", memory.id);
+  })();
 }
 
 /**
@@ -958,12 +1064,19 @@ export function getTodoCompletions(db: Db, todoId: string, limit = 30): TodoComp
   `).all(USER_ID, todoId, limit) as TodoCompletionRow[];
 }
 
-export function getReminders(db: Db, todoId?: string): ReminderRow[] {
-  const where = todoId ? "AND r.todo_id=?" : "";
-  const args = todoId ? [USER_ID, todoId] : [USER_ID];
+export function getReminders(
+  db: Db,
+  todoId?: string,
+  options: { lifeAreaId?: string } = {},
+): ReminderRow[] {
+  const clauses: string[] = [];
+  const args: string[] = [USER_ID];
+  if (todoId) { clauses.push("AND r.todo_id=?"); args.push(todoId); }
+  // A group turn sees only its own area's reminders, the same fence as its todos.
+  if (options.lifeAreaId) { clauses.push("AND t.life_area_id=?"); args.push(options.lifeAreaId); }
   return db.prepare(`
     SELECT r.*,t.title todo_title FROM reminders r
-    JOIN todos t ON t.id=r.todo_id WHERE r.user_id=? ${where}
+    JOIN todos t ON t.id=r.todo_id WHERE r.user_id=? ${clauses.join(" ")}
     ORDER BY r.scheduled_for
   `).all(...args) as ReminderRow[];
 }

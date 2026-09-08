@@ -92,7 +92,17 @@ export type NotificationPreferences = {
   quietHoursStart: string | null;
   quietHoursEnd: string | null;
   optedOutAt: string | null;
+  /**
+   * Numbers allowed to talk to the assistant inside an iMessage group chat that
+   * also contains the recipient. Trust is scoped to the group: a trusted contact
+   * texting the line directly is still turned away.
+   */
+  trustedContacts: TrustedContact[];
+  /** Whether any participant of a group that includes the recipient may talk to the assistant. */
+  groupAllowAll: boolean;
 };
+
+export type TrustedContact = { phone: string; name: string };
 
 function encryptionKey(): Buffer {
   const value = process.env.SETTINGS_ENCRYPTION_KEY;
@@ -377,7 +387,22 @@ export function getNotificationPreferences(db: Db): NotificationPreferences {
     quietHoursStart: row.quiet_hours_start,
     quietHoursEnd: row.quiet_hours_end,
     optedOutAt: row.opted_out_at,
+    trustedContacts: parseTrustedContacts(row.trusted_contacts_json),
+    groupAllowAll: Boolean(row.group_allow_all),
   };
+}
+
+function parseTrustedContacts(json: string): TrustedContact[] {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is TrustedContact =>
+      typeof entry === "object" && entry !== null
+      && typeof (entry as TrustedContact).phone === "string"
+      && typeof (entry as TrustedContact).name === "string");
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -392,9 +417,13 @@ export function getNotificationPreferences(db: Db): NotificationPreferences {
 export type NotificationPreferencesInput =
   Omit<
     NotificationPreferences,
-    "optedOutAt" | "digestIncludeTodos" | "digestIncludeOverdue" | "smsProvider"
+    | "optedOutAt" | "digestIncludeTodos" | "digestIncludeOverdue" | "smsProvider"
+    | "trustedContacts" | "groupAllowAll"
   >
-  & Partial<Pick<NotificationPreferences, "digestIncludeTodos" | "digestIncludeOverdue">>;
+  & Partial<Pick<
+    NotificationPreferences,
+    "digestIncludeTodos" | "digestIncludeOverdue" | "trustedContacts" | "groupAllowAll"
+  >>;
 
 export function saveNotificationPreferences(
   db: Db,
@@ -403,7 +432,7 @@ export function saveNotificationPreferences(
   db.prepare(`
     UPDATE notification_preferences SET sms_enabled=?,recipient_phone=?,timezone=?,
       daily_digest_enabled=?,daily_digest_time=?,digest_include_todos=?,digest_include_overdue=?,
-      quiet_hours_start=?,quiet_hours_end=?,
+      quiet_hours_start=?,quiet_hours_end=?,trusted_contacts_json=?,group_allow_all=?,
       opted_out_at=CASE WHEN ?=1 THEN NULL ELSE opted_out_at END,updated_at=?
     WHERE user_id=?
   `).run(
@@ -416,6 +445,8 @@ export function saveNotificationPreferences(
     Number(preferences.digestIncludeOverdue ?? false),
     preferences.quietHoursStart,
     preferences.quietHoursEnd,
+    JSON.stringify(preferences.trustedContacts ?? []),
+    Number(preferences.groupAllowAll ?? false),
     Number(preferences.smsEnabled),
     now(),
     USER_ID,

@@ -1,17 +1,20 @@
 import { type Tools } from "react-instantsearch";
-import { BookText, Check, Database, LoaderCircle, ShoppingBag, SquareKanban, TriangleAlert } from "lucide-react";
+import {
+  BookText, Check, Database, LoaderCircle, MessageSquareText, ShoppingBag, SquareKanban, TriangleAlert,
+} from "lucide-react";
 
 type ToolLayoutProps = Parameters<NonNullable<Tools[string]["layoutComponent"]>>[0];
 
 /** The Atlassian and shopping tools read outside SQLite, so the card names
  *  which system answered rather than assuming the local database. */
-type ToolSource = "SQLite" | "Jira" | "Confluence" | "Walgreens";
+type ToolSource = "SQLite" | "Jira" | "Confluence" | "Walgreens" | "Messages";
 
 const sourceIcon: Record<ToolSource, typeof Database> = {
   SQLite: Database,
   Jira: SquareKanban,
   Confluence: BookText,
   Walgreens: ShoppingBag,
+  Messages: MessageSquareText,
 };
 
 export const toolActivityMeta: Record<string, { active: string; done: string; source: ToolSource }> = {
@@ -44,6 +47,10 @@ export const toolActivityMeta: Record<string, { active: string; done: string; so
   list_confluence_comments: { active: "Checking Confluence comments", done: "Confluence comments checked", source: "Confluence" },
   search_store_products: { active: "Browsing the Walgreens shelf", done: "Products found", source: "Walgreens" },
   send_product_cards: { active: "Sending product cards", done: "Product cards sent", source: "Walgreens" },
+  // Both refuse on the web channel; a handler here means the refusal reaches
+  // the agent as a tool result it can answer in words, rather than a stall.
+  send_message: { active: "Sending a text", done: "Text sent", source: "Messages" },
+  name_group_chat: { active: "Naming the group chat", done: "Group chat named", source: "SQLite" },
 };
 
 function toolResultDetail(output: unknown): string | null {

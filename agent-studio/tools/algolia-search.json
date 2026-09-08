@@ -190,7 +190,7 @@
     },
     {
       "index": "devcon_assistant_messages",
-      "description": "Redacted user and assistant messages from Web and SMS conversations. Use for semantic recall of what was said earlier when the recent thread context is insufficient. This is conversation transcript, not durable user data: facts live in the memory index and tasks in the todo index.",
+      "description": "Redacted user and assistant messages from Web and SMS conversations, including iMessage group chats, where a user message also carries speaker_name (who wrote it) and group_name (which group). Use for semantic recall of what was said earlier when the recent thread context is insufficient. This is conversation transcript, not durable user data: facts live in the memory index and tasks in the todo index.",
       "searchParameters": {
         "filters": "userId:\"devcon-demo\"",
         "hitsPerPage": 10,
@@ -200,7 +200,9 @@
           "channel",
           "role",
           "content",
-          "created_at"
+          "created_at",
+          "speaker_name",
+          "group_name"
         ],
         "attributesToHighlight": [],
         "facets": ["channel", "role"],
@@ -226,9 +228,9 @@
         },
         "attributesToRetrieve": {
           "exposed": false,
-          "default": ["objectID", "threadId", "channel", "role", "content", "created_at"],
+          "default": ["objectID", "threadId", "channel", "role", "content", "created_at", "speaker_name", "group_name"],
           "constraint": {
-            "values": ["objectID", "threadId", "channel", "role", "content", "created_at"]
+            "values": ["objectID", "threadId", "channel", "role", "content", "created_at", "speaker_name", "group_name"]
           }
         },
         "facets": {

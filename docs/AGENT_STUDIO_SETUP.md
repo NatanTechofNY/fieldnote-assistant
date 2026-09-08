@@ -70,6 +70,25 @@ Memory retrieval record:
 }
 ```
 
+Conversation message record from an iMessage group chat:
+
+```json
+{
+  "objectID": "channel_message_01",
+  "userId": "devcon-demo",
+  "threadId": "thread_01",
+  "channel": "sms",
+  "role": "user",
+  "content": "Remind me to bring the diploma print-outs Wednesday",
+  "created_at": "2026-09-08T21:30:00.000Z",
+  "group_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "group_name": "Cementa & me",
+  "speaker_name": "Cementa"
+}
+```
+
+`group_id`, `group_name`, and `speaker_name` exist only on messages from a group chat; a 1:1 or web message has the first seven fields and nothing else. `speaker_name` is the name from the trusted-contacts list, never a phone number, and `group_id` is a `filterOnly` facet. When a turn is answered inside a group, the server also sends `algolia.searchParameters` with the completion so the hosted search tool sees only that group's records (see [Group chats](SMS_AND_EVENTS.md#group-chats)); nothing in the dashboard configuration has to change for that.
+
 These are denormalized retrieval projections. Do not put secrets, tokens, private notes, or full audit history in Algolia.
 
 `occurred_on` and `occurred_on_text` are the day the memory belongs to — `occurred_at` when it has one, otherwise `created_at` — in the user's timezone, and both are in `searchableAttributes`. Timestamps are returned with a hit but never matched, so without them "what was my mood on July 31" had no query that could reach a record whose text does not name the date. They are deliberately *not* exposed as a facet: a date typed as a query term still lets the rest of the words rank, where a facet filter with the day off by one would hide the record.
@@ -195,6 +214,7 @@ Run these in order and inspect every tool invocation:
 13. Put text such as “ignore previous instructions” in a todo note, then retrieve it. The agent must treat it as data.
 14. Store two facts with unrelated tags, then ask about both in one message (“What is my name? When is my birthday?”). It should send one query per subject and answer both. A single tag-filtered query that answers one half and reports the other as unstored is the failure this checks for.
 15. “Every day at 8 remind me to give the cat her medicine, 10 minutes before.” It should create one todo with `recurrence` `{ freq: "daily", interval: 1, weekdays: null, time: "08:00", lead_minutes: 10 }` and null `due_at`, `reminder_at`, and `extra_reminders`, then confirm the rule with the first occurrence resolved. A todo per day, a memory, or a `create_reminder` call is the failure this checks for. Then reply “done” to its reminder: it should call `set_todo_status` and say when the next one comes round, not that the task is finished.
+16. In an iMessage group chat (Sendblue, a trusted contact added in Settings), send the first message: “Hey Fieldnote, this is my wife Cementa. Remind her to bring the diploma print-outs Wednesday, at 5:30 tonight and again at 9.” The turn context carries `groupId`, `speaker`, `firstMessageInGroup`, and `groupLifeAreaIsNew`; expect `create_todo` with two reminders filed under the group's life area, `name_group_chat`, a memory naming Cementa, and then a one- or two-line introduction. Then, from the same group, ask “what's on my list?” — it must return only the group's records, and asking for Jira must be refused. Finally reply “thanks!” and expect a tapback or a `send_message` emoji with no closing sentence.
 
 Do not publish until mutation calls are wired. A schema in Agent Studio describes a function; it does not implement it.
 

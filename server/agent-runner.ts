@@ -1,9 +1,9 @@
-import type { AlgoliaSync } from "./algolia.ts";
-import { id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
+import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./algolia.ts";
+import { ensureGroupLifeArea, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
-import { executeAgentTool, type ToolTurnContext } from "./tool-executor.ts";
+import { executeAgentTool, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
 import type { Db } from "./types.ts";
 
@@ -42,7 +42,7 @@ type AgentMessage = {
   role: "user" | "assistant";
   parts: AgentPart[];
   metadata?: {
-    turnContext?: Record<string, string>;
+    turnContext?: Record<string, string | boolean>;
   };
 };
 
@@ -111,16 +111,19 @@ const WRITE_TOOLS = new Set([
   "create_reminder", "update_reminder", "delete_reminder",
   // A tapback changes nothing in SQLite but is just as irreversible from the
   // user's side, and a retried turn that cannot see the first one sends a
-  // second.
-  "react_to_message",
+  // second. The same goes for a bubble sent mid-turn.
+  "react_to_message", "send_message",
+  // Naming the group twice is harmless, but a retry should know it was done.
+  "name_group_chat",
 ]);
 
 /**
  * Tools that act on the conversation itself rather than look something up or
- * change a record. None of them is "working on it": a tapback and a threaded
- * reply are the answer's own gestures, and the product cards are messages.
+ * change a record. None of them is "working on it": a tapback, a threaded
+ * reply, and an early bubble are the answer's own gestures, and the product
+ * cards are messages.
  */
-const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_product_cards"]);
+const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_product_cards", "send_message"]);
 
 /**
  * The tapback that sits on the user's message while the turn is looking things
@@ -221,16 +224,35 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
   }>;
   return rows.map(row => {
     const quote = row.role === "user" ? quotedParent(db, threadId, row.metadata_json) : null;
+    const speaker = row.role === "user" ? speakerLabel(row.metadata_json) : null;
     return {
       id: row.id.startsWith("alg_msg_") ? row.id : `alg_msg_${row.id.replaceAll("-", "_")}`,
       role: row.role,
       parts: row.role === "assistant"
         ? assistantParts(row.content, row.metadata_json)
-        // The quote is assembled here rather than stored, so the row and its
-        // Algolia projection keep the text the user actually sent.
-        : [{ type: "text", text: quote ? `[replying to "${quote}"] ${row.content}` : row.content }],
+        // The quote and the speaker are assembled here rather than stored, so
+        // the row and its Algolia projection keep the text the user actually sent.
+        : [{
+          type: "text",
+          text: `${speaker ? `[${speaker}] ` : ""}${quote ? `[replying to "${quote}"] ` : ""}${row.content}`,
+        }],
     };
   });
+}
+
+/**
+ * Who wrote a message in a group thread. A 1:1 thread has one voice and needs
+ * no label; a shared one has several, and without the label every request in
+ * the window reads as the owner's.
+ */
+function speakerLabel(metadataJson: string): string | null {
+  try {
+    const metadata = JSON.parse(metadataJson) as { speaker?: string; speakerName?: string };
+    if (!metadata.speaker) return null;
+    return metadata.speakerName ? `${metadata.speakerName} (${metadata.speaker})` : metadata.speaker;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -390,10 +412,33 @@ function saveToolTrace(db: Db, threadId: string, part: AgentPart): void {
   );
 }
 
+/**
+ * The search filters a group turn sends with its completion.
+ *
+ * The hosted `personal_data_search` tool runs inside Agent Studio with a fixed
+ * `userId` filter, and the server never sees its queries or its hits, so nothing
+ * in the tool executor could stop a question asked in a group from pulling the
+ * owner's other todos back. Agent Studio accepts per-request overrides keyed by
+ * index name, and a query-time `filters` outranks the one in the tool
+ * configuration; it replaces rather than merges, so the user clause is repeated.
+ * Todos and memories are fenced to the group's life area, messages to its thread.
+ */
+function groupSearchParameters(scope: GroupScope): Record<string, { filters: string }> {
+  const indices = configuredIndexNames();
+  const user = `userId:"${escapeFilterValue(USER_ID)}"`;
+  const area = `${user} AND life_area_id:"${escapeFilterValue(scope.lifeAreaId)}"`;
+  return {
+    [indices.todo]: { filters: area },
+    [indices.memory]: { filters: area },
+    [indices.message]: { filters: `${user} AND threadId:"${escapeFilterValue(scope.threadId)}"` },
+  };
+}
+
 async function completion(
   conversationId: string,
   messages: AgentMessage[],
   fetcher: typeof fetch,
+  scope?: GroupScope,
 ): Promise<AgentMessage> {
   const { appId, apiKey, agentId } = agentConfig();
   const controller = new AbortController();
@@ -409,7 +454,11 @@ async function completion(
           "x-algolia-application-id": appId,
           "x-algolia-api-key": apiKey,
         },
-        body: JSON.stringify({ id: conversationId, messages }),
+        body: JSON.stringify({
+          id: conversationId,
+          messages,
+          ...(scope ? { algolia: { searchParameters: groupSearchParameters(scope) } } : {}),
+        }),
         signal: controller.signal,
       },
     );
@@ -436,6 +485,40 @@ async function completion(
   return await response.json() as AgentMessage;
 }
 
+/**
+ * What a group turn runs inside: the group's own life area, created on its
+ * first message, and the fence the tools and the search filters apply. The name
+ * iMessage gave the chat seeds the thread title only while there is none; once
+ * the assistant or the owner has named the group, an iMessage rename does not
+ * overwrite it.
+ */
+function groupTurnSetup(
+  db: Db,
+  threadId: string,
+  groupName: string | undefined,
+): { area: ReturnType<typeof ensureGroupLifeArea>; scope: GroupScope } {
+  if (groupName) {
+    db.prepare("UPDATE channel_threads SET display_name=? WHERE id=? AND display_name IS NULL").run(groupName, threadId);
+  }
+  // The thread's title, not the provider's name: an area recreated after the
+  // owner deleted it starts from what the group was last called here.
+  const thread = db.prepare("SELECT display_name FROM channel_threads WHERE id=?").get(threadId) as { display_name: string | null };
+  const area = ensureGroupLifeArea(db, threadId, thread.display_name ?? groupName);
+  return { area, scope: { lifeAreaId: area.id, threadId } };
+}
+
+/**
+ * What the provider said about the message that started a turn. `groupId` is
+ * set when the text arrived in an iMessage group chat, which changes where the
+ * answer and any reminders the turn creates are sent.
+ */
+export type InboundContext = {
+  provider: SmsProvider;
+  replyTo?: string;
+  threadOriginator?: string;
+  groupId?: string;
+};
+
 export async function runChannelAgent(
   db: Db,
   search: SearchWriter,
@@ -458,7 +541,7 @@ export async function runChannelAgent(
      * app-composed turn has none, which is what stops the iMessage tools from
      * reacting to a message the user never sent.
      */
-    inbound?: { provider: SmsProvider; replyTo?: string; threadOriginator?: string };
+    inbound?: InboundContext;
     /** The sender a tool that texts mid-turn uses; the worker passes its own so a test can capture both. */
     sendSms?: SmsSender;
   } = {},
@@ -476,11 +559,17 @@ export async function runChannelAgent(
     ...internalMark,
     ...threadMark,
   });
+  // A group turn names the room and the speaker so the agent knows it is in a
+  // shared chat and whose request it is answering.
+  const speaker = options.userMessageMetadata as { speaker?: string; speakerName?: string; groupName?: string } | undefined;
+  const group = options.inbound?.groupId ? groupTurnSetup(db, thread.id, speaker?.groupName) : undefined;
   const context: ToolTurnContext = {
     channel,
     address,
     threadId: thread.id,
     provider: options.inbound?.provider,
+    groupId: options.inbound?.groupId,
+    ...(group ? { scope: group.scope } : {}),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
     sendSms: options.sendSms,
   };
@@ -495,6 +584,20 @@ export async function runChannelAgent(
         channel,
         timezone: preferences.timezone,
         currentDateTime: new Date().toISOString(),
+        ...(options.inbound?.groupId && group
+          ? {
+            groupId: options.inbound.groupId,
+            groupName: group.area.name,
+            groupLifeAreaId: group.area.id,
+            groupLifeAreaName: group.area.name,
+            ...(group.area.isNew ? { groupLifeAreaIsNew: true } : {}),
+            // The window holding only this message means nobody has spoken here
+            // before, which is when the assistant introduces itself.
+            ...(messages.filter(message => message.role === "user").length === 1 ? { firstMessageInGroup: true } : {}),
+            ...(speaker?.speaker ? { speaker: speaker.speaker } : {}),
+            ...(speaker?.speakerName ? { speakerName: speaker.speakerName } : {}),
+          }
+          : {}),
       },
     };
   }
@@ -530,7 +633,7 @@ export async function runChannelAgent(
 
   try {
     for (let iteration = 0; iteration < 8; iteration += 1) {
-      const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch);
+      const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch, context.scope);
       response.id ||= `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
       for (const part of response.parts.filter(part =>
         typeof part.type === "string"
@@ -558,10 +661,11 @@ export async function runChannelAgent(
          * "ok", the way it is between people. The reaction is already filed on
          * the message it landed on and as a tool row, so no assistant bubble is
          * written: an empty one would read as a turn that said nothing, and a
-         * filler sentence would undo the gesture. Without a reaction, silence is
-         * a model that forgot to answer, and the fallback says so.
+         * filler sentence would undo the gesture. The same holds when the turn
+         * already said its piece through send_message. Without either, silence
+         * is a model that forgot to answer, and the fallback says so.
          */
-        if (!text && context.reacted) {
+        if (!text && (context.reacted || context.sentText)) {
           search.flushSoon();
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle };
         }
@@ -647,7 +751,7 @@ export async function runSmsAgent(
     fetcher?: typeof fetch;
     internal?: boolean;
     userMessageMetadata?: Record<string, unknown>;
-    inbound?: { provider: SmsProvider; replyTo?: string; threadOriginator?: string };
+    inbound?: InboundContext;
     sendSms?: SmsSender;
   } = {},
 ): Promise<{ text: string; threadId: string; replyTo?: string }> {

@@ -48,11 +48,15 @@ The fixed local identity is `USER_ID` (`process.env.DEMO_USER_ID || "devcon-demo
 | `list_confluence_comments` | read | — |
 | `react_to_message` | **write** (iMessage) | — |
 | `reply_in_thread` | turn state | — |
+| `send_message` | **write** (SMS) | — |
+| `name_group_chat` | **write** | `PATCH /api/life-areas/:id` |
 | `search_store_products` | read (catalog) | — |
 | `send_product_cards` | **write** (SMS media) | — |
 | `personal_data_search` | read | hosted by Algolia |
 
 `delete_todo`, `delete_memory`, and `delete_reminder` all require `confirmed === true` and throw otherwise.
+
+**Group scope.** When the turn came from an iMessage group chat, `ToolTurnContext.scope` names the group's life area and thread, and every tool above honours it: the by-id reads treat a todo or memory from another area as not found, the lists and `get_agenda` return only the area's rows, `list_life_areas` returns only that area, `get_conversation_context` opens only the group's own thread, `create_*` and `update_*` file under the area whatever `life_area_id` was passed, and `get_reflection_evidence`, `get_review_evidence`, and the eight Atlassian tools are refused. The REST routes have no scope; the owner sees everything from the app. See [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#group-chats).
 
 There is no drift in either direction: every tool in the JSON has a `toolInput` schema, an executor branch, and a UI activity label, and there are no handlers without a tool. `list_memories` is a removed legacy tool that the sync still names so it can be deleted from the published agent config.
 
@@ -69,6 +73,8 @@ Index names come from `ALGOLIA_TODO_INDEX` / `ALGOLIA_MEMORY_INDEX` / `ALGOLIA_M
 Statuses are exactly `pending`, `in_progress`, `blocked`, `done`, `cancelled`. Priority is `low`, `normal`, `high`, `urgent`, or null.
 
 `create_todo.subtasks` exists on both the REST route and the agent tool, which create parent and children in one transaction and set each child's `parent_id`. Children inherit the parent's category and life area, and carry their own title, notes, due date, and priority.
+
+One thing the tool records that the route cannot: when `create_todo` runs during an iMessage group-chat turn, it stores the turn's thread in `todos.reply_thread_id` so the todo's reminders are texted back to that group, and files the todo (and any subtasks) under the group's own life area regardless of the `life_area_id` passed. Both are taken from the turn context, not from the tool input, so there is nothing for a caller to set; `POST /api/todos` always leaves `reply_thread_id` null and the reminder goes to the recipient phone. See [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#group-chats).
 
 Two limits differ between the tool schema and the server, and the tighter one wins in practice: the tool JSON caps `list_todos.limit` at 100 (server allows 200) and title length at 200 characters (server allows 300, content 50,000).
 
@@ -156,6 +162,11 @@ Two tools act on the conversation rather than on the user's records, and so are 
 - `reply_in_thread()` sends nothing. It records on the turn context that the answer should be delivered as an inline reply, and [`server/worker.ts`](../server/worker.ts) passes that handle to `sendSms()`, which adds `reply_to` to the send. Sendblue refuses an inline reply outright rather than downgrading it, so `sendSendblueSms()` retries once without `reply_to`: an unthreaded answer beats none.
 
 The runner also places a 🔍 tapback of its own while the turn's working tools run, and lifts it before the reply or before `react_to_message` lands; see [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#reactions-and-threads). It is not a tool and the model is told not to send 🔍 itself.
+
+Two more tools use the same turn context, on any SMS conversation rather than iMessage only:
+
+- `send_message({ text })` texts one bubble now, ahead of the turn's reply, through the turn's `sendSms` (into the group when the turn came from one), files it on the thread as an `assistant` row with `metadata_json.kind = "message"`, and sets `sentText` on the context, so a turn that returns no text afterwards is delivered as its bubbles alone. On the web channel it refuses with `This is not a text conversation; …`. It is in `WRITE_TOOLS`, so a retried turn does not send it twice, and in `GESTURE_TOOLS`, so it does not raise the 🔍.
+- `name_group_chat({ name })` renames the group's own life area through `renameLifeArea()` in [`server/db.ts`](../server/db.ts) — the same code path as `PATCH /api/life-areas/:id` — which retitles the thread and queues a rewrite of every indexed record carrying the area's name. It refuses outside a group turn.
 
 Inbound texts carry `reply_to` and `thread_originator` when the user replied inside a thread. The worker reads both onto the turn, they are stored in the inbound row's `metadata_json`, and `threadHistory()` prefixes that turn with a quote of the parent so `"that one"` attaches to the message the user picked rather than the one above it. The stored content and its Algolia projection keep the text the user actually sent.
 

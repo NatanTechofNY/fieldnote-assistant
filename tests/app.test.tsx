@@ -38,9 +38,11 @@ const health = {
 };
 
 const lifeAreas = [
-  { id: "area_work", slug: "work", name: "Work", color: "#2c5f8a", is_builtin: 1 },
-  { id: "area_personal", slug: "personal", name: "Personal", color: "#b27a22", is_builtin: 1 },
+  { id: "area_work", slug: "work", name: "Work", color: "#2c5f8a", is_builtin: 1, is_group: 0 },
+  { id: "area_personal", slug: "personal", name: "Personal", color: "#b27a22", is_builtin: 1, is_group: 0 },
+  { id: "area_group", slug: "home", name: "Home", color: "#2f7d6d", is_builtin: 0, is_group: 1 },
 ];
+const lifeAreaPatches: Array<{ id: string; body: Record<string, unknown> }> = [];
 
 const todo = (over: Partial<Record<string, unknown>> = {}) => ({
   id: "todo_1",
@@ -231,7 +233,16 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     return new Response(JSON.stringify({ success: true, data: { queued: 0, processed: 0 } }));
   }
   if (url.includes("/api/health")) return new Response(JSON.stringify({ success: true, data: health }));
-  if (url.includes("/api/life-areas")) return new Response(JSON.stringify({ success: true, data: lifeAreas }));
+  if (url.includes("/api/life-areas")) {
+    if (init?.method === "PATCH") {
+      const id = url.split("/").pop() as string;
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      lifeAreaPatches.push({ id, body });
+      const area = lifeAreas.find(item => item.id === id)!;
+      return new Response(JSON.stringify({ success: true, data: { ...area, ...body } }));
+    }
+    return new Response(JSON.stringify({ success: true, data: lifeAreas }));
+  }
   if (url.includes("/api/todos")) {
     const method = init?.method || "GET";
     if (method !== "GET") {
@@ -563,6 +574,40 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       lastMessageAt: "2026-07-28T11:00:30.000Z",
       createdAt: "2026-07-28T11:00:00.000Z",
       updatedAt: "2026-07-28T11:00:30.000Z",
+    }, {
+      id: "thread_group",
+      channel: "sms",
+      address: "group:3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      displayName: "Sarah & me",
+      messageCount: 2,
+      lastMessage: "On it, I'll remind you both here.",
+      lastMessageAt: "2026-07-29T21:00:05.000Z",
+      createdAt: "2026-07-29T21:00:00.000Z",
+      updatedAt: "2026-07-29T21:00:05.000Z",
+    }],
+  }));
+  if (url.includes("/api/conversations/channels/thread_group/messages")) return new Response(JSON.stringify({
+    success: true,
+    data: [{
+      id: "message_group_1",
+      direction: "inbound",
+      role: "user",
+      content: "Remind me to bring the print-outs Wednesday",
+      providerMessageId: "SB_group_1",
+      status: "received",
+      metadata: { groupId: "3fa85f64-5717-4562-b3fc-2c963f66afa6", speaker: "+17185552222", speakerName: "Sarah" },
+      createdAt: "2026-07-29T21:00:00.000Z",
+      updatedAt: "2026-07-29T21:00:00.000Z",
+    }, {
+      id: "message_group_2",
+      direction: "outbound",
+      role: "assistant",
+      content: "On it, I'll remind you both here.",
+      providerMessageId: "SB_group_2",
+      status: "sent",
+      metadata: {},
+      createdAt: "2026-07-29T21:00:05.000Z",
+      updatedAt: "2026-07-29T21:00:05.000Z",
     }],
   }));
   if (url.endsWith("/api/integrations/tasks")) {
@@ -587,6 +632,8 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
         quietHoursStart: "22:00",
         quietHoursEnd: "07:00",
         optedOutAt: null,
+        trustedContacts: [],
+        groupAllowAll: false,
       },
       tasks: { ...taskPreferences },
       webhookPaths: {
@@ -1253,6 +1300,29 @@ it("renders secure messaging and event integration settings", async () => {
   expect(destructiveButton).toBeEnabled();
 });
 
+it("badges a group chat's classification and renames it inline", async () => {
+  window.localStorage.clear();
+  lifeAreaPatches.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Classifications"));
+  expect(await screen.findByText("Group chat")).toBeInTheDocument();
+  expect(screen.getAllByText("Default classification")).toHaveLength(2);
+  // The defaults cannot be renamed or removed; the group's area can be both.
+  expect(screen.queryByRole("button", { name: "Rename Work" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Rename Home" }));
+  const field = screen.getByLabelText("New name for Home");
+  await userEvent.clear(field);
+  await userEvent.type(field, "Sarah & me{Enter}");
+  expect(await screen.findByText("Classification renamed")).toBeInTheDocument();
+  expect(lifeAreaPatches).toEqual([{ id: "area_group", body: { name: "Sarah & me" } }]);
+});
+
 it("fills the brief form from the end-of-day template and flags a send time inside quiet hours", async () => {
   window.localStorage.clear();
   resetAtlassianFixtures();
@@ -1525,6 +1595,14 @@ it("renders complete channel conversation history", async () => {
   const threaded = [...document.querySelectorAll(".history-message")]
     .find(node => node.textContent?.includes("Saved it as today's journal entry."));
   expect(threaded?.querySelector(".history-reply-quote")).toHaveTextContent("Remember this conversation");
+
+  // A group chat is titled by its name rather than a group id, and several
+  // people write into it, so each of their bubbles says who.
+  await userEvent.click((await screen.findAllByText("Group chat · Sarah & me"))[0]);
+  expect(await screen.findByText("Remind me to bring the print-outs Wednesday")).toBeInTheDocument();
+  expect(document.querySelector(".history-message.inbound .history-speaker")).toHaveTextContent("Sarah");
+  expect(document.querySelector(".history-message.outbound .history-speaker")).toBeNull();
+  expect(screen.queryByText(/3fa85f64/)).not.toBeInTheDocument();
 });
 
 /**

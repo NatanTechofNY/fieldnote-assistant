@@ -2,6 +2,7 @@ import {
   getNotificationPreferences,
   getSendblueSecret,
   getTwilioSecret,
+  type NotificationPreferences,
   type SmsProvider,
 } from "./integrations.ts";
 import { sendSendblueSms, startSendblueTypingIndicator, type StopTypingIndicator } from "./sendblue-service.ts";
@@ -22,7 +23,18 @@ export type SendStyle = typeof SEND_STYLES[number];
  * which both providers carry: Sendblue as iMessage media with RCS or MMS as the
  * fallback, Twilio as MMS.
  */
-export type SendOptions = { replyTo?: string; mediaUrl?: string; sendStyle?: SendStyle };
+export type SendOptions = {
+  replyTo?: string;
+  mediaUrl?: string;
+  sendStyle?: SendStyle;
+  /**
+   * The iMessage group chat the message belongs in. When set, `to` is the
+   * group's thread address rather than a phone number, and the message is
+   * carried by Sendblue whatever provider is selected, because only iMessage
+   * has group threads.
+   */
+  groupId?: string;
+};
 
 /**
  * Every outbound text goes through one signature, whichever API carries it, so
@@ -40,6 +52,33 @@ export type SmsSender = (
 
 export function activeSmsProvider(db: Db): SmsProvider {
   return getNotificationPreferences(db).smsProvider;
+}
+
+export type InboundSender = {
+  from: string;
+  /** Set when the message arrived in a group chat rather than a 1:1 conversation. */
+  groupId?: string;
+  /** Every number in the conversation as the provider reports it, the recipient included when present. */
+  participants: string[];
+};
+
+/**
+ * Who the assistant answers. The recipient is always heard. Anyone else is heard
+ * only inside a group chat the recipient is also in — either because they are a
+ * trusted contact or because the owner opened groups to every participant — so
+ * nobody can run the assistant in a conversation the owner cannot see. With no
+ * recipient configured a 1:1 message is still accepted, as documented, but a
+ * group message is refused because the owner's presence cannot be checked.
+ */
+export function isInboundSenderAllowed(
+  preferences: Pick<NotificationPreferences, "recipientPhone" | "trustedContacts" | "groupAllowAll">,
+  sender: InboundSender,
+): boolean {
+  const owner = preferences.recipientPhone;
+  if (!sender.groupId) return !owner || owner === sender.from;
+  if (!owner || !sender.participants.includes(owner)) return false;
+  if (sender.from === owner) return true;
+  return preferences.groupAllowAll || preferences.trustedContacts.some(contact => contact.phone === sender.from);
 }
 
 export function isSmsProviderConnected(db: Db, provider: SmsProvider): boolean {
@@ -63,7 +102,8 @@ export async function sendSms(
   body: string,
   options: SendOptions = {},
 ): Promise<{ sid: string; status: string; replyTo?: string }> {
-  return senders[activeSmsProvider(db)](db, to, body, options);
+  const provider = options.groupId ? "sendblue" : activeSmsProvider(db);
+  return senders[provider](db, to, body, options);
 }
 
 const typingIndicators: Record<SmsProvider, (db: Db, to: string) => StopTypingIndicator> = {

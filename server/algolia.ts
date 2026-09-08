@@ -7,6 +7,7 @@ import {
 import { getNotificationPreferences, getSearchPreferences } from "./integrations.ts";
 import { localParts } from "./local-time.ts";
 import { parseRecurrence, recurrenceJson } from "./recurrence.ts";
+import { groupIdOfAddress } from "./sendblue-service.ts";
 import type { ChannelMessageRow, Db, EntityType, IndexJobRow } from "./types.ts";
 
 type SearchRecord = Record<string, unknown> & { objectID: string };
@@ -21,6 +22,16 @@ function isInternalChannelMessage(row: ChannelMessageRow): boolean {
     return (JSON.parse(row.metadata_json) as { internal?: unknown }).internal === true;
   } catch {
     return false;
+  }
+}
+
+/** The name a group message was stored with, when the speaker had one. */
+function speakerNameOf(metadataJson: string): string | null {
+  try {
+    const name = (JSON.parse(metadataJson) as { speakerName?: unknown }).speakerName;
+    return typeof name === "string" && name ? name : null;
+  } catch {
+    return null;
   }
 }
 
@@ -64,7 +75,7 @@ const RETRIEVED_ATTRIBUTES: Record<SearchEntityType, string[]> = {
     "objectID", "title", "content", "kind", "mood_label", "mood_score",
     "tags", "category_name", "life_area_name", "occurred_at", "occurred_on", "updated_at",
   ],
-  message: ["objectID", "threadId", "channel", "role", "content", "created_at"],
+  message: ["objectID", "threadId", "channel", "role", "content", "created_at", "speaker_name", "group_name", "group_id"],
 };
 
 /**
@@ -126,7 +137,21 @@ export interface FlushResult {
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 /** Facet values are quoted in the filter string, so quotes must be escaped. */
-const escapeFilterValue = (value: string): string => value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+export const escapeFilterValue = (value: string): string => value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+
+/**
+ * The personal-data index names the environment resolves to. The sync service
+ * takes the same defaults through its options; this is for callers that need
+ * the names without a client, such as the per-request search filters a group
+ * turn sends with its completion.
+ */
+export function configuredIndexNames(): { todo: string; memory: string; message: string } {
+  return {
+    todo: process.env.ALGOLIA_TODO_INDEX || "devcon_assistant_todos",
+    memory: process.env.ALGOLIA_MEMORY_INDEX || "devcon_assistant_memories",
+    message: process.env.ALGOLIA_MESSAGE_INDEX || "devcon_assistant_messages",
+  };
+}
 
 /** Matches the chunk size the v5 batch helpers use internally. */
 const BATCH_SIZE = 1000;
@@ -152,9 +177,10 @@ export class AlgoliaSync {
 
   constructor(db: Db, options: AlgoliaOptions = {}) {
     this.db = db;
-    this.todoIndex = options.todoIndex || process.env.ALGOLIA_TODO_INDEX || "devcon_assistant_todos";
-    this.memoryIndex = options.memoryIndex || process.env.ALGOLIA_MEMORY_INDEX || "devcon_assistant_memories";
-    this.messageIndex = options.messageIndex || process.env.ALGOLIA_MESSAGE_INDEX || "devcon_assistant_messages";
+    const defaults = configuredIndexNames();
+    this.todoIndex = options.todoIndex || defaults.todo;
+    this.memoryIndex = options.memoryIndex || defaults.memory;
+    this.messageIndex = options.messageIndex || defaults.message;
     this.productIndex = options.productIndex || process.env.ALGOLIA_PRODUCT_INDEX || "devcon_assistant_products";
     this.settingsDirectory = options.settingsDirectory
       || resolve(process.cwd(), "agent-studio/indices");
@@ -270,6 +296,11 @@ export class AlgoliaSync {
     // prompt stored as the user message. A null projection deletes on the next
     // flush and drops out of a rebuild, so a reindex clears any already indexed.
     if (isInternalChannelMessage(row)) return null;
+    // A group message says which group and who spoke, by name only, so "what
+    // did Cementa ask for" is a search. Phone numbers stay out of the index,
+    // and a 1:1 or web record keeps exactly the shape it always had.
+    const groupId = row.address ? groupIdOfAddress(row.address) : undefined;
+    const speakerName = row.role === "user" ? speakerNameOf(row.metadata_json) : null;
     return {
       objectID: row.id,
       userId: row.user_id,
@@ -278,6 +309,11 @@ export class AlgoliaSync {
       role: row.role,
       content: row.content,
       created_at: row.created_at,
+      ...(groupId ? {
+        group_id: groupId,
+        ...(row.group_name ? { group_name: row.group_name } : {}),
+        ...(speakerName ? { speaker_name: speakerName } : {}),
+      } : {}),
     };
   }
 
@@ -631,6 +667,9 @@ export class AlgoliaSync {
     role: "user" | "assistant";
     content: string;
     created_at: string;
+    speaker_name?: string;
+    group_name?: string;
+    group_id?: string;
   }>> {
     const hits = await this.searchIndex(this.messageIndex, "Conversation", {
       query,
@@ -644,6 +683,9 @@ export class AlgoliaSync {
       role: hit.role === "assistant" ? "assistant" : "user",
       content: String(hit.content || ""),
       created_at: String(hit.created_at || ""),
+      ...(typeof hit.speaker_name === "string" ? { speaker_name: hit.speaker_name } : {}),
+      ...(typeof hit.group_name === "string" ? { group_name: hit.group_name } : {}),
+      ...(typeof hit.group_id === "string" ? { group_id: hit.group_id } : {}),
     }));
   }
 

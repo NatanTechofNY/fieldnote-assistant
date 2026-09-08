@@ -1142,6 +1142,48 @@
   {
     "type": "function",
     "function": {
+      "name": "send_message",
+      "description": "Sends one text bubble now, ahead of the reply: an emoji, a quick acknowledgement, a line that stands alone. Text conversations only; the reply still follows, so return no text if this said it all.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1500,
+            "description": "The message to send as its own bubble"
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "name_group_chat",
+      "description": "Names the group chat you are in, which labels the group's own life area in the owner's app. Call once when the turn context says the area is new, or when asked to rename the group. Group chats only.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "A short name for the group, from who is in it: \"Cementa & me\", \"Family\", \"Home\""
+          }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "search_store_products",
       "description": "Searches the Walgreens catalog for over-the-counter remedies and sick-day supplies. Query by symptom or product name; results carry price, image, and store link. Browsing only, no purchase.",
       "strict": true,
