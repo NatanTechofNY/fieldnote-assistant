@@ -37,6 +37,27 @@ export function localParts(date: Date, timezone: string): { date: string; time: 
   };
 }
 
+/**
+ * The instant written as the user's own wall clock with its UTC offset, e.g.
+ * `2026-09-08T13:20:09-04:00`. This is the shape the agent is asked to write
+ * back for every date-time, so handing it the current moment in that exact
+ * shape anchors both the clock and the offset it should use. A model given only
+ * the UTC instant tends to convert a local time to UTC and then append the
+ * local offset as well, landing four hours late.
+ */
+export function localIsoWithOffset(date: Date, timezone: string): string {
+  const { date: day, time } = localParts(date, timezone);
+  const seconds = String(date.getUTCSeconds()).padStart(2, "0");
+  const offsetMinutes = Math.round((wallClockMillis(day, time) - Date.UTC(
+    date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours(), date.getUTCMinutes(),
+  )) / 60_000);
+  const sign = offsetMinutes < 0 ? "-" : "+";
+  const magnitude = Math.abs(offsetMinutes);
+  const hours = String(Math.floor(magnitude / 60)).padStart(2, "0");
+  const minutes = String(magnitude % 60).padStart(2, "0");
+  return `${day}T${time}:${seconds}${sign}${hours}:${minutes}`;
+}
+
 /** A local `YYYY-MM-DD` and `HH:MM` read as if they were UTC, in epoch milliseconds. */
 function wallClockMillis(date: string, time: string): number {
   const [year, month, day] = date.split("-").map(Number);

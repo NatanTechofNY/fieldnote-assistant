@@ -1628,6 +1628,14 @@ describe("SMS, reminders, and channel agent execution", () => {
     assert.equal(turnContext?.timezone, "America/New_York");
     assert.equal(turnContext?.channel, "sms");
     assert.match(turnContext?.currentDateTime || "", /^\d{4}-\d{2}-\d{2}T/);
+    assert.match(turnContext?.currentLocalDateTime || "", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/,
+      "the model is shown the shape it should write times in: local clock with the offset");
+    assert.ok(
+      Math.abs(new Date(turnContext?.currentLocalDateTime as string).getTime() - new Date(turnContext?.currentDateTime as string).getTime()) < 1000,
+      "and it is the same instant as the UTC one, to the second",
+    );
+    assert.ok(turnContext?.currentLocalDateTime.endsWith("-04:00") || turnContext?.currentLocalDateTime.endsWith("-05:00"),
+      "with New York's offset rather than Z");
     assert.match(JSON.stringify(requests[1]), /output-available/);
     const archived = db.prepare(`
       SELECT role,metadata_json FROM channel_messages ORDER BY created_at,rowid

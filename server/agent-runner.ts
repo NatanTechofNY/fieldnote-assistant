@@ -2,6 +2,7 @@ import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./alg
 import { ensureGroupLifeArea, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
 import { redactedNumber, speakerLabel } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
+import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import { executeAgentTool, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
@@ -594,6 +595,11 @@ export async function runChannelAgent(
         channel,
         timezone: preferences.timezone,
         currentDateTime: new Date().toISOString(),
+        // The same moment as the user's wall clock with its offset: the shape
+        // every date-time sent to a tool should take, so "5:30 PM" is written
+        // as 17:30 with this offset rather than converted to UTC and then
+        // given the offset as well.
+        currentLocalDateTime: localIsoWithOffset(new Date(), preferences.timezone),
         ...(options.inbound?.groupId && group
           ? {
             groupId: options.inbound.groupId,
