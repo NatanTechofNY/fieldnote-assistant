@@ -289,17 +289,17 @@ function priorAttemptWrites(db: Db, threadId: string, inboundId: string): AgentP
   });
 }
 
-/** Whether the inbound message already carries a given tapback, per the archive. */
-function hasReaction(db: Db, threadId: string, providerMessageId: string, reaction: string): boolean {
+/** The tapbacks we have put on the inbound message and not taken back, per the archive. */
+function reactionsOn(db: Db, threadId: string, providerMessageId: string): string[] {
   const row = db.prepare(`
     SELECT metadata_json FROM channel_messages WHERE thread_id=? AND provider_message_id=?
   `).get(threadId, providerMessageId) as { metadata_json: string | null } | undefined;
-  if (!row) return false;
+  if (!row) return [];
   try {
     const reactions = (JSON.parse(row.metadata_json || "{}") as { reactions?: unknown }).reactions;
-    return Array.isArray(reactions) && reactions.includes(reaction);
+    return Array.isArray(reactions) ? reactions.filter((value): value is string => typeof value === "string") : [];
   } catch {
-    return false;
+    return [];
   }
 }
 
@@ -634,9 +634,19 @@ export async function runChannelAgent(
   const progressHandle = channel === "sms" && options.inbound?.provider === "sendblue"
     ? context.inboundMessageHandle
     : undefined;
-  let progressShown = progressHandle ? hasReaction(db, thread.id, progressHandle, PROGRESS_REACTION) : false;
+  const alreadyOn = progressHandle ? reactionsOn(db, thread.id, progressHandle) : [];
+  let progressShown = alreadyOn.includes(PROGRESS_REACTION);
+  /*
+   * iMessage keeps one tapback per sender per message, so the 🔍 does not sit
+   * beside the agent's own reaction: it replaces it, and lifting it afterwards
+   * leaves the message bare. A heart in the first round followed by a lookup in
+   * the second ended with no tapback at all. Once the agent has reacted — this
+   * attempt or, per the archive, an earlier one — the placeholder stays off.
+   */
+  const agentReacted = (): boolean => context.reacted || alreadyOn.some(reaction => reaction !== PROGRESS_REACTION);
   const setProgress = async (on: boolean): Promise<void> => {
     if (!progressHandle || progressShown === on) return;
+    if (on && agentReacted()) return;
     const reaction = on ? PROGRESS_REACTION : `-${PROGRESS_REACTION}`;
     try {
       await sendSendblueReaction(db, progressHandle, reaction);

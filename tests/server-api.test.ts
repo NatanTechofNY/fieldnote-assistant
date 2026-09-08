@@ -3491,6 +3491,76 @@ describe("Sendblue provider", () => {
   });
 
   /*
+   * iMessage holds one tapback per sender per message. A 🔍 raised after the
+   * agent's heart replaced the heart, and taking the 🔍 down again left the
+   * message bare — the heart never came back. Once the agent has reacted, the
+   * placeholder stays off for the rest of the turn, however many lookups follow.
+   */
+  it("never raises the searching tapback over the agent's own reaction", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let call = 0;
+    const turns = [
+      [{ type: "tool-list_life_areas", tool_call_id: "call_1", state: "input-available", input: {} }],
+      [{ type: "tool-react_to_message", tool_call_id: "call_2", state: "input-available", input: { reaction: "love" } }],
+      [{ type: "tool-list_todos", tool_call_id: "call_3", state: "input-available", input: {} }],
+      [{ type: "tool-list_reminders", tool_call_id: "call_4", state: "input-available", input: {} }],
+      [{ type: "text", text: "All clear." }],
+    ];
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "how am I doing?", "SB_heart", {
+        fetcher: async () => {
+          const parts = turns[call];
+          call += 1;
+          return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+        },
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["🔍", "-🔍", "love"],
+      "the lookups after the heart raise no placeholder, so nothing is lifted at the end",
+    );
+    const inbound = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_heart'
+    `).get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, ["love"], "the heart is what stays on the message");
+  });
+
+  it("does not raise the searching tapback at all when the agent reacts in its first round", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let call = 0;
+    const turns = [
+      [
+        { type: "tool-react_to_message", tool_call_id: "call_1", state: "input-available", input: { reaction: "love" } },
+        { type: "tool-list_todos", tool_call_id: "call_2", state: "input-available", input: {} },
+      ],
+      [{ type: "tool-list_reminders", tool_call_id: "call_3", state: "input-available", input: {} }],
+      [{ type: "text", text: "Nothing due." }],
+    ];
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "anything due?", "SB_heart_first", {
+        fetcher: async () => {
+          const parts = turns[call];
+          call += 1;
+          return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+        },
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["love"],
+    );
+  });
+
+  /*
    * A turn that timed out after its write was retried from scratch: the retry
    * saw the request and none of what the first attempt did, wrote again, and the
    * attempt after that described the change as something that had always been
