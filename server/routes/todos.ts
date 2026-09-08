@@ -1,14 +1,16 @@
 import { z } from "zod";
 import { USER_ID, getReminders, getTodo, id, now, queueIndexJob, syncTodoReminders, userTimezone } from "../db.ts";
 import { failure, success } from "../http.ts";
-import { planRecurrenceWrite } from "../recurrence.ts";
+import {
+  DERIVED_SCHEDULE, REPEATING_PARENT, REPEATING_SUBTASK, planRecurrenceWrite,
+} from "../recurrence.ts";
 import { iso, status, todoCreate, todoPatch } from "../schemas.ts";
 import { applyStatusTimes, completionJson, reminderJson, todoJson } from "../serializers.ts";
-import { completeParentIfSettled, completionStats, syncOccurrenceCompletion } from "../todo-status.ts";
+import {
+  completeParentIfSettled, completionStats, hasSubtasks, syncOccurrenceCompletion,
+} from "../todo-status.ts";
 import { type TodoRow } from "../types.ts";
 import type { RouteContext } from "./context.ts";
-
-const REPEATING_SUBTASK = "A repeating todo cannot be filed under another task";
 
 export function registerTodoRoutes({ app, db, search }: RouteContext): void {
   app.get("/api/todos", (req, res) => {
@@ -82,7 +84,12 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
     const timestamp = now();
     const times = applyStatusTimes(body.status, undefined, body);
     const repeat = planRecurrenceWrite(body.recurrence, undefined, userTimezone(db));
-    if (repeat.recurrence_json && body.parent_id) return failure(res, 400, REPEATING_SUBTASK);
+    if (repeat.recurrence_json) {
+      if (body.parent_id) return failure(res, 400, REPEATING_SUBTASK);
+      if (body.subtasks?.length) return failure(res, 400, REPEATING_PARENT);
+      if (body.due_at || body.reminder_at || body.extra_reminders.length) return failure(res, 400, DERIVED_SCHEDULE);
+    }
+    if (body.parent_id && getTodo(db, body.parent_id)?.recurrence_json) return failure(res, 400, REPEATING_PARENT);
     const schedule = repeat.derived ?? {
       due_at: body.due_at ?? null,
       reminder_at: body.reminder_at ?? null,
@@ -128,11 +135,25 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
     const current = getTodo(db, req.params.id);
     if (!current) return failure(res, 404, "Todo not found");
     if (body.parent_id === current.id) return failure(res, 400, "A todo cannot parent itself");
-    const nextStatus = body.status ?? current.status;
-    const times = applyStatusTimes(nextStatus, current, body);
     const repeat = planRecurrenceWrite(body.recurrence, current, userTimezone(db));
     const parentId = body.parent_id === undefined ? current.parent_id : body.parent_id;
-    if (repeat.recurrence_json && parentId) return failure(res, 400, REPEATING_SUBTASK);
+    if (repeat.recurrence_json) {
+      if (parentId) return failure(res, 400, REPEATING_SUBTASK);
+      if (body.due_at || body.reminder_at || body.extra_reminders?.length) return failure(res, 400, DERIVED_SCHEDULE);
+      if (!current.recurrence_json && hasSubtasks(db, current.id)) return failure(res, 400, REPEATING_PARENT);
+    }
+    if (parentId && parentId !== current.parent_id && getTodo(db, parentId)?.recurrence_json) {
+      return failure(res, 400, REPEATING_PARENT);
+    }
+    // A rule change opens a new occurrence. The one just finished is already in
+    // the log, so a done status is not carried on to a day that has not come.
+    const requested = body.status ?? current.status;
+    const nextStatus = repeat.occurrenceMoved && (requested === "done" || requested === "in_progress")
+      ? "pending"
+      : requested;
+    const times = repeat.occurrenceMoved
+      ? { startedAt: null, completedAt: null }
+      : applyStatusTimes(nextStatus, current, body);
     const schedule = repeat.derived ?? {
       due_at: body.due_at === undefined ? current.due_at : body.due_at,
       reminder_at: body.reminder_at === undefined ? current.reminder_at : body.reminder_at,

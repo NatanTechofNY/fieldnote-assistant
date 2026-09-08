@@ -28,7 +28,7 @@
     "test:server": "node --experimental-strip-types --test tests/server-api.test.ts tests/recurrence.test.ts",
     "test:coverage": "concurrently -n web,api -c cyan,yellow --success all \"npm:test:coverage:web\" \"npm:test:coverage:server\"",
     "test:coverage:web": "vitest run tests/app.test.tsx --coverage",
-    "test:coverage:server": "node --experimental-strip-types --test --experimental-test-coverage --test-coverage-exclude=tests/** --test-coverage-lines=92 --test-coverage-branches=73 --test-coverage-functions=92 tests/server-api.test.ts",
+    "test:coverage:server": "node --experimental-strip-types --test --experimental-test-coverage --test-coverage-exclude=tests/** --test-coverage-lines=92 --test-coverage-branches=73 --test-coverage-functions=92 tests/server-api.test.ts tests/recurrence.test.ts",
     "test:watch": "concurrently -n web,api -c cyan,yellow \"vitest\" \"node --experimental-strip-types --test --watch tests/server-api.test.ts\"",
     "seed": "tsx server/index.ts --seed",
     "reset": "tsx server/index.ts --reset",

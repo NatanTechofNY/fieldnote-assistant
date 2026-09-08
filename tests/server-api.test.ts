@@ -5572,30 +5572,47 @@ describe("worker scheduling", () => {
 
 describe("repeating todos", () => {
   const rule = { freq: "daily", interval: 1, weekdays: [], time: "08:00", lead_minutes: 10 };
-  /** The 08:00 UTC occurrence on or after now, which is what a fresh daily rule lands on. */
-  const nextEight = () => {
-    const today = new Date();
-    const candidate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 8));
-    return candidate.getTime() > Date.now() ? candidate : new Date(candidate.getTime() + 86_400_000);
+  /** The 08:00 UTC occurrence strictly after `from`, which is what a fresh daily rule lands on. */
+  const eightAfter = (from: Date) => {
+    const candidate = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate(), 8));
+    return candidate.getTime() > from.getTime() ? candidate : new Date(candidate.getTime() + 86_400_000);
   };
+  /** Pretend the row holds an occurrence at `at` (with its 10-minute reminder), as the worker would have left it. */
+  const holdOccurrence = (db: Db, id: string, at: string) => db
+    .prepare("UPDATE todos SET due_at=?,reminder_at=? WHERE id=?")
+    .run(at, new Date(new Date(at).getTime() - 10 * 60_000).toISOString(), id);
+  const completions = (db: Db, id: string) =>
+    (db.prepare("SELECT count(*) count FROM todo_completions WHERE todo_id=?").get(id) as { count: number }).count;
 
-  it("derives the schedule from the rule and refuses to file it under another task", async () => {
+  it("derives the schedule from the rule and refuses what the rule already decides", async () => {
     const { api, db } = fixture();
     const parent = (await api.post("/api/todos").send({ title: "Cat care" }).expect(201)).body.data;
     const refused = await api.post("/api/todos").send({
       title: "Give the cat her medicine", parent_id: parent.id, recurrence: rule,
     }).expect(400);
     assert.match(refused.body.error, /repeating todo/i);
+    // The times are the rule's to set, so a caller sending them has misread the
+    // contract, and is told so rather than quietly overruled.
+    for (const extra of [
+      { due_at: "2020-01-01T00:00:00.000Z" },
+      { reminder_at: "2020-01-01T00:00:00.000Z" },
+      { extra_reminders: ["2020-01-01T01:00:00.000Z"] },
+    ]) {
+      const told = await api.post("/api/todos").send({ title: "Medicine", recurrence: rule, ...extra }).expect(400);
+      assert.match(told.body.error, /come from its rule/);
+    }
+    // A text further ahead than the end of the previous occurrence would go out
+    // at midnight instead, so the bound is stated for the schedule at hand.
+    const tooFar = await api.post("/api/todos").send({
+      title: "Medicine", recurrence: { ...rule, lead_minutes: 1440 },
+    }).expect(400);
+    assert.match(tooFar.body.error, /at most 480 minutes/);
 
+    const before = new Date();
     const created = (await api.post("/api/todos").send({
-      title: "Give the cat her medicine",
-      recurrence: rule,
-      // Whatever the caller says about the times, the rule decides them.
-      due_at: "2020-01-01T00:00:00.000Z",
-      reminder_at: "2020-01-01T00:00:00.000Z",
-      extra_reminders: ["2020-01-01T01:00:00.000Z"],
+      title: "Give the cat her medicine", recurrence: rule, due_at: null, reminder_at: null,
     }).expect(201)).body.data;
-    const due = nextEight();
+    const due = eightAfter(before);
     assert.equal(created.due_at, due.toISOString());
     assert.equal(created.reminder_at, new Date(due.getTime() - 10 * 60_000).toISOString());
     assert.deepEqual(created.extra_reminders, []);
@@ -5605,26 +5622,75 @@ describe("repeating todos", () => {
       [{ kind: "due", status: "pending" }, { kind: "pre", status: "pending" }],
     );
 
-    // A patch that does not mention the rule cannot move the derived times: the
-    // calendar drag and the agent both write due_at without meaning to break a series.
-    const dragged = (await api.patch(`/api/todos/${created.id}`).send({ due_at: "2020-01-01T00:00:00.000Z" }).expect(200)).body.data;
-    assert.equal(dragged.due_at, created.due_at);
-    assert.deepEqual(dragged.recurrence, rule);
+    // A patch that says nothing about the rule leaves the derived times alone;
+    // one that tries to write them is refused, so a caller learns to change the rule.
+    const renamed = (await api.patch(`/api/todos/${created.id}`).send({ title: "Cat medicine" }).expect(200)).body.data;
+    assert.equal(renamed.due_at, created.due_at);
+    const dragged = await api.patch(`/api/todos/${created.id}`).send({ due_at: "2020-01-01T00:00:00.000Z" }).expect(400);
+    assert.match(dragged.body.error, /come from its rule/);
+    assert.equal(getTodo(db, created.id)?.due_at, created.due_at);
 
     // Weekly needs at least one day.
     await api.patch(`/api/todos/${created.id}`).send({
       recurrence: { ...rule, freq: "weekly", weekdays: [] },
     }).expect(400);
 
-    // Clearing the rule leaves the current occurrence as a one-off.
-    const cleared = (await api.patch(`/api/todos/${created.id}`).send({ recurrence: null }).expect(200)).body.data;
+    // Clearing the rule leaves the current occurrence as a one-off, and the
+    // times are the caller's again.
+    const cleared = (await api.patch(`/api/todos/${created.id}`).send({
+      recurrence: null, due_at: "2031-01-01T00:00:00.000Z",
+    }).expect(200)).body.data;
     assert.equal(cleared.recurrence, null);
-    assert.equal(cleared.due_at, created.due_at);
+    assert.equal(cleared.due_at, "2031-01-01T00:00:00.000Z");
 
     assert.ok((await api.get("/api/todos?recurring=false").expect(200)).body.data
       .some((todo: { id: string }) => todo.id === created.id));
     assert.ok(!(await api.get("/api/todos?recurring=true").expect(200)).body.data
       .some((todo: { id: string }) => todo.id === created.id));
+  });
+
+  it("keeps the occurrence when the editor sends the same rule back, and opens a new one when it changes", async () => {
+    const { api, db } = fixture();
+    const created = (await api.post("/api/todos").send({ title: "Stretch", recurrence: rule }).expect(201)).body.data;
+    // The row holds this morning's occurrence, already past, with an extra reminder on it.
+    const earlier = new Date(Date.now() - 60 * 60_000).toISOString();
+    holdOccurrence(db, created.id, earlier);
+    db.prepare("UPDATE todos SET extra_reminders_json=? WHERE id=?").run(JSON.stringify([earlier]), created.id);
+
+    // The editor sends the whole form on every save, rule included. A rename
+    // must not move today's occurrence on to tomorrow or drop the extra.
+    const renamed = (await api.patch(`/api/todos/${created.id}`).send({
+      title: "Morning stretch", recurrence: rule, status: "pending",
+    }).expect(200)).body.data;
+    assert.equal(renamed.due_at, earlier, "today's occurrence is still the one in play");
+    assert.deepEqual(renamed.extra_reminders, [earlier]);
+
+    // Finished for today, then saved again unchanged: still done, one completion, nothing pre-logged.
+    await api.patch(`/api/todos/${created.id}/status`).send({ status: "done" }).expect(200);
+    const resaved = (await api.patch(`/api/todos/${created.id}`).send({
+      title: "Morning stretch", recurrence: rule, status: "done", priority: "high",
+    }).expect(200)).body.data;
+    assert.equal(resaved.status, "done");
+    assert.equal(resaved.due_at, earlier);
+    assert.equal(completions(db, created.id), 1);
+
+    // Changing the time really does move on: the next occurrence opens as
+    // pending, today's completion stays in the log, and tomorrow is not
+    // logged as done before it has happened.
+    const moved = (await api.patch(`/api/todos/${created.id}`).send({
+      recurrence: { ...rule, time: "09:00" }, status: "done",
+    }).expect(200)).body.data;
+    assert.equal(moved.status, "pending", "a finished status is not carried on to a day that has not come");
+    assert.equal(moved.completed_at, null);
+    assert.notEqual(moved.due_at, earlier);
+    assert.equal(new Date(moved.due_at).getUTCHours(), 9);
+    assert.equal(completions(db, created.id), 1, "the completion logged is still today's, not the new occurrence's");
+    assert.deepEqual(
+      db.prepare("SELECT kind FROM reminders WHERE todo_id=? AND status='pending' ORDER BY kind").all(created.id),
+      [{ kind: "due" }, { kind: "pre" }],
+      "the new occurrence gets its reminders because the row is open again",
+    );
+    assert.equal((await api.get(`/api/todos/${created.id}`).expect(200)).body.data.streak, 1, "the streak counts by day, so the time change does not break it");
   });
 
   it("logs each completed occurrence, forgets it on undo, and reports the streak", async () => {
@@ -5651,10 +5717,20 @@ describe("repeating todos", () => {
     await api.patch(`/api/todos/${created.id}/status`).send({ status: "done" }).expect(200);
     assert.equal((await api.get(`/api/todos/${created.id}`).expect(200)).body.data.completion_count, 2);
 
+    // A rename alone reopens nothing: a patch without a status keeps the one stored.
+    const renamed = (await api.patch(`/api/todos/${created.id}`).send({ title: "Morning stretch" }).expect(200)).body.data;
+    assert.equal(renamed.status, "done");
+    assert.equal(completions(db, created.id), 2);
+
     // Undoing the tap takes today's record away and nothing else.
     const undone = (await api.patch(`/api/todos/${created.id}/status`).send({ status: "pending" }).expect(200)).body.data;
     assert.equal(undone.last_completed_at, yesterday);
     assert.equal((await api.get(`/api/todos/${created.id}`).expect(200)).body.data.completion_count, 1);
+
+    // Ending the series after today's dose keeps the fact that it was given.
+    await api.patch(`/api/todos/${created.id}/status`).send({ status: "done" }).expect(200);
+    await api.patch(`/api/todos/${created.id}/status`).send({ status: "cancelled" }).expect(200);
+    assert.equal(completions(db, created.id), 2, "cancelling is not undoing");
   });
 
   it("rolls a finished or missed occurrence forward once its local day is over, and not before", async () => {
@@ -5663,18 +5739,20 @@ describe("repeating todos", () => {
     const finished = (await api.post("/api/todos").send({ title: "Medicine", recurrence: rule }).expect(201)).body.data;
     const missed = (await api.post("/api/todos").send({ title: "Water plants", recurrence: rule }).expect(201)).body.data;
     const stopped = (await api.post("/api/todos").send({ title: "Old habit", recurrence: rule }).expect(201)).body.data;
+    const blocked = (await api.post("/api/todos").send({ title: "Waiting on parts", recurrence: rule }).expect(201)).body.data;
     const today = (await api.post("/api/todos").send({ title: "Still today", recurrence: rule }).expect(201)).body.data;
     await api.patch(`/api/todos/${finished.id}/status`).send({ status: "done" }).expect(200);
     await api.patch(`/api/todos/${stopped.id}/status`).send({ status: "cancelled" }).expect(200);
+    await api.patch(`/api/todos/${blocked.id}/status`).send({ status: "blocked" }).expect(200);
 
     // Pretend the day turned over: every row but the last is dated yesterday.
     const yesterday = new Date(new Date(finished.due_at).getTime() - 86_400_000).toISOString();
-    for (const todo of [finished, missed, stopped]) {
+    for (const todo of [finished, missed, stopped, blocked]) {
       db.prepare("UPDATE todos SET due_at=? WHERE id=?").run(yesterday, todo.id);
     }
     const at = new Date(finished.due_at);
     const rolled = rollRecurringTodos(db, search, "UTC", at);
-    assert.equal(rolled, 2, "the done row and the missed row both move on; a cancelled one and today's do not");
+    assert.equal(rolled, 3, "the done, missed, and blocked rows move on; a cancelled one and today's do not");
 
     for (const todo of [finished, missed]) {
       const row = getTodo(db, todo.id);
@@ -5687,6 +5765,8 @@ describe("repeating todos", () => {
         [{ kind: "due", status: "pending" }, { kind: "pre", status: "pending" }],
       );
     }
+    assert.equal(getTodo(db, blocked.id)?.status, "blocked", "a block is about the task, not the day");
+    assert.equal(getTodo(db, blocked.id)?.due_at, finished.due_at);
     assert.equal(getTodo(db, finished.id)?.last_completed_at !== null, true, "the log survives the roll");
     assert.equal(getTodo(db, stopped.id)?.status, "cancelled");
     assert.equal(getTodo(db, stopped.id)?.due_at, yesterday);
@@ -5694,11 +5774,114 @@ describe("repeating todos", () => {
     assert.equal(rollRecurringTodos(db, search, "UTC", at), 0, "rolling is idempotent within a day");
   });
 
+  it("rolls every row it can, puts a dateless row back on its series, and lands on today across a midnight DST jump", async () => {
+    const { api, db } = fixture();
+    const search = fakeSearch(db);
+    const broken = (await api.post("/api/todos").send({ title: "Corrupt", recurrence: rule }).expect(201)).body.data;
+    const dateless = (await api.post("/api/todos").send({ title: "Lost its date", recurrence: rule }).expect(201)).body.data;
+    const healthy = (await api.post("/api/todos").send({ title: "Fine", recurrence: rule }).expect(201)).body.data;
+    const yesterday = new Date(new Date(healthy.due_at).getTime() - 86_400_000).toISOString();
+    // A rule the engine cannot walk, first in row order, must not stop the rows behind it.
+    db.prepare("UPDATE todos SET recurrence_json='{\"freq\":\"weekly\",\"weekdays\":[],\"time\":\"08:00\"}',due_at=? WHERE id=?").run(yesterday, broken.id);
+    // An older client took the due date off; the rule is still there.
+    db.prepare("UPDATE todos SET due_at=NULL,reminder_at=NULL WHERE id=?").run(dateless.id);
+    db.prepare("UPDATE todos SET due_at=? WHERE id=?").run(yesterday, healthy.id);
+
+    const at = new Date(healthy.due_at);
+    assert.equal(rollRecurringTodos(db, search, "UTC", at), 2);
+    assert.equal(getTodo(db, healthy.id)?.due_at, healthy.due_at, "the row behind the broken one still rolled");
+    assert.equal(getTodo(db, broken.id)?.due_at, yesterday, "the broken row is skipped, not thrown on");
+    const healed = getTodo(db, dateless.id);
+    assert.equal(healed?.due_at, eightAfter(at).toISOString(), "the dateless row is back on the series from now");
+    assert.equal(healed?.reminder_at, new Date(eightAfter(at).getTime() - 10 * 60_000).toISOString());
+    assert.equal(rollRecurringTodos(db, search, "UTC", at), 0);
+
+    // Chile's clocks jump forward at midnight on 2026-09-06, so that day has no
+    // 00:00. A late-evening rule rolled that morning must land on the 6th, once.
+    const santiago = "America/Santiago";
+    const late = (await api.post("/api/todos").send({
+      title: "Night pills", recurrence: { ...rule, time: "23:30", lead_minutes: 30 },
+    }).expect(201)).body.data;
+    // 2026-09-05 23:30 in Santiago (UTC-4) is 03:30Z on the 6th.
+    db.prepare("UPDATE todos SET due_at='2026-09-06T03:30:00.000Z' WHERE id=?").run(late.id);
+    const morning = new Date("2026-09-06T15:00:00.000Z");
+    assert.equal(rollRecurringTodos(db, search, santiago, morning), 1);
+    // 2026-09-06 23:30 in Santiago (now UTC-3) is 02:30Z on the 7th.
+    assert.equal(getTodo(db, late.id)?.due_at, "2026-09-07T02:30:00.000Z");
+    assert.equal(rollRecurringTodos(db, search, santiago, morning), 0, "and it is not rolled again on the next tick");
+  });
+
+  it("keeps the reminder rows of a repeating todo in the rule's hands", async () => {
+    const { api, db } = fixture();
+    const created = (await api.post("/api/todos").send({ title: "Medicine", recurrence: rule }).expect(201)).body.data;
+    const rows = db.prepare("SELECT id,kind FROM reminders WHERE todo_id=?").all(created.id) as Array<{ id: string; kind: string }>;
+    const due = rows.find(row => row.kind === "due")!;
+    const pre = rows.find(row => row.kind === "pre")!;
+    const later = new Date(Date.now() + 40 * 86_400_000).toISOString();
+
+    // Deleting the due date would take the row off its series for good;
+    // moving it or the reminder would be undone at the next roll.
+    for (const reminder of [due, pre]) {
+      const removed = await api.delete(`/api/reminders/${reminder.id}`).expect(400);
+      assert.match(removed.body.error, /come from its rule/);
+      await api.patch(`/api/reminders/${reminder.id}`).send({ reminder_at: later }).expect(400);
+    }
+    await api.post("/api/reminders").send({ todo_id: created.id, reminder_at: later, slot: "primary" }).expect(400);
+    const row = getTodo(db, created.id);
+    assert.equal(row?.due_at, created.due_at);
+    assert.equal(row?.reminder_at, created.reminder_at);
+
+    // An extra reminder belongs to the one occurrence and is still the caller's to manage.
+    const extra = (await api.post("/api/reminders").send({ todo_id: created.id, reminder_at: later, slot: "extra" }).expect(201)).body.data;
+    assert.equal(extra.kind, "escalation");
+    await api.delete(`/api/reminders/${extra.id}`).expect(200);
+
+    // The same refusals through the agent's tools. (Every write rebuilds the
+    // pending rows, so they are read again.)
+    const call = async (name: string, input: object = {}, expected = 200) =>
+      (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
+    const rebuilt = db.prepare("SELECT id,kind FROM reminders WHERE todo_id=?").all(created.id) as Array<{ id: string; kind: string }>;
+    for (const reminder of rebuilt.filter(row => row.kind !== "escalation")) {
+      const removed = await call("delete_reminder", { id: reminder.id, confirmed: true }, 400);
+      assert.match(removed.error, /come from its rule/);
+      await call("update_reminder", { id: reminder.id, reminder_at: later }, 400);
+    }
+    await call("create_reminder", { todo_id: created.id, reminder_at: later, slot: "primary" }, 400);
+    assert.equal(getTodo(db, created.id)?.due_at, created.due_at);
+  });
+
+  it("keeps a repeating todo and a checklist apart in both directions", async () => {
+    const { api, db } = fixture();
+    const withSteps = await api.post("/api/todos").send({
+      title: "Weekly review", recurrence: rule, subtasks: [{ title: "Inbox" }],
+    }).expect(400);
+    assert.match(withSteps.body.error, /cannot have subtasks/);
+
+    const repeating = (await api.post("/api/todos").send({ title: "Weekly review", recurrence: rule }).expect(201)).body.data;
+    const filed = await api.post("/api/todos").send({ title: "Inbox", parent_id: repeating.id }).expect(400);
+    assert.match(filed.body.error, /cannot have subtasks/);
+    const loose = (await api.post("/api/todos").send({ title: "Inbox" }).expect(201)).body.data;
+    await api.patch(`/api/todos/${loose.id}`).send({ parent_id: repeating.id }).expect(400);
+
+    const project = (await api.post("/api/todos").send({ title: "Launch", subtasks: [{ title: "Deck" }] }).expect(201)).body.data;
+    const turned = await api.patch(`/api/todos/${project.id}`).send({ recurrence: rule }).expect(400);
+    assert.match(turned.body.error, /cannot repeat/);
+    assert.equal(getTodo(db, project.id)?.recurrence_json, null);
+
+    const call = async (name: string, input: object = {}, expected = 200) =>
+      (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
+    await call("create_todo", { title: "Review", recurrence: rule, subtasks: [{ title: "Inbox" }] }, 400);
+    await call("create_todo", { title: "Inbox", parent_id: repeating.id }, 400);
+    await call("update_todo", { id: loose.id, patch: { parent_id: repeating.id } }, 400);
+    await call("update_todo", { id: project.id, patch: { recurrence: rule } }, 400);
+  });
+
   it("exposes the rule through the agent tools", async () => {
-    const { api } = fixture();
+    const { api, db } = fixture();
     const call = async (name: string, input: object = {}, expected = 200) =>
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
+    const before = new Date();
     const created = (await call("create_todo", {
       title: "Give the cat her medicine", notes: null, priority: null, category_id: null,
       life_area_id: "area_personal", parent_id: null, due_at: null, reminder_at: null,
@@ -5706,8 +5889,19 @@ describe("repeating todos", () => {
       recurrence: { freq: "daily", interval: null, weekdays: null, time: "08:00", lead_minutes: 10 },
     })).data;
     assert.deepEqual(created.recurrence, rule, "interval and weekdays get their defaults");
-    assert.equal(created.due_at, nextEight().toISOString());
-    assert.equal(created.reminder_at, new Date(nextEight().getTime() - 10 * 60_000).toISOString());
+    const due = eightAfter(before);
+    assert.equal(created.due_at, due.toISOString());
+    assert.equal(created.reminder_at, new Date(due.getTime() - 10 * 60_000).toISOString());
+
+    // A rule that cannot be honoured is the caller's mistake, not a server fault.
+    const tooFar = await call("create_todo", {
+      title: "Medicine", recurrence: { ...rule, lead_minutes: 1440 },
+    }, 400);
+    assert.match(tooFar.error, /at most 480 minutes/);
+    const wide = (await call("create_todo", {
+      title: "Long haul", recurrence: { freq: "weekly", interval: 365, weekdays: [1], time: "09:00", lead_minutes: null },
+    })).data;
+    assert.equal(new Date(wide.due_at).getUTCDay(), 1, "the widest weekly rule the schema admits still finds its occurrence");
 
     const filtered = (await call("list_todos", { recurring: true, limit: 10 })).data;
     assert.ok(filtered.some((todo: { id: string }) => todo.id === created.id));
@@ -5716,11 +5910,20 @@ describe("repeating todos", () => {
 
     // Null in a patch means unchanged, so the rule and its times survive an unrelated edit.
     const renamed = (await call("update_todo", {
-      id: created.id, patch: { title: "Cat medicine", recurrence: null, due_at: "2020-01-01T00:00:00.000Z" },
+      id: created.id, patch: { title: "Cat medicine", recurrence: null },
     })).data;
     assert.deepEqual(renamed.recurrence, rule);
     assert.equal(renamed.due_at, created.due_at);
+    // Writing the derived time directly is refused, so the agent learns to change the rule.
+    const told = await call("update_todo", { id: created.id, patch: { due_at: "2020-01-01T00:00:00.000Z" } }, 400);
+    assert.match(told.error, /come from its rule/);
 
+    // Finished for today, then the rule changes: the next occurrence opens as
+    // pending and today's completion is the only one in the log, as over REST.
+    holdOccurrence(db, created.id, new Date(Date.now() - 60 * 60_000).toISOString());
+    const done = (await call("set_todo_status", { id: created.id, status: "done" })).data;
+    assert.ok(done.last_completed_at);
+    assert.equal((await call("get_todo", { id: created.id })).data.completion_count, 1);
     const weekly = (await call("update_todo", {
       id: created.id,
       patch: { recurrence: { freq: "weekly", interval: 1, weekdays: [1, 3, 5], time: "21:00", lead_minutes: 0 } },
@@ -5728,18 +5931,30 @@ describe("repeating todos", () => {
     assert.deepEqual(weekly.recurrence, { freq: "weekly", interval: 1, weekdays: [1, 3, 5], time: "21:00", lead_minutes: 0 });
     assert.ok([1, 3, 5].includes(new Date(weekly.due_at).getUTCDay()));
     assert.equal(weekly.reminder_at, weekly.due_at, "a lead of zero texts at the time itself");
+    assert.equal(weekly.status, "pending", "the new occurrence is open");
+    assert.equal(completions(db, created.id), 1);
 
     await call("update_todo", { id: created.id, patch: { parent_id: "todo_other" } }, 400);
-
-    const done = (await call("set_todo_status", { id: created.id, status: "done" })).data;
-    assert.ok(done.last_completed_at);
-    const detail = (await call("get_todo", { id: created.id })).data;
-    assert.equal(detail.completion_count, 1);
-    assert.equal(detail.streak, 1);
 
     const oneOff = (await call("update_todo", { id: created.id, patch: { clear_fields: ["recurrence"] } })).data;
     assert.equal(oneOff.recurrence, null);
     assert.equal(oneOff.due_at, weekly.due_at);
+  });
+});
+
+describe("todo patches", () => {
+  it("changes only the fields a patch names", async () => {
+    const { api } = fixture();
+    const created = (await api.post("/api/todos").send({
+      title: "Ship it", extra_reminders: ["2031-01-01T09:00:00.000Z"],
+    }).expect(201)).body.data;
+    await api.patch(`/api/todos/${created.id}/status`).send({ status: "done" }).expect(200);
+    // The create schema's defaults must not ride along on a patch: a rename is a
+    // rename, not a reopening with the extra reminders swept away.
+    const renamed = (await api.patch(`/api/todos/${created.id}`).send({ title: "Shipped" }).expect(200)).body.data;
+    assert.equal(renamed.status, "done");
+    assert.deepEqual(renamed.extra_reminders, ["2031-01-01T09:00:00.000Z"]);
+    assert.ok(renamed.completed_at);
   });
 });
 

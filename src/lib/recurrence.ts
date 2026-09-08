@@ -23,6 +23,27 @@ export const LEAD_OPTIONS: Array<{ value: number | null; label: string }> = [
   { value: 1440, label: "1 day before" },
 ];
 
+/** The fewest days between two occurrences: 1 for daily, 2 for Mon/Wed/Fri, 14 for one day every other week. */
+function minGapDays(rule: Pick<Recurrence, "freq" | "interval" | "weekdays">): number {
+  const interval = Math.max(1, rule.interval || 1);
+  if (rule.freq === "daily") return interval;
+  const days = [...new Set(rule.weekdays)].sort((a, b) => a - b);
+  if (days.length === 0) return 7 * interval;
+  let gap = 7 * interval - (days[days.length - 1] - days[0]);
+  for (let index = 1; index < days.length; index += 1) gap = Math.min(gap, days[index] - days[index - 1]);
+  return gap;
+}
+
+/**
+ * The longest lead the rule can honour, mirroring the server's rule: the task
+ * moves on to its next occurrence at the midnight after the previous one, so a
+ * text further ahead than that would already be late when it was scheduled.
+ */
+export function maxLeadMinutes(rule: Pick<Recurrence, "freq" | "interval" | "weekdays" | "time">): number {
+  const [hour, minute] = rule.time.split(":").map(Number);
+  return (minGapDays(rule) - 1) * 1440 + (hour || 0) * 60 + (minute || 0);
+}
+
 /** "Every day at 8:00 AM", "Every 2 days at 8:00 AM", "Mon, Wed, Fri at 9:00 PM". */
 export function describeRecurrence(rule: Recurrence): string {
   const at = `at ${humanTime(rule.time)}`;
@@ -40,6 +61,7 @@ export function describeRecurrence(rule: Recurrence): string {
   return `${names}${cadence} ${at}`;
 }
 
+/** "No text", "At the time", "15 minutes before", "2 days before". */
 export function describeLead(lead: number | null | undefined): string {
   if (lead === null || lead === undefined) return "No text";
   const known = LEAD_OPTIONS.find(option => option.value === lead);

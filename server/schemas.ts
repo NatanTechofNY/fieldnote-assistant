@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { maxLeadMinutes } from "./recurrence.ts";
 import { isSendblueReaction } from "./sendblue-service.ts";
 
 /* Shared primitives ---------------------------------------------------------- */
@@ -54,17 +55,26 @@ export const timezone = z.string().min(1).max(100).refine(value => {
  */
 export const recurrence = z.object({
   freq: z.enum(["daily", "weekly"]),
-  interval: z.coerce.number().int().min(1).max(365).nullable().optional().transform(value => value ?? 1),
-  weekdays: z.array(z.coerce.number().int().min(0).max(6)).max(7).nullable().optional()
-    .transform(value => [...new Set(value ?? [])].sort()),
+  interval: z.number().int().min(1).max(365).nullable().optional().transform(value => value ?? 1),
+  weekdays: z.array(z.number().int().min(0).max(6)).max(7).nullable().optional()
+    .transform(value => [...new Set(value ?? [])].sort((a, b) => a - b)),
   time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time"),
-  lead_minutes: z.coerce.number().int().min(0).max(1440).nullable().optional().transform(value => value ?? null),
+  lead_minutes: z.number().int().min(0).max(1440).nullable().optional().transform(value => value ?? null),
 }).strict().superRefine((value, context) => {
   if (value.freq === "weekly" && value.weekdays.length === 0) {
     context.addIssue({ code: "custom", path: ["weekdays"], message: "Pick at least one weekday" });
   }
+  // The row moves to its next occurrence at the midnight after the previous
+  // one, so a reminder further ahead than that would already be in the past
+  // when it was scheduled and go out at midnight instead.
+  if (value.lead_minutes !== null && value.lead_minutes > maxLeadMinutes(value)) {
+    context.addIssue({
+      code: "custom",
+      path: ["lead_minutes"],
+      message: `That reminder would fall before the previous occurrence is over; for this schedule it can be at most ${maxLeadMinutes(value)} minutes ahead`,
+    });
+  }
 });
-export type RecurrenceInput = z.infer<typeof recurrence>;
 export const nullableRecurrence = recurrence.nullable().optional();
 
 /* REST request schemas ------------------------------------------------------- */
@@ -76,7 +86,7 @@ export const subtaskCreate = z.object({
   due_at: nullableIso,
 }).strict();
 
-export const todoCreate = z.object({
+const todoFields = {
   title: z.string().trim().min(1).max(300),
   notes: z.string().max(20_000).nullable().optional(),
   category_id: nullableId,
@@ -85,16 +95,31 @@ export const todoCreate = z.object({
   parent_id: nullableId,
   due_at: nullableIso,
   reminder_at: nullableIso,
-  extra_reminders: z.array(iso).max(20).default([]),
   priority: priority.optional(),
-  status: status.default("pending"),
   started_at: nullableIso,
   completed_at: nullableIso,
   recurrence: nullableRecurrence,
+};
+
+export const todoCreate = z.object({
+  ...todoFields,
+  extra_reminders: z.array(iso).max(20).default([]),
+  status: status.default("pending"),
   subtasks: z.array(subtaskCreate).max(50).nullable().optional(),
 }).strict();
 
-export const todoPatch = todoCreate.omit({ subtasks: true }).partial()
+/*
+ * Not derived from `todoCreate` with `.partial()`, because `.partial()` keeps
+ * the create defaults: a patch that only renamed a task would still parse with
+ * `status: "pending"` and `extra_reminders: []`, reopening a finished task and
+ * dropping its extra reminders. Every field here is optional with no default,
+ * so an absent key stays absent and the handler keeps the stored value.
+ */
+export const todoPatch = z.object({
+  ...todoFields,
+  extra_reminders: z.array(iso).max(20).optional(),
+  status: status.optional(),
+}).partial().strict()
   .refine((value) => Object.keys(value).length > 0, "No changes provided");
 
 export const memoryCreate = z.object({

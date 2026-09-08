@@ -68,7 +68,9 @@ CREATE TABLE IF NOT EXISTS todo_completions (
   created_at TEXT NOT NULL,
   UNIQUE(todo_id, occurrence_at)
 );
-CREATE INDEX IF NOT EXISTS todo_completions_todo ON todo_completions(todo_id, occurrence_at);
+-- The UNIQUE constraint above already indexes (todo_id, occurrence_at); the
+-- separate index an earlier build created only duplicated it.
+DROP INDEX IF EXISTS todo_completions_todo;
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,

@@ -248,12 +248,12 @@
                 "type": ["integer", "null"],
                 "minimum": 0,
                 "maximum": 1440,
-                "description": "Minutes before the time to text a reminder; 0 texts at the time; null sends no text"
+                "description": "Minutes before the time to text a reminder; 0 texts at the time; null sends no text. Must not reach back past the midnight before the occurrence: at most the minutes into the day of `time` for a daily rule, plus 1440 for each further day between occurrences"
               }
             },
             "required": ["freq", "interval", "weekdays", "time", "lead_minutes"],
             "additionalProperties": false,
-            "description": "Repeat rule for a recurring todo, or null. When set, due_at, reminder_at, and extra_reminders are derived from it and must be null."
+            "description": "Repeat rule for a recurring todo, or null. When set, due_at, reminder_at, and extra_reminders are derived from it and must be null, and subtasks must be null or empty."
           },
           "subtasks": {
             "type": ["array", "null"],
@@ -386,12 +386,12 @@
                     "type": ["integer", "null"],
                     "minimum": 0,
                     "maximum": 1440,
-                    "description": "Minutes before the time to text a reminder; 0 texts at the time; null sends no text"
+                    "description": "Minutes before the time to text a reminder; 0 texts at the time; null sends no text. Must not reach back past the midnight before the occurrence: at most the minutes into the day of `time` for a daily rule, plus 1440 for each further day between occurrences"
                   }
                 },
                 "required": ["freq", "interval", "weekdays", "time", "lead_minutes"],
                 "additionalProperties": false,
-                "description": "Full replacement repeat rule, or null for unchanged. Use clear_fields to stop repeating."
+                "description": "Full replacement repeat rule, or null for unchanged. The same rule sent back changes nothing; a changed rule opens the next occurrence. Use clear_fields to stop repeating. While a rule is set, due_at and reminder_at in the patch are refused."
               },
               "clear_fields": {
                 "type": "array",
@@ -735,7 +735,7 @@
     "type": "function",
     "function": {
       "name": "create_reminder",
-      "description": "Creates a primary or additional reminder for an exact todo. Resolve the date-time before calling.",
+      "description": "Creates a primary or additional reminder for an exact todo. Resolve the date-time first. A repeating todo's primary reminder is its rule's lead_minutes and is refused here.",
       "strict": true,
       "parameters": {
         "type": "object",
@@ -793,7 +793,7 @@
     "type": "function",
     "function": {
       "name": "update_reminder",
-      "description": "Moves one exact reminder to a new time after resolving which reminder the user means.",
+      "description": "Moves one exact reminder to a new time after resolving which one the user means. A repeating todo's due and primary reminders come from its rule and are refused; use update_todo.",
       "strict": true,
       "parameters": {
         "type": "object",
@@ -817,7 +817,7 @@
     "type": "function",
     "function": {
       "name": "delete_reminder",
-      "description": "Deletes one exact reminder after explicit user confirmation.",
+      "description": "Deletes one exact reminder after explicit user confirmation. A repeating todo's due and primary reminders come from its rule and are refused; null its lead_minutes with update_todo.",
       "strict": true,
       "parameters": {
         "type": "object",

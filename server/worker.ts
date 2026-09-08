@@ -7,7 +7,7 @@ import { recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgen
 import { composeDigestTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
 import { claimExternalEvents, completeExternalEvent, pollGranola } from "./event-ingestion.ts";
-import { localParts, zonedToInstant } from "./local-time.ts";
+import { localParts } from "./local-time.ts";
 import { sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
@@ -89,33 +89,43 @@ function inQuietHours(time: string, start: string | null, end: string | null): b
  * midnight rather than sitting overdue for ever. The worker is the only writer
  * that does this, so the row cannot be rolled twice, and it happens whether or
  * not texting is enabled because it is scheduling, not delivery.
+ *
+ * Each row is rolled on its own: a rule the engine cannot walk is logged and
+ * skipped rather than allowed to stop every row behind it, on every tick.
  */
 export function rollRecurringTodos(db: Db, search: SearchWriter, timezone: string, at = new Date()): number {
   const today = localParts(at, timezone).date;
-  // The next occurrence is searched from the start of today rather than from
-  // now, so a worker that was down overnight still lands on today's slot (late,
-  // and so texted at once) instead of skipping to tomorrow's.
-  const from = new Date(zonedToInstant(today, "00:00", timezone).getTime() - 1);
   const rows = db.prepare(`
     SELECT * FROM todos
-    WHERE user_id=? AND recurrence_json IS NOT NULL AND due_at IS NOT NULL AND status<>'cancelled'
+    WHERE user_id=? AND recurrence_json IS NOT NULL AND status<>'cancelled'
   `).all(USER_ID) as TodoRow[];
   let rolled = 0;
   for (const row of rows) {
-    const rule = parseRecurrence(row.recurrence_json);
-    if (!rule || !row.due_at) continue;
-    if (localParts(new Date(row.due_at), timezone).date >= today) continue;
-    const next = materializeRecurrence(rule, timezone, from);
-    db.transaction(() => {
-      db.prepare(`
-        UPDATE todos SET due_at=?,reminder_at=?,extra_reminders_json='[]',status='pending',
-          started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND user_id=?
-      `).run(next.due_at, next.reminder_at, now(), row.id, USER_ID);
-      const updated = getTodo(db, row.id);
-      if (updated) syncTodoReminders(db, updated);
-      queueIndexJob(db, "todo", row.id);
-    })();
-    rolled += 1;
+    try {
+      const rule = parseRecurrence(row.recurrence_json);
+      if (!rule) continue;
+      if (row.due_at && localParts(new Date(row.due_at), timezone).date >= today) continue;
+      // The next occurrence is the first on today's date or later, decided on
+      // dates so a worker that was down overnight still lands on today's slot
+      // (late, and so texted at once) instead of skipping to tomorrow's. A row
+      // that has lost its date altogether is put back on the series from now.
+      const next = materializeRecurrence(rule, timezone, row.due_at ? { date: today } : at);
+      // A block is about the task, not the day, so it survives the roll; a
+      // finished or started occurrence does not.
+      const status = row.status === "blocked" ? "blocked" : "pending";
+      db.transaction(() => {
+        db.prepare(`
+          UPDATE todos SET due_at=?,reminder_at=?,extra_reminders_json='[]',status=?,
+            started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND user_id=?
+        `).run(next.due_at, next.reminder_at, status, now(), row.id, USER_ID);
+        const updated = getTodo(db, row.id);
+        if (updated) syncTodoReminders(db, updated);
+        queueIndexJob(db, "todo", row.id);
+      })();
+      rolled += 1;
+    } catch (error) {
+      console.error(`Rolling repeating todo ${row.id} failed`, error);
+    }
   }
   if (rolled) search.flushSoon();
   return rolled;

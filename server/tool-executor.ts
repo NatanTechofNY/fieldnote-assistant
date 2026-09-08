@@ -8,14 +8,17 @@ import {
   getMemory, getReminders, getStoreProduct, getTodo, id, insertOutboundChannelMessage, instant, now,
   queueIndexJob, recordMessageReaction, syncTodoReminders, USER_ID, userTimezone,
 } from "./db.ts";
-import { parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule } from "./recurrence.ts";
+import {
+  DERIVED_REMINDER, DERIVED_SCHEDULE, REPEATING_PARENT, REPEATING_SUBTASK,
+  isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
+} from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
 import type { SmsProvider } from "./integrations.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
 import { toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
-import { completeParentIfSettled, completionStats, syncOccurrenceCompletion } from "./todo-status.ts";
+import { completeParentIfSettled, completionStats, hasSubtasks, syncOccurrenceCompletion } from "./todo-status.ts";
 import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 
 /**
@@ -38,8 +41,6 @@ const todoJson = (row: TodoRow) => ({
   last_completed_at: row.last_completed_at ?? null,
   created_at: row.created_at, updated_at: row.updated_at,
 });
-
-const REPEATING_SUBTASK = "A repeating todo cannot be filed under another task";
 
 const memoryJson = (row: MemoryRow) => ({
   id: row.id, title: row.title, content: row.content, kind: row.kind,
@@ -437,7 +438,14 @@ export async function executeAgentTool(
     const repeat = planRecurrenceWrite(
       input.recurrence as RecurrenceRule | null | undefined, undefined, userTimezone(db),
     );
-    if (repeat.recurrence_json && input.parent_id) throw new Error(REPEATING_SUBTASK);
+    const subtasks = Array.isArray(input.subtasks) ? input.subtasks : [];
+    const extras = Array.isArray(input.extra_reminders) ? input.extra_reminders : [];
+    if (repeat.recurrence_json) {
+      if (input.parent_id) throw new Error(REPEATING_SUBTASK);
+      if (subtasks.length) throw new Error(REPEATING_PARENT);
+      if (input.due_at || input.reminder_at || extras.length) throw new Error(DERIVED_SCHEDULE);
+    }
+    if (input.parent_id && getTodo(db, input.parent_id as string)?.recurrence_json) throw new Error(REPEATING_PARENT);
     const schedule = repeat.derived ?? {
       due_at: (input.due_at as string | null | undefined) ?? null,
       reminder_at: (input.reminder_at as string | null | undefined) ?? null,
@@ -458,7 +466,7 @@ export async function executeAgentTool(
       );
       const created = getTodo(db, todoId);
       if (created) syncTodoReminders(db, created);
-      for (const raw of Array.isArray(input.subtasks) ? input.subtasks : []) {
+      for (const raw of subtasks) {
         const subtask = raw as Input;
         const childId = id("todo");
         db.prepare(`
@@ -504,26 +512,43 @@ export async function executeAgentTool(
       : (patch.recurrence as RecurrenceRule | null | undefined) ?? undefined;
     const repeat = planRecurrenceWrite(incomingRule, current, userTimezone(db));
     const parentId = value("parent_id", current.parent_id) as string | null;
-    if (repeat.recurrence_json && parentId) throw new Error(REPEATING_SUBTASK);
+    if (repeat.recurrence_json) {
+      if (parentId) throw new Error(REPEATING_SUBTASK);
+      const extras = Array.isArray(patch.extra_reminders) ? patch.extra_reminders : [];
+      if (patch.due_at || patch.reminder_at || extras.length) throw new Error(DERIVED_SCHEDULE);
+      if (!current.recurrence_json && hasSubtasks(db, current.id)) throw new Error(REPEATING_PARENT);
+    }
+    if (parentId && parentId !== current.parent_id && getTodo(db, parentId)?.recurrence_json) {
+      throw new Error(REPEATING_PARENT);
+    }
     const schedule = repeat.derived ?? {
       due_at: value("due_at", current.due_at) as string | null,
       reminder_at: value("reminder_at", current.reminder_at) as string | null,
       extra_reminders_json: JSON.stringify(value("extra_reminders", JSON.parse(current.extra_reminders_json))),
     };
+    // A rule change opens a new occurrence: the finished one is in the log
+    // already, and a done status is not carried on to a day that has not come.
+    const reopen = repeat.occurrenceMoved && (current.status === "done" || current.status === "in_progress");
     const updated = db.transaction(() => {
       db.prepare(`
         UPDATE todos SET title=?,notes=?,category_id=?,life_area_id=?,life_area_source=?,parent_id=?,due_at=?,reminder_at=?,
-          extra_reminders_json=?,priority=?,recurrence_json=?,updated_at=? WHERE id=? AND user_id=?
+          extra_reminders_json=?,priority=?,recurrence_json=?,status=?,started_at=?,completed_at=?,updated_at=?
+        WHERE id=? AND user_id=?
       `).run(
         value("title", current.title), value("notes", current.notes),
         value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
         parentId, schedule.due_at, schedule.reminder_at, schedule.extra_reminders_json,
-        value("priority", current.priority), repeat.recurrence_json, now(), current.id, USER_ID,
+        value("priority", current.priority), repeat.recurrence_json,
+        reopen ? "pending" : current.status,
+        repeat.occurrenceMoved ? null : current.started_at,
+        repeat.occurrenceMoved ? null : current.completed_at,
+        now(), current.id, USER_ID,
       );
       const row = getTodo(db, todoId) as TodoRow;
       syncTodoReminders(db, row);
+      syncOccurrenceCompletion(db, row);
       queueIndexJob(db, "todo", todoId);
-      return row;
+      return getTodo(db, todoId) as TodoRow;
     })();
     search.flushSoon();
     return todoJson(updated);
@@ -677,6 +702,7 @@ export async function executeAgentTool(
     if (!todo) throw new Error("Todo not found");
     const reminderAt = input.reminder_at as string;
     const extras = JSON.parse(todo.extra_reminders_json) as string[];
+    if (isDerivedReminder(todo, input.slot === "extra" ? "escalation" : "pre")) throw new Error(DERIVED_REMINDER);
     db.transaction(() => {
       if (input.slot === "extra") {
         db.prepare("UPDATE todos SET extra_reminders_json=?,updated_at=? WHERE id=? AND user_id=?")
@@ -705,6 +731,7 @@ export async function executeAgentTool(
     if (!reminder) throw new Error("Reminder not found");
     const todo = getTodo(db, reminder.todo_id);
     if (!todo) throw new Error("Todo not found");
+    if (isDerivedReminder(todo, reminder.kind)) throw new Error(DERIVED_REMINDER);
     db.transaction(() => {
       if (reminder.kind === "due") {
         db.prepare("UPDATE todos SET due_at=?,updated_at=? WHERE id=? AND user_id=?")
@@ -731,6 +758,7 @@ export async function executeAgentTool(
     if (!reminder) throw new Error("Reminder not found");
     const todo = getTodo(db, reminder.todo_id);
     if (!todo) throw new Error("Todo not found");
+    if (isDerivedReminder(todo, reminder.kind)) throw new Error(DERIVED_REMINDER);
     db.transaction(() => {
       if (reminder.kind === "due") {
         db.prepare("UPDATE todos SET due_at=NULL,updated_at=? WHERE id=? AND user_id=?")
