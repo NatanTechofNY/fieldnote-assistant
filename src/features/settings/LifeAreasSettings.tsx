@@ -29,10 +29,12 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
   });
   const rename = useMutation({
     mutationFn: (input: { id: string; name: string }) => api.updateLifeArea(input.id, { name: input.name }),
-    onSuccess: () => {
+    onSuccess: (area) => {
       setEditing(null);
-      // The name sits on every todo and memory card of the area, not only here.
+      // The name sits on every todo and memory card of the area, not only here,
+      // and a group's name is also its conversation's title.
       invalidateTaxonomy(queryClient);
+      if (area.is_group) void queryClient.invalidateQueries({ queryKey: ["channel-conversations"] });
       notify("Classification renamed");
     },
     onError: (error: Error) => notify(error.message),
@@ -41,6 +43,7 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
     mutationFn: api.deleteLifeArea,
     onSuccess: () => {
       invalidateTaxonomy(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["channel-conversations"] });
       notify("Classification removed; its records are now unclassified");
     },
     onError: (error: Error) => notify(error.message),
@@ -52,6 +55,13 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
     rename.mutate({ id: editing.id, name: trimmed });
   };
   const subtitle = (area: LifeArea) => area.is_builtin ? "Default classification" : area.is_group ? "Group chat" : area.slug;
+  // Removing a group's area is more than unfiling: the group chat can only see
+  // what is filed in its area, so its earlier todos and memories go out of its
+  // reach (they stay in the app for the owner) and their reminders come to the
+  // owner instead of the group.
+  const removePrompt = (area: LifeArea) => area.is_group
+    ? `Remove ${area.name}? Its todos and memories stay in the app but become unclassified, so the group chat will no longer see them or be reminded about them; the next message there starts a fresh classification.`
+    : `Remove ${area.name}? Existing records will become unclassified.`;
   return <div>
     <p className="integration-copy">Life areas classify todos and memories across the app. The Agent discovers custom areas automatically before assigning them, and gives each group chat its own.</p>
     <div className="life-area-settings-list">
@@ -72,7 +82,7 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
           </form>
           : <div><strong>{area.name}</strong><small>{subtitle(area)}</small></div>}
         {!area.is_builtin && editing?.id !== area.id && <button className="button icon ghost" aria-label={`Rename ${area.name}`} onClick={() => setEditing({ id: area.id, name: area.name })}><Pencil size={13}/></button>}
-        {!area.is_builtin && <button className="button icon ghost" aria-label={`Remove ${area.name}`} disabled={remove.isPending} onClick={() => confirm(`Remove ${area.name}? Existing records will become unclassified.`) && remove.mutate(area.id)}><Trash2 size={13}/></button>}
+        {!area.is_builtin && <button className="button icon ghost" aria-label={`Remove ${area.name}`} disabled={remove.isPending} onClick={() => confirm(removePrompt(area)) && remove.mutate(area.id)}><Trash2 size={13}/></button>}
       </div>)}
     </div>
     <form className="life-area-add" onSubmit={event => { event.preventDefault(); create.mutate(); }}>

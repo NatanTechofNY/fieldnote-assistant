@@ -1164,7 +1164,7 @@
     "type": "function",
     "function": {
       "name": "name_group_chat",
-      "description": "Names the group chat you are in, which labels the group's own life area in the owner's app. Call once when the turn context says the area is new, or when asked to rename the group. Group chats only.",
+      "description": "Names the group chat you are in, which labels the group's own life area in the owner's app. Call once when the turn context says the area is new, or when the owner asks to rename the group. Group chats only.",
       "strict": true,
       "parameters": {
         "type": "object",

@@ -13,6 +13,7 @@ import {
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
+import { speakerNameOf } from "./group-thread.ts";
 import type { SmsProvider } from "./integrations.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
@@ -202,7 +203,12 @@ function agentEvidence<T extends {
  * stop at this area and this thread. The owner sees the group's records from
  * the app and their own 1:1 thread; the fence is one-directional.
  */
-export type GroupScope = { lifeAreaId: string; threadId: string };
+export type GroupScope = {
+  lifeAreaId: string;
+  threadId: string;
+  /** The assistant has not yet answered in this group since the area was created, so it still owes it a name. */
+  lifeAreaIsNew?: boolean;
+};
 
 /**
  * What a tool needs to know about the turn it is running inside. Every other
@@ -223,6 +229,12 @@ export type ToolTurnContext = {
   groupId?: string;
   /** Set on a group turn; the single field that says "this turn belongs to a group". */
   scope?: GroupScope;
+  /**
+   * The message being answered came from the recipient's own number. Decided by
+   * the worker, not by the agent from a label, so the tools that only the owner
+   * may drive in a group have something to check.
+   */
+  speakerIsOwner?: boolean;
   /** The message being answered, and so the only one a tapback may land on. */
   inboundMessageHandle?: string;
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
@@ -271,23 +283,19 @@ function scopedMemory(db: Db, memoryId: string, scope: GroupScope | undefined): 
   return row;
 }
 
-/** The name a group message was stored with, when the speaker had one. */
-function speakerNameOf(metadataJson: string): string | null {
-  try {
-    const name = (JSON.parse(metadataJson) as { speakerName?: unknown }).speakerName;
-    return typeof name === "string" && name ? name : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The area a new record is filed under: the group's own in a group, else what the agent chose. */
-function lifeAreaForWrite(
+/**
+ * How a new record is classified: in a group, the group's own area and no
+ * category; elsewhere, what the agent chose. Categories are the owner's taxonomy
+ * and a group turn has no way to list them, so accepting one would only make
+ * the tool an oracle for their names.
+ */
+function classificationForWrite(
   scope: GroupScope | undefined,
-  chosen: unknown,
-): { life_area_id: string | null; life_area_source: "agent" | null } {
-  const lifeAreaId = scope?.lifeAreaId ?? (typeof chosen === "string" && chosen ? chosen : null);
-  return { life_area_id: lifeAreaId, life_area_source: lifeAreaId ? "agent" : null };
+  chosen: { life_area_id?: unknown; category_id?: unknown },
+): { life_area_id: string | null; life_area_source: "agent" | null; category_id: string | null } {
+  const lifeAreaId = scope?.lifeAreaId ?? (typeof chosen.life_area_id === "string" && chosen.life_area_id ? chosen.life_area_id : null);
+  const categoryId = !scope && typeof chosen.category_id === "string" && chosen.category_id ? chosen.category_id : null;
+  return { life_area_id: lifeAreaId, life_area_source: lifeAreaId ? "agent" : null, category_id: categoryId };
 }
 
 /**
@@ -375,6 +383,12 @@ export async function executeAgentTool(
   }
   if (name === "name_group_chat") {
     if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat");
+    // The first name is the assistant's to give; after that the area is the
+    // owner's record, and a rename asked for by anyone else is refused here
+    // rather than left to the prompt.
+    if (!scope.lifeAreaIsNew && !context.speakerIsOwner) {
+      throw new Error("Only the owner can rename the group chat");
+    }
     const groupName = input.name as string;
     renameLifeArea(db, scope.lifeAreaId, groupName);
     search.flushSoon();
@@ -472,12 +486,14 @@ export async function executeAgentTool(
     const stats = completionStats(db, todo);
     return {
       todo: todoJson(todo),
+      // The owner may file a subtask of a group todo elsewhere from the app;
+      // from inside the group that subtask does not exist.
       subtasks: (db.prepare(`
         SELECT t.*,c.name category_name,la.name life_area_name,la.slug life_area_slug
         FROM todos t LEFT JOIN categories c ON c.id=t.category_id
         LEFT JOIN life_areas la ON la.id=t.life_area_id
-        WHERE t.user_id=? AND t.parent_id=? ORDER BY t.created_at
-      `).all(USER_ID, todo.id) as TodoRow[]).map(todoJson),
+        WHERE t.user_id=? AND t.parent_id=? ${scope ? "AND t.life_area_id=?" : ""} ORDER BY t.created_at
+      `).all(...(scope ? [USER_ID, todo.id, scope.lifeAreaId] : [USER_ID, todo.id])) as TodoRow[]).map(todoJson),
       reminders: getReminders(db, todo.id),
       ...(stats ? {
         completions: stats.completions.map(row => ({ occurrence_at: row.occurrence_at, completed_at: row.completed_at })),
@@ -579,7 +595,7 @@ export async function executeAgentTool(
       if (!parent) throw new Error("Parent todo not found");
       if (parent.recurrence_json) throw new Error(REPEATING_PARENT);
     }
-    const area = lifeAreaForWrite(scope, input.life_area_id);
+    const area = classificationForWrite(scope, input);
     const schedule = repeat.derived ?? {
       due_at: (input.due_at as string | null | undefined) ?? null,
       reminder_at: (input.reminder_at as string | null | undefined) ?? null,
@@ -593,7 +609,7 @@ export async function executeAgentTool(
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         todoId, USER_ID, input.title as string, input.notes ?? null,
-        input.category_id ?? null, area.life_area_id,
+        area.category_id, area.life_area_id,
         area.life_area_source, input.parent_id ?? null, schedule.due_at,
         schedule.reminder_at, schedule.extra_reminders_json,
         input.priority ?? null, "pending", null, null, repeat.recurrence_json,
@@ -614,7 +630,7 @@ export async function executeAgentTool(
           ) VALUES(?,?,?,?,?,?,?,?,?,NULL,'[]',?,'pending',?,?)
         `).run(
           childId, USER_ID, subtask.title as string, subtask.notes ?? null,
-          input.category_id ?? null, area.life_area_id,
+          area.category_id, area.life_area_id,
           area.life_area_source, todoId, subtask.due_at ?? null,
           subtask.priority ?? null, timestamp, timestamp,
         );
@@ -677,7 +693,7 @@ export async function executeAgentTool(
         WHERE id=? AND user_id=?
       `).run(
         value("title", current.title), value("notes", current.notes),
-        value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
+        scope ? current.category_id : value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
         parentId, schedule.due_at, schedule.reminder_at, schedule.extra_reminders_json,
         value("priority", current.priority), repeat.recurrence_json,
         reopen ? "pending" : current.status,
@@ -712,7 +728,7 @@ export async function executeAgentTool(
       const row = getTodo(db, todoId) as TodoRow;
       syncTodoReminders(db, row);
       syncOccurrenceCompletion(db, row);
-      completeParentIfSettled(db, row);
+      completeParentIfSettled(db, row, scope?.lifeAreaId);
       queueIndexJob(db, "todo", todoId);
       // Re-read: logging an occurrence stamps last_completed_at on the row.
       return getTodo(db, todoId) as TodoRow;
@@ -739,7 +755,7 @@ export async function executeAgentTool(
   if (name === "create_memory") {
     const timestamp = now();
     const memoryId = id("memory");
-    const area = lifeAreaForWrite(scope, input.life_area_id);
+    const area = classificationForWrite(scope, input);
     db.prepare(`
       INSERT INTO memories(
         id,user_id,title,content,kind,mood_label,mood_score,category_id,life_area_id,life_area_source,
@@ -747,7 +763,7 @@ export async function executeAgentTool(
       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       memoryId, USER_ID, input.title ?? null, input.content as string, input.kind || "note",
-      input.mood_label ?? null, input.mood_score ?? null, input.category_id ?? null,
+      input.mood_label ?? null, input.mood_score ?? null, area.category_id,
       area.life_area_id, area.life_area_source,
       input.occurred_at ?? null, input.review_worthy === true ? 1 : 0,
       JSON.stringify(input.tags ?? []), timestamp, timestamp,
@@ -782,7 +798,7 @@ export async function executeAgentTool(
       `).run(
         value("kind", current.kind), value("title", current.title), value("content", current.content),
         value("mood_label", current.mood_label), value("mood_score", current.mood_score),
-        value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
+        scope ? current.category_id : value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
         value("occurred_at", current.occurred_at),
         value("review_worthy", Boolean(current.review_worthy)) ? 1 : 0,
         JSON.stringify(value("tags", JSON.parse(current.tags_json))), now(), memoryId, USER_ID,
@@ -869,7 +885,7 @@ export async function executeAgentTool(
   if (name === "update_reminder") {
     const reminderId = input.id as string;
     const reminderAt = input.reminder_at as string;
-    const reminder = getReminders(db).find(row => row.id === reminderId);
+    const reminder = getReminders(db, undefined, { lifeAreaId: scope?.lifeAreaId }).find(row => row.id === reminderId);
     if (!reminder) throw new Error("Reminder not found");
     const todo = scopedTodo(db, reminder.todo_id, scope);
     if (!todo) throw new Error("Reminder not found");
@@ -896,7 +912,7 @@ export async function executeAgentTool(
   if (name === "delete_reminder") {
     if (input.confirmed !== true) throw new Error("Explicit confirmation is required");
     const reminderId = input.id as string;
-    const reminder = getReminders(db).find(row => row.id === reminderId);
+    const reminder = getReminders(db, undefined, { lifeAreaId: scope?.lifeAreaId }).find(row => row.id === reminderId);
     if (!reminder) throw new Error("Reminder not found");
     const todo = scopedTodo(db, reminder.todo_id, scope);
     if (!todo) throw new Error("Reminder not found");

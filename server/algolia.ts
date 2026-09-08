@@ -7,7 +7,7 @@ import {
 import { getNotificationPreferences, getSearchPreferences } from "./integrations.ts";
 import { localParts } from "./local-time.ts";
 import { parseRecurrence, recurrenceJson } from "./recurrence.ts";
-import { groupIdOfAddress } from "./sendblue-service.ts";
+import { groupIdOfAddress, speakerNameOf } from "./group-thread.ts";
 import type { ChannelMessageRow, Db, EntityType, IndexJobRow } from "./types.ts";
 
 type SearchRecord = Record<string, unknown> & { objectID: string };
@@ -22,16 +22,6 @@ function isInternalChannelMessage(row: ChannelMessageRow): boolean {
     return (JSON.parse(row.metadata_json) as { internal?: unknown }).internal === true;
   } catch {
     return false;
-  }
-}
-
-/** The name a group message was stored with, when the speaker had one. */
-function speakerNameOf(metadataJson: string): string | null {
-  try {
-    const name = (JSON.parse(metadataJson) as { speakerName?: unknown }).speakerName;
-    return typeof name === "string" && name ? name : null;
-  } catch {
-    return null;
   }
 }
 

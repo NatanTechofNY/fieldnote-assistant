@@ -8,10 +8,11 @@ import { composeDigestTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
 import { claimExternalEvents, completeExternalEvent, pollGranola } from "./event-ingestion.ts";
 import { localParts } from "./local-time.ts";
-import { sendSms, startTypingIndicator } from "./messaging.ts";
+import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
-import { groupAddress, groupIdOfAddress, readSendblueInbound, type StopTypingIndicator } from "./sendblue-service.ts";
+import { groupAddress, groupIdOfAddress, OWNER_SPEAKER_NAME } from "./group-thread.ts";
+import { readSendblueInbound, type StopTypingIndicator } from "./sendblue-service.ts";
 import type { Db, DigestBriefRow, ReminderRow, TodoRow } from "./types.ts";
 
 type SearchWriter = Pick<AlgoliaSync, "flushSoon" | "flush">;
@@ -91,7 +92,8 @@ function groupTurn(
 ): { address: string; metadata: Record<string, unknown> } {
   const preferences = getNotificationPreferences(db);
   const contact = preferences.trustedContacts.find(entry => entry.phone === from);
-  const speakerName = contact?.name ?? (from === preferences.recipientPhone ? "the owner" : undefined);
+  const speakerIsOwner = from === preferences.recipientPhone;
+  const speakerName = contact?.name ?? (speakerIsOwner ? OWNER_SPEAKER_NAME : undefined);
   return {
     address: groupAddress(groupId),
     metadata: {
@@ -99,6 +101,9 @@ function groupTurn(
       ...(groupName ? { groupName } : {}),
       speaker: from,
       ...(speakerName ? { speakerName } : {}),
+      // What the tools that only the owner may drive check, decided here where
+      // the recipient number is known rather than by the agent from a label.
+      ...(speakerIsOwner ? { speakerIsOwner: true } : {}),
     },
   };
 }
@@ -166,10 +171,18 @@ function claimDueReminders(db: Db, limit = 50): ReminderRow[] {
   const timestamp = now();
   const staleClaim = new Date(Date.now() - 10 * 60_000).toISOString();
   return db.transaction(() => {
+    /*
+     * A reminder goes back to the group only while its todo is still filed in
+     * that group's life area. The thread pointer alone is not enough: the owner
+     * can move a group todo to Work or Personal, or remove the group's area, and
+     * from then on the todo is theirs alone and so is its reminder.
+     */
     const rows = db.prepare(`
-      SELECT r.*,t.title todo_title,ct.address reply_address FROM reminders r
+      SELECT r.*,t.title todo_title,t.life_area_id todo_life_area_id,ct.address reply_address FROM reminders r
       JOIN todos t ON t.id=r.todo_id
-      LEFT JOIN channel_threads ct ON ct.id=t.reply_thread_id
+      LEFT JOIN channel_threads ct
+        ON ct.id=t.reply_thread_id
+        AND EXISTS (SELECT 1 FROM life_areas la WHERE la.thread_id=ct.id AND la.id=t.life_area_id)
       WHERE r.user_id=? AND r.status IN ('pending','failed') AND r.kind<>'due'
         AND COALESCE(r.available_at,r.scheduled_for)<=?
         AND (r.claimed_at IS NULL OR r.claimed_at<?)
@@ -196,9 +209,11 @@ const NAMED_SUBTASKS = 3;
  * characters, and the wording stays inside GSM-7 so a checklist does not halve
  * the room a segment has.
  */
-function reminderBody(db: Db, reminder: ReminderRow): string {
+function reminderBody(db: Db, reminder: ReminderRow, groupBound: boolean): string {
   const headline = `Reminder: ${reminder.todo_title || "You have a task due."}`;
-  const open = openSubtasks(db, reminder.todo_id);
+  // Into a group, only the steps the group can see; the owner may have filed a
+  // private one under the same parent from the app.
+  const open = openSubtasks(db, reminder.todo_id, groupBound ? reminder.todo_life_area_id ?? undefined : undefined);
   if (!open.length) return headline;
   const named = open.slice(0, NAMED_SUBTASKS).map(subtask => subtask.title);
   const rest = open.length - named.length;
@@ -236,16 +251,19 @@ async function deliverReminder(
     return;
   }
   try {
-    const content = reminderBody(db, reminder);
     /*
      * A todo asked for in a group chat is reminded about in that chat, so
      * everyone who heard the ask hears the reminder; anything else goes to the
      * recipient's own number. The group id is read off the thread address so
-     * the reminder needs no column of its own.
+     * the reminder needs no column of its own. Only iMessage has groups: with
+     * Sendblue disconnected the reminder would fail on every retry, so it goes
+     * to the recipient instead of nowhere.
      */
     const groupId = reminder.reply_address ? groupIdOfAddress(reminder.reply_address) : undefined;
-    const target = groupId ? (reminder.reply_address as string) : recipient;
-    const message = await send(db, target, content, groupId ? { groupId } : {});
+    const groupBound = Boolean(groupId) && isSmsProviderConnected(db, "sendblue");
+    const content = reminderBody(db, reminder, groupBound);
+    const target = groupBound ? (reminder.reply_address as string) : recipient;
+    const message = await send(db, target, content, groupBound ? { groupId } : {});
     recordOutboundChannelMessage(db, "sms", target, content, message.sid, message.status, {
       kind: "reminder",
       reminderId: reminder.id,

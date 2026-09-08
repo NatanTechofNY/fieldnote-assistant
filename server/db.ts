@@ -997,16 +997,19 @@ const GROUP_AREA_COLORS = ["#2f7d6d", "#b0473f", "#5e6ad2", "#8a6d1f", "#3f7fb0"
 
 /**
  * The life area a group chat files everything under, created on the group's
- * first message. One per thread: the unique index on `thread_id` is what makes
- * two concurrent first messages agree. `isNew` is the assistant's cue to name it.
+ * first message. One per thread: the unique index on `thread_id` guarantees it,
+ * and the SELECT-then-INSERT is safe because the worker is the database's only
+ * writer, not because the index would reconcile two racing callers. `isNew` says
+ * this call inserted it; the runner decides separately whether the assistant
+ * still owes the area a name, since a retried first turn must get the cue again.
  */
 export function ensureGroupLifeArea(
   db: Db,
   threadId: string,
   seedName: string | null | undefined,
-): { id: string; name: string; isNew: boolean } {
-  const existing = db.prepare("SELECT id,name FROM life_areas WHERE user_id=? AND thread_id=?")
-    .get(USER_ID, threadId) as { id: string; name: string } | undefined;
+): { id: string; name: string; createdAt: string; isNew: boolean } {
+  const existing = db.prepare("SELECT id,name,created_at createdAt FROM life_areas WHERE user_id=? AND thread_id=?")
+    .get(USER_ID, threadId) as { id: string; name: string; createdAt: string } | undefined;
   if (existing) return { ...existing, isNew: false };
   const name = seedName?.trim() || "Group chat";
   const groupAreas = (db.prepare("SELECT count(*) count FROM life_areas WHERE user_id=? AND thread_id IS NOT NULL")
@@ -1020,13 +1023,14 @@ export function ensureGroupLifeArea(
     areaId, USER_ID, lifeAreaSlug(db, name), name,
     GROUP_AREA_COLORS[groupAreas % GROUP_AREA_COLORS.length], threadId, timestamp, timestamp,
   );
-  return { id: areaId, name, isNew: true };
+  return { id: areaId, name, createdAt: timestamp, isNew: true };
 }
 
 /**
  * Renames a life area everywhere the name is kept. Todo and memory records in
  * the index carry `life_area_name`, so each one is queued for a rewrite; a group
- * area's thread takes the same name, since the area is what the group is called.
+ * area's thread takes the same name, since the area is what the group is called,
+ * and its messages carry that name as `group_name`, so they are rewritten too.
  */
 export function renameLifeArea(db: Db, areaId: string, name: string): void {
   db.transaction(() => {
@@ -1037,6 +1041,12 @@ export function renameLifeArea(db: Db, areaId: string, name: string): void {
     db.prepare("UPDATE life_areas SET name=?,updated_at=? WHERE id=? AND user_id=?").run(name, timestamp, areaId, USER_ID);
     if (area.thread_id) {
       db.prepare("UPDATE channel_threads SET display_name=?,updated_at=? WHERE id=?").run(name, timestamp, area.thread_id);
+      // "What did we say in the family chat" is a search on group_name, which
+      // every indexed message of the thread carries.
+      const messages = db.prepare(
+        "SELECT id FROM channel_messages WHERE thread_id=? AND role IN ('user','assistant')",
+      ).all(area.thread_id) as Array<{ id: string }>;
+      for (const message of messages) queueIndexJob(db, "channel_message", message.id);
     }
     const todos = db.prepare("SELECT id FROM todos WHERE user_id=? AND life_area_id=?").all(USER_ID, areaId) as Array<{ id: string }>;
     const memories = db.prepare("SELECT id FROM memories WHERE user_id=? AND life_area_id=?").all(USER_ID, areaId) as Array<{ id: string }>;

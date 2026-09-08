@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { GROUP_NAME_SQL, USER_ID, id, likePattern, now, queueIndexJob } from "../db.ts";
-import { groupIdOfAddress } from "../sendblue-service.ts";
+import { groupIdOfAddress } from "../group-thread.ts";
 import { failure, success } from "../http.ts";
 import { currentConversation, enrichChannelMetadata, messageJson } from "../serializers.ts";
 import { type MessageRow } from "../types.ts";

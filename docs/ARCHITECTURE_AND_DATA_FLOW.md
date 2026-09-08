@@ -134,9 +134,9 @@ Todos carry `objectID`, `userId`, `title`, `notes`, `status`, `priority`, `categ
 
 Memories carry `objectID`, `userId`, `kind` (exactly `fact`, `note`, or `journal`), `title`, `content`, `mood_label`, `mood_score`, `category_id`, `category_name`, `tags`, `occurred_at`, `occurred_on` and `occurred_on_text` (the local day, as `2026-07-31` and `Friday, July 31, 2026`, searchable so a date works as a query term), `review_worthy`, `created_at`, `updated_at`, and the same life-area fields.
 
-Messages carry `objectID`, `userId`, `threadId`, `channel`, `role`, `content`, and `created_at`. A message from a group chat also carries `group_id` (a `filterOnly` facet), `group_name`, and, on a user message, `speaker_name` — the name from the trusted-contacts list, so recall can answer "what did Cementa ask for". Phone numbers, provider message IDs, delivery metadata, tool inputs and results, and the raw `metadata_json` stay in SQLite only.
+Messages carry `objectID`, `userId`, `threadId`, `channel`, `role`, `content`, and `created_at`. A message from a group chat also carries `group_id` (a `filterOnly` facet), `group_name`, and, on a user message, `speaker_name` — the name from the trusted-contacts list, so recall can answer "what did Cementa ask for". Phone numbers, provider message IDs, delivery metadata, tool inputs and results, and the raw `metadata_json` stay in SQLite only; the completion request likewise names a group speaker by name or by a redacted number, never the full one.
 
-Life areas are not indexed, but each group chat owns one: `life_areas.thread_id` points at the group's thread, a unique partial index allows one area per thread, and every todo and memory created in that group is filed under it. Renaming the area queues a rewrite of every record that carries its `life_area_name`.
+Life areas are not indexed, but each group chat owns one: `life_areas.thread_id` points at the group's thread, a unique partial index allows one area per thread, and every todo and memory created in that group is filed under it. Renaming the area queues a rewrite of every todo and memory that carries its `life_area_name` and of every message of the thread, whose `group_name` is the same name.
 
 Secrets and highly sensitive content should not go into a memory at all, and therefore never into an index.
 

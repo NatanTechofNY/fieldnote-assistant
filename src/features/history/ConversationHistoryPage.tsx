@@ -284,7 +284,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
                 {workflow && !isGroupAddress(thread.address) ? <Sparkles size={13}/> : thread.channel === "sms" ? <Phone size={13}/> : <MessageSquareText size={13}/>}
               </span>
               <span className="history-thread-copy">
-                <strong>{workflow?.title ?? (thread.channel === "sms" ? 'Text Messages (Phone Number: ' + redact.phone(thread.address) + ')' : "Web Agent")}</strong>
+                <strong>{threadTitle(thread, address => `Phone Number: ${redact.phone(address)}`, "Web Agent")}</strong>
                 <small>{isGroupAddress(thread.address) ? (thread.lastMessage || "No messages") : (workflow?.subtitle ?? (thread.lastMessage || "No messages"))}</small>
               </span>
               <span className="history-count">{thread.messageCount}</span>
@@ -316,9 +316,13 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
             const isJumpTarget = jump?.messageId === message.id;
             const parent = replyParent(message, byProviderId);
             const reactions = messageReactions(message);
-            // Several people write into a group, so each of their bubbles says who.
-            const speakerName = selectedIsGroup && message.role === "user" && typeof message.metadata.speakerName === "string"
-              ? message.metadata.speakerName
+            // Several people write into a group, so each of their bubbles says
+            // who: by name, or by redacted number for a participant the owner
+            // never named, so two unnamed voices still read as two.
+            const speakerName = selectedIsGroup && message.role === "user"
+              ? typeof message.metadata.speakerName === "string" ? message.metadata.speakerName
+                : typeof message.metadata.speaker === "string" ? redact.phone(message.metadata.speaker)
+                  : null
               : null;
             return <article key={message.id} ref={node => { if (node) messageRefs.current.set(message.id, node); else messageRefs.current.delete(message.id); }} className={`history-message ${message.direction} role-${message.role} ${isJumpTarget ? "search-hit" : ""}`}>
               <div className="history-bubble">

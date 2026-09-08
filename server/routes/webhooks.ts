@@ -1,7 +1,7 @@
 import { now } from "../db.ts";
 import { enqueueExternalEvent } from "../event-ingestion.ts";
 import { getNotificationPreferences, getSendblueSecret, getTwilioSecret, recordSendblueNotice, setSmsOptOut } from "../integrations.ts";
-import { isInboundSenderAllowed } from "../messaging.ts";
+import { isInboundSenderAllowed, ownerHasSpokenInGroup } from "../messaging.ts";
 import { normalizeSendblueStatus, readSendblueInbound, SENDBLUE_INBOUND_PATH, SENDBLUE_LINE_ASSIGNED_PATH, SENDBLUE_LINE_BLOCKED_PATH, SENDBLUE_STATUS_PATH, verifySendblueWebhook } from "../sendblue-service.ts";
 import { validateTwilioSignature } from "../twilio-service.ts";
 import { requestWorkerWake } from "../worker.ts";
@@ -101,7 +101,15 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
     const body = inbound.body?.trim() ?? "";
     if (!from || !messageHandle || !body) return res.status(400).json({ received: false });
     const preferences = getNotificationPreferences(db);
-    if (!isInboundSenderAllowed(preferences, { from, groupId, participants })) {
+    const owner = preferences.recipientPhone;
+    const ownerPresent = Boolean(groupId && owner && participants.includes(owner));
+    const ownerHasSpoken = ownerPresent && from !== owner ? ownerHasSpokenInGroup(db, groupId as string, owner as string) : undefined;
+    if (!isInboundSenderAllowed(preferences, { from, groupId, participants, ownerHasSpoken })) {
+      // A stranger texting the line is an anomaly and gets the refusal. Someone
+      // the owner has not trusted writing in a group the owner is in is an
+      // ordinary event, and a 403 would only make Sendblue deliver it three more
+      // times; it is acknowledged and dropped instead.
+      if (ownerPresent) return res.json({ received: true, ignored: "sender" });
       return res.status(403).json({ received: false });
     }
     // Opting out is the recipient's call. A trusted contact in a group is heard

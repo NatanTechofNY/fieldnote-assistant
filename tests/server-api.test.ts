@@ -6,7 +6,7 @@ import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
 import { recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
-import { AlgoliaSync } from "../server/algolia.ts";
+import { AlgoliaSync, configuredIndexNames } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
 import { getTodo, loadStoreCatalog, openDatabase, queueIndexJob, readStoreCatalog, USER_ID } from "../server/db.ts";
@@ -25,10 +25,12 @@ import {
   setSmsProvider,
 } from "../server/integrations.ts";
 import { enqueueExternalEvent } from "../server/event-ingestion.ts";
+import { cleanGroupName, redactedNumber } from "../server/group-thread.ts";
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { executeAgentTool, type ToolTurnContext } from "../server/tool-executor.ts";
+import { sendTwilioSms } from "../server/twilio-service.ts";
 import { rollRecurringTodos, runWorkerOnce, startWorker } from "../server/worker.ts";
 import type { Db } from "../server/types.ts";
 
@@ -1418,6 +1420,12 @@ describe("Agent Studio configuration sync", () => {
       "devcon_assistant_memories",
       "devcon_assistant_messages",
     ], "the messages index is added rather than left out");
+    // A group turn fences the hosted search tool with per-request
+    // `searchParameters` keyed by index name; Agent Studio drops a key that names
+    // an index the tool is not configured with, silently. The keys the runner
+    // sends therefore have to be the names the sync publishes.
+    const fencedIndices = Object.values(configuredIndexNames()).sort();
+    assert.deepEqual(fencedIndices, search.indices.map(entry => entry.index).sort(), "the group fence names exactly the indices the search tool searches");
     const todos = search.indices[0];
     assert.match(String(todos.description), /Do not use for background knowledge/);
     assert.equal(
@@ -3217,6 +3225,12 @@ describe("Sendblue provider", () => {
     });
     await api.put("/api/integrations/sms-provider").send({ provider: "twilio" }).expect(200);
     assert.equal(getNotificationPreferences(db).smsProvider, "twilio");
+
+    // SMS has no group threads, and nothing is attempted before the refusal.
+    await assert.rejects(
+      sendTwilioSms(db, "group:abc", "hello all", { groupId: "abc" }),
+      /Twilio cannot send to an iMessage group chat/,
+    );
   });
 
   it("delivers a due reminder as an iMessage with a secured status callback", async () => {
@@ -4154,12 +4168,27 @@ describe("Sendblue provider", () => {
     );
     assert.equal(isInboundSenderAllowed(preferences, inGroup(STRANGER)), false, "a stranger in a group with the recipient");
     assert.equal(
-      isInboundSenderAllowed({ ...preferences, groupAllowAll: true }, inGroup(STRANGER)),
+      isInboundSenderAllowed({ ...preferences, groupAllowAll: true }, { ...inGroup(STRANGER), ownerHasSpoken: true }),
       true,
-      "a stranger once groups are opened to everyone",
+      "a stranger once groups are opened to everyone and the owner has written in this one",
     );
     assert.equal(
-      isInboundSenderAllowed({ ...preferences, groupAllowAll: true }, inGroup(STRANGER, [STRANGER, WIFE, LINE])),
+      isInboundSenderAllowed({ ...preferences, groupAllowAll: true }, { ...inGroup(STRANGER), ownerHasSpoken: false }),
+      false,
+      "being added to a group is not consent: the owner has to have spoken in it first",
+    );
+    assert.equal(
+      isInboundSenderAllowed({ ...preferences, groupAllowAll: true }, inGroup(STRANGER)),
+      false,
+      "with nothing known about the owner speaking, the open setting admits nobody",
+    );
+    assert.equal(
+      isInboundSenderAllowed({ ...preferences, groupAllowAll: true }, { ...inGroup(WIFE), ownerHasSpoken: false }),
+      true,
+      "a trusted contact needs only the recipient present, not a prior message",
+    );
+    assert.equal(
+      isInboundSenderAllowed({ ...preferences, groupAllowAll: true }, { ...inGroup(STRANGER, [STRANGER, WIFE, LINE]), ownerHasSpoken: true }),
       false,
       "opening groups still needs the recipient present",
     );
@@ -4186,12 +4215,28 @@ describe("Sendblue provider", () => {
 
     await post(groupMessage(WIFE, "dm the assistant", { group_id: "", participants: [WIFE, LINE] })).expect(403);
     await post(groupMessage(WIFE, "sneak a group", { participants: [WIFE, STRANGER, LINE] })).expect(403);
-    await post(groupMessage(STRANGER, "hello from a stranger")).expect(403);
+    // An untrusted member of the owner's own group is an everyday event, not an
+    // intrusion: acknowledged so Sendblue does not redeliver it, and dropped.
+    const ignored = await post(groupMessage(STRANGER, "hello from a stranger")).expect(200);
+    assert.deepEqual(ignored.body, { received: true, ignored: "sender" });
     assert.equal(enqueuedEvents(db), 1, "a DM, a group without the recipient, and a stranger are all turned away");
 
     withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }], true);
-    await post(groupMessage(STRANGER, "hello from a stranger")).expect(200);
-    assert.equal(enqueuedEvents(db), 2, "opening groups to everyone admits the stranger in the recipient's group");
+    const stillIgnored = await post(groupMessage(STRANGER, "hello again from a stranger")).expect(200);
+    assert.equal(stillIgnored.body.ignored, "sender", "opening groups admits nobody until the owner has written in this one");
+    assert.equal(enqueuedEvents(db), 1);
+
+    agentStudioEnv();
+    await post(groupMessage(RECIPIENT, "hi both, this is our shared assistant")).expect(200);
+    await runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async () => ({ sid: "SB_hello", status: "queued" }),
+      runSmsAgent: (targetDb, search, address, body, handle, options) =>
+        runSmsAgent(targetDb, search, address, body, handle, { ...options, fetcher: agentCallingMany([], "Hello!").fetcher }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    });
+    await post(groupMessage(STRANGER, "hello a third time")).expect(200);
+    assert.equal(enqueuedEvents(db), 3, "once the owner has spoken in the group, the open setting admits the stranger");
   });
 
   it("does not let a trusted contact opt the recipient out", async () => {
@@ -4236,7 +4281,7 @@ describe("Sendblue provider", () => {
       groupName: "Home",
       speaker: WIFE,
       speakerName: "Sarah",
-    });
+    }, "a trusted contact is named and is not the owner");
     assert.deepEqual(sends, [{ to: `group:${GROUP}`, options: { replyTo: undefined, groupId: GROUP } }]);
     assert.deepEqual(typing, [], "typing indicators are a 1:1 feature");
   });
@@ -4323,6 +4368,69 @@ describe("Sendblue provider", () => {
     assert.equal(history.at(-1)?.content, "Reminder: Pay the electric bill", "the reminder is archived on the group thread");
   });
 
+  it("stops reminding the group once the owner has moved the todo out of the group's area", async () => {
+    const { db, api } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    await runSmsAgent(db, fakeSearch(db), address, "remind us about the electric bill", "SB_bill", groupTurnOptions(
+      agentCallingMany([{ tool: "create_todo", input: { title: "Pay the electric bill", reminder_at: "2020-01-01T00:00:00.000Z", subtasks: [{ title: "Find the account number" }] } }], "Added.").fetcher,
+    ));
+    const todo = db.prepare("SELECT id,life_area_id FROM todos WHERE title='Pay the electric bill'").get() as { id: string; life_area_id: string };
+    // A step the owner keeps private under the group's todo.
+    await api.post("/api/todos").send({ title: "Ask about the raise first", parent_id: todo.id, life_area_id: "area_work" }).expect(201);
+
+    const sends: Array<{ to: string; body: string; groupId?: string }> = [];
+    const sendSms = async (_db: Db, to: string, body: string, options?: { groupId?: string }) => {
+      sends.push({ to, body, ...(options?.groupId ? { groupId: options.groupId } : {}) });
+      return { sid: `SB_${sends.length}`, status: "queued" as const };
+    };
+    const worker = { sendSms, pollGranola: async () => ({ fetched: 0, queued: 0 }), startTypingIndicator: () => () => {} };
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(sends, [{ to: address, body: "Reminder: Pay the electric bill\n1 open: Find the account number", groupId: GROUP }],
+      "into the group, the reminder names only the step the group can see");
+
+    // The owner reclassifies the todo as their own; the pointer to the chat stays, the routing does not.
+    await api.patch(`/api/todos/${todo.id}`).send({ life_area_id: "area_personal", title: "Pay the electric bill (and the raise)", reminder_at: "2020-01-02T00:00:00.000Z" }).expect(200);
+    assert.ok((db.prepare("SELECT reply_thread_id FROM todos WHERE id=?").get(todo.id) as { reply_thread_id: string | null }).reply_thread_id);
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(sends.at(-1), { to: RECIPIENT, body: "Reminder: Pay the electric bill (and the raise)\n2 open: Find the account number; Ask about the raise first" },
+      "a todo that is no longer the group's reminds the owner alone, every step included");
+
+    // Moving it back restores the group's routing; deleting the group's area removes it for good.
+    await api.patch(`/api/todos/${todo.id}`).send({ life_area_id: todo.life_area_id, reminder_at: "2020-01-03T00:00:00.000Z" }).expect(200);
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.equal(sends.at(-1)?.groupId, GROUP);
+    await api.delete(`/api/life-areas/${todo.life_area_id}`).expect(200);
+    await api.patch(`/api/todos/${todo.id}`).send({ reminder_at: "2020-01-04T00:00:00.000Z" }).expect(200);
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.equal(sends.at(-1)?.to, RECIPIENT, "an orphaned todo's reminder comes to the owner, not to a chat that can no longer see it");
+  });
+
+  it("names the group on a retried first turn and keeps the iMessage title within bounds", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const failing: typeof fetch = async () => new Response("upstream busy", { status: 503 });
+    await assert.rejects(
+      runSmsAgent(db, fakeSearch(db), address, "hi, this is Sarah", "SB_retry", groupTurnOptions(failing)),
+      "the first attempt fails in flight",
+    );
+    assert.equal((db.prepare("SELECT count(*) count FROM life_areas WHERE thread_id IS NOT NULL").get() as { count: number }).count, 1,
+      "but the area it created is already there");
+    const retry = agentCallingMany([], "Hi Sarah!");
+    await runSmsAgent(db, fakeSearch(db), address, "hi, this is Sarah", "SB_retry", groupTurnOptions(retry.fetcher));
+    const turn = ((retry.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+    assert.equal(turn.groupLifeAreaIsNew, true, "the retry still gets the cue to name it, since nobody has answered here yet");
+    assert.equal(turn.firstMessageInGroup, true);
+
+    assert.equal(cleanGroupName("  Family \u0000chat\n\n2026  "), "Family chat 2026");
+    assert.equal(cleanGroupName("x".repeat(200))?.length, 80, "any member can set the title, so it is cut to what a life area name may be");
+    assert.equal(cleanGroupName(""), undefined);
+    assert.equal(cleanGroupName(42), undefined);
+  });
+
   it("labels each speaker when a group thread is replayed to the agent", async () => {
     const { db } = connectedFixture();
     agentStudioEnv();
@@ -4337,15 +4445,26 @@ describe("Sendblue provider", () => {
     await runSmsAgent(db, fakeSearch(db), address, "we need milk", "SB_g1", {
       fetcher, inbound, userMessageMetadata: { groupId: GROUP, speaker: WIFE, speakerName: "Sarah" },
     });
-    await runSmsAgent(db, fakeSearch(db), address, "and eggs", "SB_g2", {
-      fetcher, inbound, userMessageMetadata: { groupId: GROUP, speaker: RECIPIENT, speakerName: "the owner" },
+    await runSmsAgent(db, fakeSearch(db), address, "and bread", "SB_g2", {
+      fetcher, inbound, userMessageMetadata: { groupId: GROUP, speaker: STRANGER },
+    });
+    await runSmsAgent(db, fakeSearch(db), address, "and eggs", "SB_g3", {
+      fetcher, inbound, userMessageMetadata: { groupId: GROUP, speaker: RECIPIENT, speakerName: "the owner", speakerIsOwner: true },
     });
     const texts = completionRequest?.messages.filter(message => message.role === "user").map(message => message.parts[0].text);
-    assert.deepEqual(texts, [`[Sarah (${WIFE})] we need milk`, `[the owner (${RECIPIENT})] and eggs`]);
+    // Names, or a redacted number for a voice nobody named: the model can tell
+    // the speakers apart and never receives a phone number.
+    assert.deepEqual(texts, ["[Sarah] we need milk", `[${redactedNumber(STRANGER)}] and bread`, "[the owner] and eggs"]);
+    assert.equal(redactedNumber(STRANGER), "+1…33");
+    assert.ok(!JSON.stringify(completionRequest).includes(WIFE.slice(2)), "no full number reaches the model");
+    assert.ok(!JSON.stringify(completionRequest).includes(RECIPIENT.slice(2)));
     const latest = completionRequest?.messages.filter(message => message.role === "user").at(-1);
     const turnContext = latest?.metadata?.turnContext as Record<string, unknown>;
     assert.equal(turnContext.groupId, GROUP);
     assert.equal(turnContext.speakerName, "the owner");
+    assert.equal(turnContext.speakerIsOwner, true);
+    assert.equal(turnContext.speaker, redactedNumber(RECIPIENT));
+    assert.equal(turnContext.groupName, undefined, "the life area's name travels as groupLifeAreaName only");
   });
 
   it("round-trips trusted contacts through the notifications endpoint", async () => {
@@ -4503,7 +4622,10 @@ describe("Sendblue provider", () => {
     return {
       fetcher,
       inbound: { provider: "sendblue" as const, groupId: GROUP },
-      userMessageMetadata: { groupId: GROUP, groupName: "Home", speaker, speakerName },
+      userMessageMetadata: {
+        groupId: GROUP, groupName: "Home", speaker, speakerName,
+        ...(speaker === RECIPIENT ? { speakerIsOwner: true } : {}),
+      },
       sendSms: async () => ({ sid: `SB_${Math.random().toString(36).slice(2)}`, status: "queued" as const }),
     };
   }
@@ -4541,8 +4663,8 @@ describe("Sendblue provider", () => {
     assert.equal(firstTurn.groupLifeAreaIsNew, true, "and the area was just made, so the agent names it");
     assert.equal(firstTurn.groupLifeAreaId, area.id);
     assert.equal(firstTurn.groupLifeAreaName, "Home");
-    assert.equal(firstTurn.groupName, "Home");
     assert.equal(firstTurn.speakerName, "the owner");
+    assert.equal(firstTurn.speakerIsOwner, true);
     const filters = first.requests[0].algolia as { searchParameters: Record<string, { filters: string }> };
     assert.deepEqual(filters, {
       searchParameters: {
@@ -4559,6 +4681,19 @@ describe("Sendblue provider", () => {
     assert.equal(secondTurn.groupLifeAreaIsNew, undefined);
     assert.equal(secondTurn.groupLifeAreaId, area.id, "the same area is reused, not recreated");
     assert.equal((db.prepare("SELECT count(*) count FROM life_areas WHERE thread_id IS NOT NULL").get() as { count: number }).count, 1);
+
+    // A group that goes quiet for longer than the context window is not a new
+    // group: the cue is read off the thread, not off the replayed window.
+    const aged = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const older = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE channel_messages SET created_at=? WHERE thread_id=(SELECT id FROM channel_threads WHERE address=?)").run(aged, address);
+    db.prepare("UPDATE life_areas SET created_at=? WHERE id=?").run(older, area.id);
+    const later = agentCallingMany([], "Still here.");
+    await runSmsAgent(db, fakeSearch(db), address, "hello again", "SB_later", groupTurnOptions(later.fetcher));
+    const laterTurn = (later.requests[0].messages as Array<Record<string, unknown>>).filter(message => message.role === "user").map(context).at(-1)!;
+    assert.equal((later.requests[0].messages as unknown[]).length, 1, "the window holds only this message");
+    assert.equal(laterTurn.firstMessageInGroup, undefined, "yet nobody is introduced to again");
+    assert.equal(laterTurn.groupLifeAreaIsNew, undefined);
 
     const one = agentCallingMany([], "Hi.");
     await runSmsAgent(db, fakeSearch(db), RECIPIENT, "hello", "SB_11", { fetcher: one.fetcher, inbound: { provider: "sendblue" } });
@@ -4603,6 +4738,26 @@ describe("Sendblue provider", () => {
       db.prepare("SELECT 1 found FROM index_jobs WHERE entity_type='todo' AND entity_id=? AND status='pending'").get(todo.id),
       "the name is on the indexed record, so a rename queues a rewrite",
     );
+    const groupMessages = db.prepare(`
+      SELECT m.id FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      WHERE t.address=? AND m.role IN ('user','assistant')
+    `).all(address) as Array<{ id: string }>;
+    assert.ok(groupMessages.length >= 2);
+    for (const message of groupMessages) {
+      assert.ok(
+        db.prepare("SELECT 1 found FROM index_jobs WHERE entity_type='channel_message' AND entity_id=? AND status='pending'").get(message.id),
+        "every message of the thread carries group_name, so each is rewritten too",
+      );
+    }
+
+    // After the first name, renaming through the tool is the owner's alone.
+    const bySarah = agentCallingMany([{ tool: "name_group_chat", input: { name: "Sarah's list" } }], "Renamed.");
+    await runSmsAgent(db, fakeSearch(db), address, "call this Sarah's list", "SB_rename_sarah", groupTurnOptions(bySarah.fetcher));
+    assert.equal(toolOutputs(db, address).name_group_chat.error, "Only the owner can rename the group chat");
+    assert.equal((db.prepare("SELECT name FROM life_areas WHERE id=?").get(area.id) as { name: string }).name, "Family");
+    const byOwner = agentCallingMany([{ tool: "name_group_chat", input: { name: "Us two" } }], "Renamed.");
+    await runSmsAgent(db, fakeSearch(db), address, "call this Us two", "SB_rename_owner", groupTurnOptions(byOwner.fetcher, RECIPIENT, "the owner"));
+    assert.equal((db.prepare("SELECT name FROM life_areas WHERE id=?").get(area.id) as { name: string }).name, "Us two");
 
     await api.delete(`/api/life-areas/${area.id}`).expect(200);
     assert.equal((db.prepare("SELECT life_area_id FROM todos WHERE id=?").get(todo.id) as { life_area_id: string | null }).life_area_id, null);
@@ -4610,7 +4765,7 @@ describe("Sendblue provider", () => {
     await runSmsAgent(db, fakeSearch(db), address, "still here?", "SB_after_delete", groupTurnOptions(later.fetcher));
     const fresh = db.prepare("SELECT id,name FROM life_areas WHERE thread_id IS NOT NULL").get() as { id: string; name: string };
     assert.ok(fresh && fresh.id !== area.id, "the next message makes a fresh area");
-    assert.equal(fresh.name, "Family", "seeded from the thread's title rather than the stale iMessage name");
+    assert.equal(fresh.name, "Us two", "seeded from the thread's title rather than the stale iMessage name");
     const turn = ((later.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
     assert.equal(turn.groupLifeAreaIsNew, true, "and the agent is asked to name it again");
   });
@@ -4631,6 +4786,13 @@ describe("Sendblue provider", () => {
     ));
     const groupTodo = db.prepare("SELECT id FROM todos WHERE title='Pay the electric bill'").get() as { id: string };
     const area = db.prepare("SELECT id FROM life_areas WHERE thread_id IS NOT NULL").get() as { id: string };
+    const ownerReminder = db.prepare("SELECT id FROM reminders WHERE todo_id=? LIMIT 1").get(ownerTodo.id) as { id: string };
+    // Relations the owner can make from the app that cross the fence: a private
+    // step under the group's todo, and a group-filed step under a private parent.
+    const privateStep = (await api.post("/api/todos").send({ title: "Check the joint account", parent_id: groupTodo.id, life_area_id: "area_work" }).expect(201)).body.data;
+    const ownerParent = (await api.post("/api/todos").send({ title: "Quarterly review prep", life_area_id: "area_work" }).expect(201)).body.data;
+    const groupStep = (await api.post("/api/todos").send({ title: "Book the sitter", parent_id: ownerParent.id, life_area_id: area.id }).expect(201)).body.data;
+    await api.put("/api/integrations/tasks").send({ autoCompleteParent: true }).expect(200);
 
     const probe = agentCallingMany([
       { tool: "get_todo", input: { id: ownerTodo.id } },
@@ -4638,6 +4800,9 @@ describe("Sendblue provider", () => {
       { tool: "set_todo_status", input: { id: ownerTodo.id, status: "done" } },
       { tool: "delete_memory", input: { id: ownerMemory.id, confirmed: true } },
       { tool: "create_reminder", input: { todo_id: ownerTodo.id, reminder_at: "2030-06-01T10:00:00.000Z", slot: "extra" } },
+      { tool: "update_reminder", input: { id: ownerReminder.id, reminder_at: "2030-06-01T11:00:00.000Z" } },
+      { tool: "delete_reminder", input: { id: ownerReminder.id, confirmed: true } },
+      { tool: "create_memory", input: { title: "Bill day", content: "Bills go out on the 2nd.", kind: "note", category_id: "cat_work" } },
       { tool: "list_todos", input: { limit: 50 } },
       { tool: "get_agenda", input: { start_date: "2030-06-01", end_date: "2030-06-30", timezone: "UTC" } },
       { tool: "list_reminders", input: { from: "2030-01-01T00:00:00.000Z", to: "2030-12-31T00:00:00.000Z" } },
@@ -4653,14 +4818,31 @@ describe("Sendblue provider", () => {
     for (const [name, message] of [
       ["get_todo", /Todo not found/], ["get_memory", /Memory not found/], ["set_todo_status", /Todo not found/],
       ["delete_memory", /Memory not found/], ["create_reminder", /Todo not found/],
+      ["update_reminder", /Reminder not found/], ["delete_reminder", /Reminder not found/],
     ] as Array<[string, RegExp]>) {
       assert.equal(outputs[name].success, false, `${name} on the owner's record`);
       assert.match(outputs[name].error!, message, `${name} reads as not found, not as forbidden`);
     }
     assert.equal(getTodo(db, ownerTodo.id)?.status, "pending", "the owner's todo is untouched");
     assert.ok(db.prepare("SELECT 1 found FROM memories WHERE id=?").get(ownerMemory.id), "and the memory still exists");
+    assert.ok(db.prepare("SELECT 1 found FROM reminders WHERE id=?").get(ownerReminder.id), "and so is the owner's reminder");
+    assert.equal((outputs.create_memory.data as { category_id: string | null; category_name: string | null }).category_id, null,
+      "the owner's categories are not something a group can file under or probe for");
 
-    assert.deepEqual((outputs.list_todos.data as Array<{ id: string }>).map(todo => todo.id), [groupTodo.id]);
+    assert.deepEqual((outputs.list_todos.data as Array<{ id: string }>).map(todo => todo.id).sort(), [groupStep.id, groupTodo.id].sort(),
+      "only what is filed in the group's area, whoever filed it");
+    const seen = agentCallingMany([
+      { tool: "get_todo", input: { id: groupTodo.id } },
+      { tool: "set_todo_status", input: { id: groupStep.id, status: "done" } },
+    ], "Done.");
+    await runSmsAgent(db, fakeSearch(db), address, "the sitter is booked", "SB_g3", groupTurnOptions(seen.fetcher));
+    const seenOutputs = toolOutputs(db, address);
+    assert.deepEqual((seenOutputs.get_todo.data as { subtasks: unknown[] }).subtasks, [],
+      "a step the owner filed privately under the group's todo is not listed to the group");
+    assert.equal(seenOutputs.set_todo_status.success, true);
+    assert.equal(getTodo(db, groupStep.id)?.status, "done");
+    assert.equal(getTodo(db, ownerParent.id)?.status, "pending", "closing the group's last step never closes the owner's private parent");
+    assert.equal(getTodo(db, privateStep.id)?.status, "pending");
     const agenda = outputs.get_agenda.data as { todos: Array<{ id: string }>; reminders: Array<{ todo_id: string }> };
     assert.deepEqual(agenda.todos.map(todo => todo.id), [groupTodo.id]);
     assert.deepEqual([...new Set(agenda.reminders.map(reminder => reminder.todo_id))], [groupTodo.id]);
@@ -4675,7 +4857,7 @@ describe("Sendblue provider", () => {
 
     // The fence is one-directional: from the app and the owner's own thread, everything is visible.
     const all = (await api.get("/api/todos").expect(200)).body.data as Array<{ id: string }>;
-    assert.deepEqual(all.map(todo => todo.id).sort(), [groupTodo.id, ownerTodo.id].sort());
+    assert.deepEqual(all.map(todo => todo.id).sort(), [groupTodo.id, ownerTodo.id, privateStep.id, ownerParent.id, groupStep.id].sort());
     const own = agentCallingMany([{ tool: "get_todo", input: { id: groupTodo.id } }, { tool: "list_life_areas", input: {} }], "Yep.");
     await runSmsAgent(db, fakeSearch(db), RECIPIENT, "do I have the bill on my list?", "SB_own", { fetcher: own.fetcher, inbound: { provider: "sendblue" } });
     const ownerOutputs = toolOutputs(db, RECIPIENT);

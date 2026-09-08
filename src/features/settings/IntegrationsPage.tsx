@@ -24,6 +24,9 @@ const themeStatus: Record<ThemePreference, string> = {
 
 const providerLabel: Record<SmsProvider, string> = { twilio: "Twilio", sendblue: "Sendblue" };
 
+/** The number format the server accepts (`e164` in `server/schemas.ts`). */
+const E164 = /^\+[1-9]\d{7,14}$/;
+
 export function IntegrationsPage() {
   const { data, isLoading, error } = useQuery({ queryKey: ["integrations"], queryFn: api.integrations });
   if (isLoading) return <Loading />;
@@ -133,6 +136,16 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
     const phone = contactPhone.trim();
     const name = contactName.trim();
     if (!phone || !name) return;
+    // The same shape the server accepts, checked here so the mistake is named
+    // while the number is still on screen rather than as a 400 on Save.
+    if (!E164.test(phone)) {
+      notify("Enter the number in international format, like +17185550123");
+      return;
+    }
+    if (phone === recipientPhone.trim()) {
+      notify("Your own number is always allowed and cannot be a trusted contact");
+      return;
+    }
     if (trustedContacts.some(contact => contact.phone === phone)) {
       notify("That number is already a trusted contact");
       return;
@@ -454,7 +467,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
                 placeholder="+17185550123"
               />
             </Field>
-            <Field label="&nbsp;">
+            <div className="field field-action">
               <button
                 className="button ghost"
                 type="button"
@@ -463,14 +476,14 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               >
                 <Plus size={14}/>Add trusted contact
               </button>
-            </Field>
+            </div>
           </div>
           <div className="delivery-options">
             <label className={`delivery-option ${groupAllowAll ? "selected" : ""}`}>
               <span className="delivery-option-icon"><Users size={15}/></span>
               <span>
-                <strong>Answer anyone in a group chat that includes me</strong>
-                <small>Every participant of a group you are in can talk to the assistant, not only trusted contacts. Nobody can reach it in a chat you are not part of.</small>
+                <strong>Answer anyone in a group chat I have written in</strong>
+                <small>Once you have sent a message in a group, every participant of that group can talk to the assistant there, not only trusted contacts. Anyone can add you to a group without asking, so a group you have never written in stays closed.</small>
               </span>
               <input type="checkbox" checked={groupAllowAll} onChange={e => setGroupAllowAll(e.target.checked)}/>
             </label>

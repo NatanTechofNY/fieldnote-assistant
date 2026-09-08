@@ -1,3 +1,5 @@
+import { USER_ID } from "./db.ts";
+import { groupAddress } from "./group-thread.ts";
 import {
   getNotificationPreferences,
   getSendblueSecret,
@@ -60,15 +62,23 @@ export type InboundSender = {
   groupId?: string;
   /** Every number in the conversation as the provider reports it, the recipient included when present. */
   participants: string[];
+  /**
+   * Whether the recipient has written in this group before. Being listed as a
+   * participant is not consent — anyone who knows two numbers can open an
+   * iMessage group with both — so the open-to-everyone setting waits for the
+   * owner to speak first.
+   */
+  ownerHasSpoken?: boolean;
 };
 
 /**
  * Who the assistant answers. The recipient is always heard. Anyone else is heard
- * only inside a group chat the recipient is also in — either because they are a
- * trusted contact or because the owner opened groups to every participant — so
- * nobody can run the assistant in a conversation the owner cannot see. With no
- * recipient configured a 1:1 message is still accepted, as documented, but a
- * group message is refused because the owner's presence cannot be checked.
+ * only inside a group chat the recipient is also in — a trusted contact as soon
+ * as the owner is present, anyone else only once the owner has opened groups to
+ * every participant and has themselves written in this one — so nobody can run
+ * the assistant in a conversation the owner cannot see or did not start using.
+ * With no recipient configured a 1:1 message is still accepted, as documented,
+ * but a group message is refused because the owner's presence cannot be checked.
  */
 export function isInboundSenderAllowed(
   preferences: Pick<NotificationPreferences, "recipientPhone" | "trustedContacts" | "groupAllowAll">,
@@ -78,7 +88,21 @@ export function isInboundSenderAllowed(
   if (!sender.groupId) return !owner || owner === sender.from;
   if (!owner || !sender.participants.includes(owner)) return false;
   if (sender.from === owner) return true;
-  return preferences.groupAllowAll || preferences.trustedContacts.some(contact => contact.phone === sender.from);
+  if (preferences.trustedContacts.some(contact => contact.phone === sender.from)) return true;
+  return preferences.groupAllowAll && sender.ownerHasSpoken === true;
+}
+
+/**
+ * Whether the recipient has ever written in a group thread: the signal that the
+ * owner is using this group with the assistant, read off the archived messages
+ * rather than off the provider's participant list.
+ */
+export function ownerHasSpokenInGroup(db: Db, groupId: string, owner: string): boolean {
+  return Boolean(db.prepare(`
+    SELECT 1 found FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+    WHERE t.user_id=? AND t.channel='sms' AND t.address=? AND m.role='user'
+      AND json_extract(m.metadata_json,'$.speaker')=? LIMIT 1
+  `).get(USER_ID, groupAddress(groupId), owner));
 }
 
 export function isSmsProviderConnected(db: Db, provider: SmsProvider): boolean {

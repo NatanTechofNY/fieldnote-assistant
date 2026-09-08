@@ -2181,6 +2181,9 @@ tr:hover .attach-button,
 }
 .field { margin-bottom:12px; }
 .field label { display:block; font-size:12px; font-weight:500; color:var(--text-secondary); margin-bottom:5px; }
+/* A button that sits in a row of labelled inputs lines up with their controls
+   without a label of its own. */
+.field-action { display:flex; align-items:flex-end; }
 .modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
 /* The task editor reads as two questions rather than one stack of eleven
    controls: what the work is on the left, when it happens and where it is

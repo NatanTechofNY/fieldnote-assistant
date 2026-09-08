@@ -1,5 +1,6 @@
 import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./algolia.ts";
 import { ensureGroupLifeArea, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
+import { redactedNumber, speakerLabel } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
@@ -224,6 +225,10 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
   }>;
   return rows.map(row => {
     const quote = row.role === "user" ? quotedParent(db, threadId, row.metadata_json) : null;
+    // A 1:1 thread has one voice and needs no label; a shared one has several,
+    // and without it every request in the window reads as the owner's. The
+    // label is a name, or a redacted number when there is none: no full phone
+    // number leaves the server for the model.
     const speaker = row.role === "user" ? speakerLabel(row.metadata_json) : null;
     return {
       id: row.id.startsWith("alg_msg_") ? row.id : `alg_msg_${row.id.replaceAll("-", "_")}`,
@@ -238,21 +243,6 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
         }],
     };
   });
-}
-
-/**
- * Who wrote a message in a group thread. A 1:1 thread has one voice and needs
- * no label; a shared one has several, and without the label every request in
- * the window reads as the owner's.
- */
-function speakerLabel(metadataJson: string): string | null {
-  try {
-    const metadata = JSON.parse(metadataJson) as { speaker?: string; speakerName?: string };
-    if (!metadata.speaker) return null;
-    return metadata.speakerName ? `${metadata.speakerName} (${metadata.speaker})` : metadata.speaker;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -491,12 +481,19 @@ async function completion(
  * iMessage gave the chat seeds the thread title only while there is none; once
  * the assistant or the owner has named the group, an iMessage rename does not
  * overwrite it.
+ *
+ * Two cues for the prompt are read off the thread rather than off this call or
+ * the context window, so a retried or long-quiet turn gets them right:
+ * `firstMessage` is true only while no one else has ever written in the thread,
+ * and `areaIsNew` stays true until the assistant has taken a turn since the
+ * area was created, so a first turn that failed in flight still names it.
  */
 function groupTurnSetup(
   db: Db,
   threadId: string,
+  inboundId: string,
   groupName: string | undefined,
-): { area: ReturnType<typeof ensureGroupLifeArea>; scope: GroupScope } {
+): { area: ReturnType<typeof ensureGroupLifeArea>; areaIsNew: boolean; firstMessage: boolean; scope: GroupScope } {
   if (groupName) {
     db.prepare("UPDATE channel_threads SET display_name=? WHERE id=? AND display_name IS NULL").run(groupName, threadId);
   }
@@ -504,7 +501,18 @@ function groupTurnSetup(
   // owner deleted it starts from what the group was last called here.
   const thread = db.prepare("SELECT display_name FROM channel_threads WHERE id=?").get(threadId) as { display_name: string | null };
   const area = ensureGroupLifeArea(db, threadId, thread.display_name ?? groupName);
-  return { area, scope: { lifeAreaId: area.id, threadId } };
+  const earlierMessage = db.prepare(
+    "SELECT 1 found FROM channel_messages WHERE thread_id=? AND role='user' AND id<>? LIMIT 1",
+  ).get(threadId, inboundId);
+  const answeredSinceCreated = db.prepare(
+    "SELECT 1 found FROM channel_messages WHERE thread_id=? AND role IN ('assistant','tool') AND created_at>=? LIMIT 1",
+  ).get(threadId, area.createdAt);
+  return {
+    area,
+    areaIsNew: !answeredSinceCreated,
+    firstMessage: !earlierMessage,
+    scope: { lifeAreaId: area.id, threadId },
+  };
 }
 
 /**
@@ -561,15 +569,17 @@ export async function runChannelAgent(
   });
   // A group turn names the room and the speaker so the agent knows it is in a
   // shared chat and whose request it is answering.
-  const speaker = options.userMessageMetadata as { speaker?: string; speakerName?: string; groupName?: string } | undefined;
-  const group = options.inbound?.groupId ? groupTurnSetup(db, thread.id, speaker?.groupName) : undefined;
+  const speaker = options.userMessageMetadata as {
+    speaker?: string; speakerName?: string; speakerIsOwner?: boolean; groupName?: string;
+  } | undefined;
+  const group = options.inbound?.groupId ? groupTurnSetup(db, thread.id, inboundId, speaker?.groupName) : undefined;
   const context: ToolTurnContext = {
     channel,
     address,
     threadId: thread.id,
     provider: options.inbound?.provider,
     groupId: options.inbound?.groupId,
-    ...(group ? { scope: group.scope } : {}),
+    ...(group ? { scope: { ...group.scope, lifeAreaIsNew: group.areaIsNew }, speakerIsOwner: speaker?.speakerIsOwner === true } : {}),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
     sendSms: options.sendSms,
   };
@@ -587,15 +597,15 @@ export async function runChannelAgent(
         ...(options.inbound?.groupId && group
           ? {
             groupId: options.inbound.groupId,
-            groupName: group.area.name,
             groupLifeAreaId: group.area.id,
             groupLifeAreaName: group.area.name,
-            ...(group.area.isNew ? { groupLifeAreaIsNew: true } : {}),
-            // The window holding only this message means nobody has spoken here
-            // before, which is when the assistant introduces itself.
-            ...(messages.filter(message => message.role === "user").length === 1 ? { firstMessageInGroup: true } : {}),
-            ...(speaker?.speaker ? { speaker: speaker.speaker } : {}),
+            ...(group.areaIsNew ? { groupLifeAreaIsNew: true } : {}),
+            ...(group.firstMessage ? { firstMessageInGroup: true } : {}),
+            // The speaker's number never reaches the model; a redacted form is
+            // enough to tell two unnamed voices apart.
+            ...(speaker?.speaker ? { speaker: redactedNumber(speaker.speaker) } : {}),
             ...(speaker?.speakerName ? { speakerName: speaker.speakerName } : {}),
+            ...(speaker?.speakerIsOwner ? { speakerIsOwner: true } : {}),
           }
           : {}),
       },

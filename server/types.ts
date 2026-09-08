@@ -129,7 +129,12 @@ export interface ReminderRow {
   created_at: string;
   updated_at: string;
   todo_title?: string;
-  /** The thread address the todo was made in, when it was a group chat; joined on claim. */
+  /** The todo's current life area; joined on claim, and what a group-bound reminder's subtasks are filtered to. */
+  todo_life_area_id?: string | null;
+  /**
+   * The group thread the reminder goes back to, joined on claim and only while
+   * the todo is still filed in that group's life area; null otherwise.
+   */
   reply_address?: string | null;
 }
 

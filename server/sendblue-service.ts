@@ -1,9 +1,17 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { cleanGroupName } from "./group-thread.ts";
 import { getSendblueSecret, type SendblueSecretConfig } from "./integrations.ts";
 import type { Db } from "./types.ts";
 
 /** Sendblue serves the same API from `.co` and `.com`; the docs lead with `.co`. */
 const API_BASE_URL = process.env.SENDBLUE_API_BASE_URL || "https://api.sendblue.co";
+
+/**
+ * How long one Sendblue call may take. The worker sends from its single
+ * sequential loop, and `send_message` makes a mid-turn send routine, so a
+ * stalled connection has to fail rather than hold every reminder behind it.
+ */
+export const SENDBLUE_TIMEOUT_MS = Number(process.env.SENDBLUE_TIMEOUT_MS) || 15_000;
 
 export const SENDBLUE_INBOUND_PATH = "/api/webhooks/sendblue/inbound";
 export const SENDBLUE_STATUS_PATH = "/api/webhooks/sendblue/status";
@@ -38,22 +46,6 @@ export type SendblueLine = {
 };
 
 /**
- * The prefix a group chat's thread address carries in `channel_threads`, so a
- * group and a phone number can never collide and callers can tell them apart
- * without another column.
- */
-export const GROUP_ADDRESS_PREFIX = "group:";
-
-export function groupAddress(groupId: string): string {
-  return `${GROUP_ADDRESS_PREFIX}${groupId}`;
-}
-
-/** The Sendblue group id behind a thread address, or undefined for a 1:1 thread. */
-export function groupIdOfAddress(address: string): string | undefined {
-  return address.startsWith(GROUP_ADDRESS_PREFIX) ? address.slice(GROUP_ADDRESS_PREFIX.length) || undefined : undefined;
-}
-
-/**
  * What an inbound `receive` webhook says, in the shape the app reasons about.
  * `group_id` arrives as an empty string on a 1:1 message and `participants`
  * lists every number in the conversation including the Sendblue line, which is
@@ -72,7 +64,9 @@ export type SendblueInbound = {
 
 export function readSendblueInbound(payload: Record<string, unknown>): SendblueInbound {
   const groupId = typeof payload.group_id === "string" ? payload.group_id.trim() : "";
-  const groupName = typeof payload.group_display_name === "string" ? payload.group_display_name.trim() : "";
+  // Any member of the group sets its title, so it is bounded and cleaned here
+  // before it can become a life area name, a slug, or a line of turn context.
+  const groupName = cleanGroupName(payload.group_display_name);
   return {
     from: typeof payload.from_number === "string" ? payload.from_number
       : typeof payload.number === "string" ? payload.number : undefined,
@@ -157,10 +151,13 @@ async function sendblueRequest(
   path: string,
   init: { method: string; body?: unknown } = { method: "GET" },
 ): Promise<unknown> {
+  // The deadline surfaces as a `TimeoutError`, which `isTransientFailure`
+  // already treats as a retry rather than a rejected request.
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: init.method,
     headers: headers(config),
     ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+    signal: AbortSignal.timeout(SENDBLUE_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new SendblueRequestError(await readError(response, "Sendblue request failed"), response.status);
