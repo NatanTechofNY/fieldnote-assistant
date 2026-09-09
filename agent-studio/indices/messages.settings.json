@@ -1,12 +1,15 @@
 {
   "searchableAttributes": [
-    "unordered(content)"
+    "unordered(content)",
+    "unordered(speaker_name)",
+    "unordered(group_name)"
   ],
   "attributesForFaceting": [
     "filterOnly(userId)",
     "channel",
     "role",
-    "filterOnly(threadId)"
+    "filterOnly(threadId)",
+    "filterOnly(group_id)"
   ],
   "customRanking": [
     "desc(created_at)"
@@ -18,7 +21,10 @@
     "channel",
     "role",
     "content",
-    "created_at"
+    "created_at",
+    "speaker_name",
+    "group_name",
+    "group_id"
   ],
   "attributesToHighlight": [],
   "attributesToSnippet": [],

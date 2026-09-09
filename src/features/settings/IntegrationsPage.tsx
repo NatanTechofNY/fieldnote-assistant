@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Newspaper, Pause, Phone, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Zap } from "lucide-react";
+import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Newspaper, Pause, Phone, Plus, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, X, Zap } from "lucide-react";
 import { api } from "../../api";
 import type {
-  ExternalEvent, IntegrationState, SmsProvider,
+  ExternalEvent, IntegrationState, SmsProvider, TrustedContact,
 } from "../../types";
 import { PageHead } from "../../components/layout/PageHead";
 import { ErrorState, Field, Loading, ThemeToggle, Toast } from "../../components/ui";
@@ -23,6 +23,9 @@ const themeStatus: Record<ThemePreference, string> = {
 };
 
 const providerLabel: Record<SmsProvider, string> = { twilio: "Twilio", sendblue: "Sendblue" };
+
+/** The number format the server accepts (`e164` in `server/schemas.ts`). */
+const E164 = /^\+[1-9]\d{7,14}$/;
 
 export function IntegrationsPage() {
   const { data, isLoading, error } = useQuery({ queryKey: ["integrations"], queryFn: api.integrations });
@@ -60,6 +63,10 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   const [smsEnabled, setSmsEnabled] = useState(data.notifications.smsEnabled);
   const [quietStart, setQuietStart] = useState(data.notifications.quietHoursStart || "22:00");
   const [quietEnd, setQuietEnd] = useState(data.notifications.quietHoursEnd || "07:00");
+  const [trustedContacts, setTrustedContacts] = useState<TrustedContact[]>(data.notifications.trustedContacts ?? []);
+  const [groupAllowAll, setGroupAllowAll] = useState(data.notifications.groupAllowAll ?? false);
+  const [contactName, setContactName] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
   const [granolaKey, setGranolaKey] = useState("");
   const [toast, setToast] = useState("");
   const { preference } = useTheme();
@@ -117,10 +124,36 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
       digestIncludeOverdue: digestOverdue,
       quietHoursStart: quietStart || null,
       quietHoursEnd: quietEnd || null,
+      trustedContacts,
+      groupAllowAll,
     }),
     onSuccess: () => { refresh(); notify("Messaging schedule saved"); },
     onError: (mutationError: Error) => notify(mutationError.message),
   });
+  // Contacts are staged here and saved with the rest of the schedule, so a typo
+  // never reaches the allowlist before the owner presses save.
+  const addTrustedContact = () => {
+    const phone = contactPhone.trim();
+    const name = contactName.trim();
+    if (!phone || !name) return;
+    // The same shape the server accepts, checked here so the mistake is named
+    // while the number is still on screen rather than as a 400 on Save.
+    if (!E164.test(phone)) {
+      notify("Enter the number in international format, like +17185550123");
+      return;
+    }
+    if (phone === recipientPhone.trim()) {
+      notify("Your own number is always allowed and cannot be a trusted contact");
+      return;
+    }
+    if (trustedContacts.some(contact => contact.phone === phone)) {
+      notify("That number is already a trusted contact");
+      return;
+    }
+    setTrustedContacts([...trustedContacts, { phone, name }]);
+    setContactName("");
+    setContactPhone("");
+  };
   const taskPreferences = useMutation({
     mutationFn: (autoCompleteParent: boolean) => api.updateTaskPreferences({ autoCompleteParent }),
     onSuccess: (updated) => {
@@ -384,6 +417,77 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             </select>
             <small className="field-hint">The dashboard, Agent, reminders, and daily briefing all use this timezone.</small>
           </Field>
+        </div>
+
+        <div className={`schedule-panel group-chats ${data.notifications.smsProvider === "sendblue" ? "" : "disabled"}`}>
+          <div className="schedule-panel-head">
+            <div>
+              <strong>Group chats</strong>
+              <span>
+                Add the assistant&rsquo;s iMessage line to a group chat you are in and these people can talk to it there.
+                Reminders for anything asked for in the group come back to that group.
+              </span>
+            </div>
+            <Users size={17}/>
+          </div>
+          {data.notifications.smsProvider !== "sendblue" && (
+            <div className="quiet-note">
+              <TriangleAlert size={13}/>
+              <span>Group chats need iMessage. Switch the message provider to Sendblue to use them.</span>
+            </div>
+          )}
+          <div className="list trusted-contacts">
+            {trustedContacts.map(contact => (
+              <div className="list-row" key={contact.phone}>
+                <span className="badge">{contact.name.slice(0, 2).toUpperCase()}</span>
+                <div className="list-main"><strong>{contact.name}</strong><small>{redact.phone(contact.phone)}</small></div>
+                <button
+                  className="button ghost"
+                  type="button"
+                  aria-label={`Remove ${contact.name}`}
+                  onClick={() => setTrustedContacts(trustedContacts.filter(entry => entry.phone !== contact.phone))}
+                >
+                  <X size={14}/>
+                </button>
+              </div>
+            ))}
+            {!trustedContacts.length && !groupAllowAll && (
+              <div className="empty-state compact">Only you can talk to the assistant until a trusted contact is added.</div>
+            )}
+          </div>
+          <div className="form-grid three schedule-controls">
+            <Field label="Name"><input className="input" value={contactName} onChange={e => setContactName(e.target.value)} placeholder="Sarah" /></Field>
+            <Field label="Phone">
+              <input
+                className="input"
+                type={redact.inputType("tel")}
+                value={contactPhone}
+                onChange={e => setContactPhone(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addTrustedContact(); } }}
+                placeholder="+17185550123"
+              />
+            </Field>
+            <div className="field field-action">
+              <button
+                className="button ghost"
+                type="button"
+                disabled={!contactName.trim() || !contactPhone.trim()}
+                onClick={addTrustedContact}
+              >
+                <Plus size={14}/>Add trusted contact
+              </button>
+            </div>
+          </div>
+          <div className="delivery-options">
+            <label className={`delivery-option ${groupAllowAll ? "selected" : ""}`}>
+              <span className="delivery-option-icon"><Users size={15}/></span>
+              <span>
+                <strong>Answer anyone in a group chat I have written in</strong>
+                <small>Once you have sent a message in a group, every participant of that group can talk to the assistant there, not only trusted contacts. Anyone can add you to a group without asking, so a group you have never written in stays closed.</small>
+              </span>
+              <input type="checkbox" checked={groupAllowAll} onChange={e => setGroupAllowAll(e.target.checked)}/>
+            </label>
+          </div>
         </div>
 
         <div className="schedule-panel">

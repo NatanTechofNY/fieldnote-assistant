@@ -8,10 +8,11 @@ import { composeDigestTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
 import { claimExternalEvents, completeExternalEvent, pollGranola } from "./event-ingestion.ts";
 import { localParts } from "./local-time.ts";
-import { sendSms, startTypingIndicator } from "./messaging.ts";
+import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
-import type { StopTypingIndicator } from "./sendblue-service.ts";
+import { groupAddress, groupIdOfAddress, OWNER_SPEAKER_NAME } from "./group-thread.ts";
+import { readSendblueInbound, type StopTypingIndicator } from "./sendblue-service.ts";
 import type { Db, DigestBriefRow, ReminderRow, TodoRow } from "./types.ts";
 
 type SearchWriter = Pick<AlgoliaSync, "flushSoon" | "flush">;
@@ -37,15 +38,20 @@ export type WorkerDependencies = {
  * drained on every tick regardless of which provider is currently selected for
  * sending, so a reply to yesterday's reminder is still answered after a switch.
  */
+type InboundMessage = {
+  from?: string;
+  body?: string;
+  messageId?: string;
+  replyTo?: string;
+  threadOriginator?: string;
+  /** Set when the text arrived in an iMessage group chat; only Sendblue carries these. */
+  groupId?: string;
+  groupName?: string;
+};
+
 const INBOUND_SOURCES: Array<{
   source: SmsProvider;
-  read: (payload: Record<string, unknown>) => {
-    from?: string;
-    body?: string;
-    messageId?: string;
-    replyTo?: string;
-    threadOriginator?: string;
-  };
+  read: (payload: Record<string, unknown>) => InboundMessage;
 }> = [
   {
     source: "twilio",
@@ -57,24 +63,49 @@ const INBOUND_SOURCES: Array<{
   },
   {
     source: "sendblue",
-    read: payload => ({
-      from: typeof payload.from_number === "string" ? payload.from_number
-        : typeof payload.number === "string" ? payload.number : undefined,
-      body: typeof payload.content === "string" ? payload.content : undefined,
-      messageId: typeof payload.message_handle === "string" ? payload.message_handle : undefined,
-      // A text sent as an inline reply names the message it answers, which is
-      // often not the one directly above it. Without these two, "yes, that one"
-      // arrives with nothing to attach it to.
-      replyTo: messageHandleOf(payload.reply_to),
-      threadOriginator: messageHandleOf(payload.thread_originator),
-    }),
+    read: payload => {
+      const inbound = readSendblueInbound(payload);
+      return {
+        from: inbound.from,
+        body: inbound.body,
+        messageId: inbound.messageHandle,
+        replyTo: inbound.replyTo,
+        threadOriginator: inbound.threadOriginator,
+        groupId: inbound.groupId,
+        groupName: inbound.groupName,
+      };
+    },
   },
 ];
 
-function messageHandleOf(value: unknown): string | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const handle = (value as { message_handle?: unknown }).message_handle;
-  return typeof handle === "string" && handle ? handle : undefined;
+/**
+ * The thread address and the per-message metadata for a text that arrived in a
+ * group. The speaker is named from the trusted contacts list when it can be, so
+ * the transcript and the agent see "Sarah" rather than a phone number; the
+ * recipient is named as the owner because that is the only name the app has.
+ */
+function groupTurn(
+  db: Db,
+  groupId: string,
+  from: string,
+  groupName: string | undefined,
+): { address: string; metadata: Record<string, unknown> } {
+  const preferences = getNotificationPreferences(db);
+  const contact = preferences.trustedContacts.find(entry => entry.phone === from);
+  const speakerIsOwner = from === preferences.recipientPhone;
+  const speakerName = contact?.name ?? (speakerIsOwner ? OWNER_SPEAKER_NAME : undefined);
+  return {
+    address: groupAddress(groupId),
+    metadata: {
+      groupId,
+      ...(groupName ? { groupName } : {}),
+      speaker: from,
+      ...(speakerName ? { speakerName } : {}),
+      // What the tools that only the owner may drive check, decided here where
+      // the recipient number is known rather than by the agent from a label.
+      ...(speakerIsOwner ? { speakerIsOwner: true } : {}),
+    },
+  };
 }
 
 function inQuietHours(time: string, start: string | null, end: string | null): boolean {
@@ -140,8 +171,18 @@ function claimDueReminders(db: Db, limit = 50): ReminderRow[] {
   const timestamp = now();
   const staleClaim = new Date(Date.now() - 10 * 60_000).toISOString();
   return db.transaction(() => {
+    /*
+     * A reminder goes back to the group only while its todo is still filed in
+     * that group's life area. The thread pointer alone is not enough: the owner
+     * can move a group todo to Work or Personal, or remove the group's area, and
+     * from then on the todo is theirs alone and so is its reminder.
+     */
     const rows = db.prepare(`
-      SELECT r.*,t.title todo_title FROM reminders r JOIN todos t ON t.id=r.todo_id
+      SELECT r.*,t.title todo_title,t.life_area_id todo_life_area_id,ct.address reply_address FROM reminders r
+      JOIN todos t ON t.id=r.todo_id
+      LEFT JOIN channel_threads ct
+        ON ct.id=t.reply_thread_id
+        AND EXISTS (SELECT 1 FROM life_areas la WHERE la.thread_id=ct.id AND la.id=t.life_area_id)
       WHERE r.user_id=? AND r.status IN ('pending','failed') AND r.kind<>'due'
         AND COALESCE(r.available_at,r.scheduled_for)<=?
         AND (r.claimed_at IS NULL OR r.claimed_at<?)
@@ -168,9 +209,11 @@ const NAMED_SUBTASKS = 3;
  * characters, and the wording stays inside GSM-7 so a checklist does not halve
  * the room a segment has.
  */
-function reminderBody(db: Db, reminder: ReminderRow): string {
+function reminderBody(db: Db, reminder: ReminderRow, groupBound: boolean): string {
   const headline = `Reminder: ${reminder.todo_title || "You have a task due."}`;
-  const open = openSubtasks(db, reminder.todo_id);
+  // Into a group, only the steps the group can see; the owner may have filed a
+  // private one under the same parent from the app.
+  const open = openSubtasks(db, reminder.todo_id, groupBound ? reminder.todo_life_area_id ?? undefined : undefined);
   if (!open.length) return headline;
   const named = open.slice(0, NAMED_SUBTASKS).map(subtask => subtask.title);
   const rest = open.length - named.length;
@@ -208,9 +251,20 @@ async function deliverReminder(
     return;
   }
   try {
-    const content = reminderBody(db, reminder);
-    const message = await send(db, recipient, content);
-    recordOutboundChannelMessage(db, "sms", recipient, content, message.sid, message.status, {
+    /*
+     * A todo asked for in a group chat is reminded about in that chat, so
+     * everyone who heard the ask hears the reminder; anything else goes to the
+     * recipient's own number. The group id is read off the thread address so
+     * the reminder needs no column of its own. Only iMessage has groups: with
+     * Sendblue disconnected the reminder would fail on every retry, so it goes
+     * to the recipient instead of nowhere.
+     */
+    const groupId = reminder.reply_address ? groupIdOfAddress(reminder.reply_address) : undefined;
+    const groupBound = Boolean(groupId) && isSmsProviderConnected(db, "sendblue");
+    const content = reminderBody(db, reminder, groupBound);
+    const target = groupBound ? (reminder.reply_address as string) : recipient;
+    const message = await send(db, target, content, groupBound ? { groupId } : {});
+    recordOutboundChannelMessage(db, "sms", target, content, message.sid, message.status, {
       kind: "reminder",
       reminderId: reminder.id,
       todoId: reminder.todo_id,
@@ -428,23 +482,36 @@ export async function runWorkerOnce(
       try {
         const message = read(JSON.parse(event.payload_json) as Record<string, unknown>);
         if (!message.from || !message.body) throw new Error("Inbound SMS event is missing a sender or body");
+        /*
+         * A group chat is one thread shared by everyone in it, so it is keyed on
+         * the group rather than on whoever spoke, and the speaker travels as
+         * metadata so the transcript still says who asked for what. Typing
+         * indicators are a 1:1 iMessage feature and are not raised for a group.
+         */
+        const group = message.groupId ? groupTurn(db, message.groupId, message.from, message.groupName) : null;
+        const address = group ? group.address : message.from;
         // The bubble goes up before the turn starts and comes down once the reply
         // is out rather than in between, so the wait is covered end to end and no
         // bubble outlives the answer.
-        stopTyping = showTyping(db, message.from);
-        const response = await runAgent(db, search, message.from, message.body, message.messageId, {
+        stopTyping = group ? () => {} : showTyping(db, message.from);
+        const response = await runAgent(db, search, address, message.body, message.messageId, {
           inbound: {
             provider: source,
             replyTo: message.replyTo,
             threadOriginator: message.threadOriginator,
+            ...(message.groupId ? { groupId: message.groupId } : {}),
           },
+          ...(group ? { userMessageMetadata: group.metadata } : {}),
           sendSms: send,
         });
         // An empty reply is a turn a tapback answered on its own; there is
         // nothing to send and no outbound row to file a provider id on.
         if (response.text) {
           // The agent threads its answer only when it asked to, via reply_in_thread.
-          const sent = await send(db, message.from, response.text, { replyTo: response.replyTo });
+          const sent = await send(db, address, response.text, {
+            replyTo: response.replyTo,
+            ...(message.groupId ? { groupId: message.groupId } : {}),
+          });
           recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status, sent.replyTo);
         }
         stopTyping();

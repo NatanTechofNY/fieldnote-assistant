@@ -8,6 +8,8 @@ export interface LifeArea {
   name: string;
   color: string;
   is_builtin?: number | boolean;
+  /** Set on the area a group chat files its todos and memories under. */
+  is_group?: number | boolean;
 }
 
 export interface Category {
@@ -196,6 +198,9 @@ export interface Health {
 /** Which messaging API carries outbound texts and receives inbound ones. */
 export type SmsProvider = "twilio" | "sendblue";
 
+/** Someone besides the recipient who may address the assistant in a shared group chat. */
+export type TrustedContact = { phone: string; name: string };
+
 export interface IntegrationState {
   secretStorageReady: boolean;
   twilio: {
@@ -248,6 +253,9 @@ export interface IntegrationState {
     quietHoursStart: string | null;
     quietHoursEnd: string | null;
     optedOutAt: string | null;
+    /* Who else may talk to the assistant, and only inside an iMessage group that includes the recipient. */
+    trustedContacts: TrustedContact[];
+    groupAllowAll: boolean;
   };
   tasks: { autoCompleteParent: boolean };
   webhookPaths: {
@@ -292,6 +300,8 @@ export interface ChannelConversation {
   id: string;
   channel: "web" | "sms";
   address: string;
+  /** A group chat's name; null for a 1:1 or web thread, and for a group nobody has named yet. */
+  displayName?: string | null;
   messageCount: number;
   lastMessage?: string | null;
   lastMessageAt?: string | null;
@@ -318,6 +328,10 @@ export interface ConversationSearchHit {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  /** Present on messages from a group chat: who spoke and which group. */
+  speaker_name?: string;
+  group_name?: string;
+  group_id?: string;
 }
 
 export interface ConversationSearchResult {

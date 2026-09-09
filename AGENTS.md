@@ -42,6 +42,13 @@ browser via `POST /api/agent/tools/:name` and called in-process by the SMS worke
 change usually has to land in both the tool executor and the matching REST route.
 [`docs/TOOL_ENDPOINT_MAPPING.md`](docs/TOOL_ENDPOINT_MAPPING.md) maps the pairs.
 
+**Group turns are scoped.** A turn answered in an iMessage group chat carries `scope` on
+`ToolTurnContext` (the group's life area and thread) and sends per-request `algolia.searchParameters`
+filters with its completion. Every by-id read in `server/tool-executor.ts` goes through
+`scopedTodo`/`scopedMemory`, every list is filtered to the area, and `OWNER_ONLY_TOOLS` are refused.
+A new tool, a new list, or a new index the hosted search tool can reach has to honour the scope, or a
+question asked in a group answers from the owner's private records.
+
 **Tool schemas are contract-tested.** `tests/server-api.test.ts` asserts that the tools published
 in `agent-studio/tools/client-tools.json` are exactly the keys of `toolInput` in
 `server/schemas.ts`, that each is `additionalProperties: false`, and that the tool count matches.

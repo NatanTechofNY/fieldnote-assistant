@@ -67,12 +67,17 @@ export function completionStats(
  * board, the REST API, and the agent's tools cannot drift apart on it.
  *
  * Returns the parent it closed, so a caller can say what else moved.
+ *
+ * `lifeAreaId` is the fence a group turn runs inside: a parent filed in another
+ * area belongs to the owner alone, and closing the group's last step must not
+ * reach across and close it.
  */
-export function completeParentIfSettled(db: Db, child: TodoRow): TodoRow | null {
+export function completeParentIfSettled(db: Db, child: TodoRow, lifeAreaId?: string): TodoRow | null {
   if (!child.parent_id || child.status !== "done") return null;
   if (!getTaskPreferences(db).autoCompleteParent) return null;
   const parent = getTodo(db, child.parent_id);
   if (!parent || parent.status === "done" || parent.status === "cancelled") return null;
+  if (lifeAreaId && parent.life_area_id !== lifeAreaId) return null;
   const remaining = db.prepare(`
     SELECT count(*) open FROM todos
     WHERE user_id=? AND parent_id=? AND status NOT IN ('done','cancelled')
@@ -102,10 +107,13 @@ export function hasSubtasks(db: Db, todoId: string): boolean {
   ).get(USER_ID, todoId));
 }
 
-export function openSubtasks(db: Db, todoId: string): TodoRow[] {
+export function openSubtasks(db: Db, todoId: string, lifeAreaId?: string): TodoRow[] {
+  // With an area given, only the steps filed in it: a reminder texted into a
+  // group must not list a subtask the owner keeps to themselves.
   return db.prepare(`
     SELECT * FROM todos
     WHERE user_id=? AND parent_id=? AND status NOT IN ('done','cancelled')
+      ${lifeAreaId ? "AND life_area_id=?" : ""}
     ORDER BY created_at
-  `).all(USER_ID, todoId) as TodoRow[];
+  `).all(...(lifeAreaId ? [USER_ID, todoId, lifeAreaId] : [USER_ID, todoId])) as TodoRow[];
 }

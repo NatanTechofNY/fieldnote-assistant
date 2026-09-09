@@ -1,9 +1,17 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { cleanGroupName } from "./group-thread.ts";
 import { getSendblueSecret, type SendblueSecretConfig } from "./integrations.ts";
 import type { Db } from "./types.ts";
 
 /** Sendblue serves the same API from `.co` and `.com`; the docs lead with `.co`. */
 const API_BASE_URL = process.env.SENDBLUE_API_BASE_URL || "https://api.sendblue.co";
+
+/**
+ * How long one Sendblue call may take. The worker sends from its single
+ * sequential loop, and `send_message` makes a mid-turn send routine, so a
+ * stalled connection has to fail rather than hold every reminder behind it.
+ */
+export const SENDBLUE_TIMEOUT_MS = Number(process.env.SENDBLUE_TIMEOUT_MS) || 15_000;
 
 export const SENDBLUE_INBOUND_PATH = "/api/webhooks/sendblue/inbound";
 export const SENDBLUE_STATUS_PATH = "/api/webhooks/sendblue/status";
@@ -36,6 +44,52 @@ export type SendblueLine = {
   phoneNumber: string;
   label: string | null;
 };
+
+/**
+ * What an inbound `receive` webhook says, in the shape the app reasons about.
+ * `group_id` arrives as an empty string on a 1:1 message and `participants`
+ * lists every number in the conversation including the Sendblue line, which is
+ * what lets the webhook check that the recipient is present in a group.
+ */
+export type SendblueInbound = {
+  from?: string;
+  body?: string;
+  messageHandle?: string;
+  replyTo?: string;
+  threadOriginator?: string;
+  groupId?: string;
+  groupName?: string;
+  participants: string[];
+};
+
+export function readSendblueInbound(payload: Record<string, unknown>): SendblueInbound {
+  const groupId = typeof payload.group_id === "string" ? payload.group_id.trim() : "";
+  // Any member of the group sets its title, so it is bounded and cleaned here
+  // before it can become a life area name, a slug, or a line of turn context.
+  const groupName = cleanGroupName(payload.group_display_name);
+  return {
+    from: typeof payload.from_number === "string" ? payload.from_number
+      : typeof payload.number === "string" ? payload.number : undefined,
+    body: typeof payload.content === "string" ? payload.content : undefined,
+    messageHandle: typeof payload.message_handle === "string" ? payload.message_handle : undefined,
+    // A text sent as an inline reply names the message it answers, which is
+    // often not the one directly above it. Without these two, "yes, that one"
+    // arrives with nothing to attach it to.
+    replyTo: messageHandleOf(payload.reply_to),
+    threadOriginator: messageHandleOf(payload.thread_originator),
+    ...(groupId ? { groupId } : {}),
+    ...(groupName ? { groupName } : {}),
+    participants: Array.isArray(payload.participants)
+      ? payload.participants.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+      : [],
+  };
+}
+
+function messageHandleOf(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const handle = (value as { message_handle?: unknown }).message_handle;
+  return typeof handle === "string" && handle ? handle : undefined;
+}
 
 /**
  * The headers Sendblue may carry a webhook secret on. It documents that a
@@ -97,10 +151,13 @@ async function sendblueRequest(
   path: string,
   init: { method: string; body?: unknown } = { method: "GET" },
 ): Promise<unknown> {
+  // The deadline surfaces as a `TimeoutError`, which `isTransientFailure`
+  // already treats as a retry rather than a rejected request.
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: init.method,
     headers: headers(config),
     ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+    signal: AbortSignal.timeout(SENDBLUE_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new SendblueRequestError(await readError(response, "Sendblue request failed"), response.status);
@@ -347,12 +404,17 @@ export function startSendblueTypingIndicator(db: Db, to: string): StopTypingIndi
  * `mediaUrl` must be a public URL Sendblue can fetch itself; it goes out as an
  * iMessage attachment, or over RCS or MMS for a recipient without iMessage.
  * `sendStyle` is a purely cosmetic iMessage effect and is dropped elsewhere.
+ *
+ * `groupId` sends into an existing iMessage group chat through the group
+ * endpoint, which addresses the group rather than a number; `to` is then the
+ * group's thread address and is not sent. The line must already be a member of
+ * the group — on an inbound-initiated plan the owner adds it from their phone.
  */
 export async function sendSendblueSms(
   db: Db,
   to: string,
   body: string,
-  options: { replyTo?: string; mediaUrl?: string; sendStyle?: string } = {},
+  options: { replyTo?: string; mediaUrl?: string; sendStyle?: string; groupId?: string } = {},
 ): Promise<{ sid: string; status: string; replyTo?: string }> {
   const config = getSendblueSecret(db);
   if (!config) throw new Error("Sendblue is not configured");
@@ -361,10 +423,10 @@ export async function sendSendblueSms(
       + `?token=${encodeURIComponent(config.webhookSecret)}`
     : undefined;
   const post = async (replyTo: string | undefined) => {
-    const payload = await sendblueRequest(config, "/api/send-message", {
+    const payload = await sendblueRequest(config, options.groupId ? "/api/send-group-message" : "/api/send-message", {
       method: "POST",
       body: {
-        number: to,
+        ...(options.groupId ? { group_id: options.groupId } : { number: to }),
         from_number: config.fromPhone,
         content: body.slice(0, MAX_BODY_LENGTH),
         ...(statusCallback ? { status_callback: statusCallback } : {}),

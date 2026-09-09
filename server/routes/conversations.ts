@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { USER_ID, id, likePattern, now, queueIndexJob } from "../db.ts";
+import { GROUP_NAME_SQL, USER_ID, id, likePattern, now, queueIndexJob } from "../db.ts";
+import { groupIdOfAddress } from "../group-thread.ts";
 import { failure, success } from "../http.ts";
 import { currentConversation, enrichChannelMetadata, messageJson } from "../serializers.ts";
 import { type MessageRow } from "../types.ts";
@@ -15,19 +16,21 @@ export function registerConversationRoutes({ app, db, search }: RouteContext): v
   });
   app.get("/api/conversations/channels", (_req, res) => {
     const rows = db.prepare(`
-      SELECT t.id,t.channel,t.address,t.created_at,t.updated_at,
+      SELECT t.id,t.channel,t.address,t.created_at,t.updated_at,${GROUP_NAME_SQL} display_name,
         count(m.id) message_count,
         (SELECT content FROM channel_messages latest WHERE latest.thread_id=t.id
           ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1) last_message,
         (SELECT created_at FROM channel_messages latest WHERE latest.thread_id=t.id
           ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1) last_message_at
       FROM channel_threads t LEFT JOIN channel_messages m ON m.thread_id=t.id
+      LEFT JOIN life_areas la ON la.thread_id=t.id
       WHERE t.user_id=? GROUP BY t.id ORDER BY COALESCE(last_message_at,t.updated_at) DESC
     `).all(USER_ID) as Array<Record<string, unknown>>;
     return success(res, rows.map(row => ({
       id: row.id,
       channel: row.channel,
       address: row.address,
+      displayName: (row.display_name as string | null) ?? null,
       messageCount: row.message_count,
       lastMessage: row.last_message,
       lastMessageAt: row.last_message_at,
@@ -73,12 +76,28 @@ export function registerConversationRoutes({ app, db, search }: RouteContext): v
         // SQLite remains authoritative and provides a bounded lexical fallback.
       }
     }
-    const hits = db.prepare(`
-      SELECT m.id objectID,m.thread_id threadId,t.channel,m.role,m.content,m.created_at
+    const rows = db.prepare(`
+      SELECT m.id objectID,m.thread_id threadId,t.channel,m.role,m.content,m.created_at,
+        t.address,${GROUP_NAME_SQL} group_name,
+        CASE WHEN m.role='user' THEN json_extract(m.metadata_json,'$.speakerName') END speaker_name
       FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      LEFT JOIN life_areas la ON la.thread_id=t.id
       WHERE t.user_id=? AND m.role IN ('user','assistant') AND lower(m.content) LIKE lower(?) ESCAPE '\\'
       ORDER BY m.created_at DESC,m.rowid DESC LIMIT ?
-    `).all(USER_ID, likePattern(input.q), input.limit);
+    `).all(USER_ID, likePattern(input.q), input.limit) as Array<Record<string, unknown>>;
+    // The same shape as an Algolia hit: group fields only on group messages,
+    // and the thread address, which is not a hit field, never leaves the server.
+    const hits = rows.map(({ address, group_name, speaker_name, ...hit }) => {
+      const groupId = groupIdOfAddress(String(address));
+      return {
+        ...hit,
+        ...(groupId ? {
+          group_id: groupId,
+          ...(typeof group_name === "string" ? { group_name } : {}),
+          ...(typeof speaker_name === "string" ? { speaker_name } : {}),
+        } : {}),
+      };
+    });
     return success(res, { source: "sqlite" as const, hits });
   });
   app.post("/api/conversations/web/sync", (req, res) => {

@@ -260,6 +260,11 @@ export const digestBriefPatch = z.object({
 }).strict()
   .refine((value) => Object.keys(value).length > 0, "No changes provided");
 
+export const trustedContact = z.object({
+  phone: e164,
+  name: z.string().trim().min(1).max(60),
+}).strict();
+
 export const notificationInput = z.object({
   smsEnabled: z.boolean(),
   recipientPhone: e164.nullable(),
@@ -270,7 +275,28 @@ export const notificationInput = z.object({
   digestIncludeOverdue: z.boolean().default(false),
   quietHoursStart: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
   quietHoursEnd: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
-}).strict();
+  trustedContacts: z.array(trustedContact).max(25).default([]),
+  groupAllowAll: z.boolean().default(false),
+}).strict().superRefine((value, context) => {
+  const seen = new Set<string>();
+  value.trustedContacts.forEach((contact, index) => {
+    if (contact.phone === value.recipientPhone) {
+      context.addIssue({
+        code: "custom",
+        path: ["trustedContacts", index, "phone"],
+        message: "The recipient phone is already allowed and cannot be a trusted contact",
+      });
+    }
+    if (seen.has(contact.phone)) {
+      context.addIssue({
+        code: "custom",
+        path: ["trustedContacts", index, "phone"],
+        message: "Each trusted contact can only be listed once",
+      });
+    }
+    seen.add(contact.phone);
+  });
+});
 
 /* Agent tool input schemas --------------------------------------------------- */
 
@@ -472,6 +498,8 @@ export const toolInput = {
   }),
   react_to_message: z.object({ reaction }),
   reply_in_thread: z.object({}),
+  send_message: z.object({ text: z.string().trim().min(1).max(1500) }).strict(),
+  name_group_chat: z.object({ name: z.string().trim().min(1).max(80) }).strict(),
   search_store_products: z.object({
     query: z.string().trim().min(1).max(200),
     category: z.enum(PRODUCT_CATEGORIES).nullable().optional(),

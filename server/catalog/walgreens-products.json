@@ -14,8 +14,9 @@
     ],
     "size": "100 caplets",
     "price_cents": 1299,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/ba/Extra_Strength_Tylenol_and_Tylenol_PM.jpg/960px-Extra_Strength_Tylenol_and_Tylenol_PM.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-1001.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Tylenol%20Extra%20Strength%20Caplets",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Extra_Strength_Tylenol_and_Tylenol_PM.jpg",
     "popularity": 95
   },
   {
@@ -34,8 +35,9 @@
     ],
     "size": "100 tablets",
     "price_cents": 1149,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/db/Advil_200mg_Caplets.jpg/960px-Advil_200mg_Caplets.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-1002.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Advil%20Ibuprofen%20Tablets%20200%20mg",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Advil_200mg_Caplets.jpg",
     "popularity": 97
   },
   {
@@ -52,8 +54,9 @@
     ],
     "size": "80 capsules",
     "price_cents": 1399,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d8/Advilliquidgels.jpg/500px-Advilliquidgels.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-1003.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Advil%20Liqui-Gels",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Advilliquidgels.jpg",
     "popularity": 80
   },
   {
@@ -71,8 +74,9 @@
     ],
     "size": "200 tablets",
     "price_cents": 849,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/99/Bottle_of_Ibuprofen_tablets_with_cap_removed_and_tablets_in_front.jpg/960px-Bottle_of_Ibuprofen_tablets_with_cap_removed_and_tablets_in_front.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-1004.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Walgreens%20Ibuprofen%20Tablets%20200%20mg",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Bottle_of_Ibuprofen_tablets_with_cap_removed_and_tablets_in_front.jpg",
     "popularity": 70
   },
   {
@@ -88,8 +92,9 @@
     ],
     "size": "100 caplets",
     "price_cents": 1499,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Excedrin_Migraine.jpg/960px-Excedrin_Migraine.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-1005.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Excedrin%20Migraine",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Excedrin_Migraine.jpg",
     "popularity": 78
   },
   {
@@ -107,8 +112,9 @@
     ],
     "size": "100 tablets",
     "price_cents": 1349,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/72/Naproxen-250mg-16190835697216573249398282984232.jpg/960px-Naproxen-250mg-16190835697216573249398282984232.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-1006.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Aleve%20Naproxen%20Sodium",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Naproxen-250mg-16190835697216573249398282984232.jpg",
     "popularity": 74
   },
   {
@@ -125,8 +131,9 @@
     ],
     "size": "100 tablets",
     "price_cents": 799,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d5/Aspirin-Fl%C3%A4schchen.jpg/960px-Aspirin-Fl%C3%A4schchen.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-1007.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Bayer%20Aspirin%20325%20mg",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Aspirin-Fl%C3%A4schchen.jpg",
     "popularity": 55
   },
   {
@@ -147,8 +154,9 @@
     ],
     "size": "24 LiquiCaps",
     "price_cents": 1299,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/da/DayQuil_%285990504169%29.jpg/960px-DayQuil_%285990504169%29.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-2001.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Vicks%20DayQuil%20Cold%20and%20Flu%20LiquiCaps",
+    "image_source": "https://commons.wikimedia.org/wiki/File:DayQuil_%285990504169%29.jpg",
     "popularity": 92
   },
   {
@@ -168,8 +176,9 @@
     ],
     "size": "12 fl oz",
     "price_cents": 1349,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Treatments_for_the_Common_Cold_%2824667887648%29.jpg/960px-Treatments_for_the_Common_Cold_%2824667887648%29.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-2002.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Vicks%20NyQuil%20Cold%20and%20Flu%20Nighttime",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Treatments_for_the_Common_Cold_%2824667887648%29.jpg",
     "popularity": 90
   },
   {
@@ -187,8 +196,9 @@
     ],
     "size": "3.53 oz",
     "price_cents": 999,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Vicks_VapoRub_IMG_20211101.jpg/960px-Vicks_VapoRub_IMG_20211101.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-2003.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Vicks%20VapoRub",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Vicks_VapoRub_IMG_20211101.jpg",
     "popularity": 85
   },
   {
@@ -205,8 +215,9 @@
     ],
     "size": "36 tablets",
     "price_cents": 1199,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c9/Sudafed_Pills.jpg/960px-Sudafed_Pills.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-2004.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Sudafed%20PE%20Sinus%20Congestion",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Sudafed_Pills.jpg",
     "popularity": 72
   },
   {
@@ -223,8 +234,9 @@
     ],
     "size": "40 tablets",
     "price_cents": 2499,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b0/Zentiva_Guajacuran_guaifenesin_30x200mg.jpg/960px-Zentiva_Guajacuran_guaifenesin_30x200mg.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-2005.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Mucinex%20Extended-Release%20600%20mg",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Zentiva_Guajacuran_guaifenesin_30x200mg.jpg",
     "popularity": 74
   },
   {
@@ -242,8 +254,9 @@
     ],
     "size": "20 tablets",
     "price_cents": 899,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2b/Alka-Seltzer_tablets_and_packet.jpg/960px-Alka-Seltzer_tablets_and_packet.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-2006.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Alka-Seltzer%20Plus%20Cold",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Alka-Seltzer_tablets_and_packet.jpg",
     "popularity": 60
   },
   {
@@ -260,8 +273,9 @@
     ],
     "size": "30 drops",
     "price_cents": 329,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/99/Opened_and_unopened_Halls_cough_drops.jpg/960px-Opened_and_unopened_Halls_cough_drops.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-3001.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Halls%20Relief%20Cough%20Drops%20Cherry",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Opened_and_unopened_Halls_cough_drops.jpg",
     "popularity": 88
   },
   {
@@ -278,8 +292,9 @@
     ],
     "size": "45 drops",
     "price_cents": 499,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9d/Ricola_Bonbons.JPG/960px-Ricola_Bonbons.JPG",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-3002.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Ricola%20Original%20Herb%20Cough%20Drops",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Ricola_Bonbons.JPG",
     "popularity": 66
   },
   {
@@ -296,8 +311,9 @@
     ],
     "size": "8 fl oz",
     "price_cents": 799,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/22/Cough_medicine_in_a_medicine_measure_cup.jpg/500px-Cough_medicine_in_a_medicine_measure_cup.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-3003.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Walgreens%20Tussin%20DM",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Cough_medicine_in_a_medicine_measure_cup.jpg",
     "popularity": 58
   },
   {
@@ -314,8 +330,9 @@
     ],
     "size": "10 lozenges",
     "price_cents": 249,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Halls_Soothers_%285257502709%29.jpg/500px-Halls_Soothers_%285257502709%29.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-3004.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Halls%20Soothers%20Honey%20Lemon",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Halls_Soothers_%285257502709%29.jpg",
     "popularity": 50
   },
   {
@@ -333,8 +350,9 @@
     ],
     "size": "45 tablets",
     "price_cents": 2999,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f2/Cetirizine_-_by_Danny_S.jpg/960px-Cetirizine_-_by_Danny_S.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-4001.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Zyrtec%20Allergy%2010%20mg",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Cetirizine_-_by_Danny_S.jpg",
     "popularity": 84
   },
   {
@@ -353,8 +371,9 @@
     ],
     "size": "100 tablets",
     "price_cents": 1299,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/16/Diphenhydramine_1_%28cropped%29.jpg/960px-Diphenhydramine_1_%28cropped%29.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-4002.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Benadryl%20Allergy%20Ultratabs",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Diphenhydramine_1_%28cropped%29.jpg",
     "popularity": 76
   },
   {
@@ -372,8 +391,9 @@
     ],
     "size": "3.5 oz",
     "price_cents": 699,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bb/Benadryl_Itch_Stopping_Gel_%284600729217%29.jpg/960px-Benadryl_Itch_Stopping_Gel_%284600729217%29.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-4003.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Benadryl%20Itch%20Stopping%20Gel",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Benadryl_Itch_Stopping_Gel_%284600729217%29.jpg",
     "popularity": 45
   },
   {
@@ -391,8 +411,9 @@
     ],
     "size": "12 fl oz",
     "price_cents": 849,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/8/8f/Bismuth_Subsalicylate_Bottle.png",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-5001.png",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Pepto%20Bismol%20Liquid%20Original",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Bismuth_Subsalicylate_Bottle.png",
     "popularity": 82
   },
   {
@@ -408,8 +429,9 @@
     ],
     "size": "24 caplets",
     "price_cents": 1249,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/2023_Loperamid_2_mg.jpg/960px-2023_Loperamid_2_mg.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-5002.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Imodium%20A-D%20Caplets",
+    "image_source": "https://commons.wikimedia.org/wiki/File:2023_Loperamid_2_mg.jpg",
     "popularity": 60
   },
   {
@@ -426,8 +448,9 @@
     ],
     "size": "36 tablets",
     "price_cents": 949,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/Alka-Seltzer_tablet_dissolving_1.jpg/960px-Alka-Seltzer_tablet_dissolving_1.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-5003.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Alka-Seltzer%20Original",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Alka-Seltzer_tablet_dissolving_1.jpg",
     "popularity": 52
   },
   {
@@ -443,8 +466,9 @@
     ],
     "size": "1 count",
     "price_cents": 999,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/28/Digital_Thermometer_%2851825721879%29.jpg/960px-Digital_Thermometer_%2851825721879%29.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-6001.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Walgreens%20Digital%20Thermometer",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Digital_Thermometer_%2851825721879%29.jpg",
     "popularity": 79
   },
   {
@@ -461,8 +485,9 @@
     ],
     "size": "3 boxes",
     "price_cents": 679,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Kleenex-small-box.jpg/960px-Kleenex-small-box.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-6002.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Kleenex%20Ultra%20Soft%20Facial%20Tissues",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Kleenex-small-box.jpg",
     "popularity": 81
   },
   {
@@ -480,8 +505,9 @@
     ],
     "size": "33.8 fl oz",
     "price_cents": 699,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/95/Pedialyte1.jpg/960px-Pedialyte1.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-6003.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Pedialyte%20Electrolyte%20Solution",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Pedialyte1.jpg",
     "popularity": 73
   },
   {
@@ -497,8 +523,9 @@
     ],
     "size": "28 fl oz",
     "price_cents": 229,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bf/Gatorade_Thirst_Quencher.jpg/960px-Gatorade_Thirst_Quencher.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-6004.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Gatorade%20Thirst%20Quencher%20Lemon-Lime",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Gatorade_Thirst_Quencher.jpg",
     "popularity": 62
   },
   {
@@ -514,8 +541,9 @@
     ],
     "size": "8 fl oz",
     "price_cents": 499,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/Hand_sanitizer_bottle.jpg/960px-Hand_sanitizer_bottle.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-6005.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Purell%20Advanced%20Hand%20Sanitizer",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Hand_sanitizer_bottle.jpg",
     "popularity": 57
   },
   {
@@ -533,8 +561,9 @@
     ],
     "size": "10.75 oz can",
     "price_cents": 199,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8a/Campbell%27s_Chicken_Noodle_Soup_with_Chayote_and_Potatoes.jpg/960px-Campbell%27s_Chicken_Noodle_Soup_with_Chayote_and_Potatoes.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-6006.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Campbell%27s%20Chicken%20Noodle%20Soup",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Campbell%27s_Chicken_Noodle_Soup_with_Chayote_and_Potatoes.jpg",
     "popularity": 64
   },
   {
@@ -552,8 +581,9 @@
     ],
     "size": "100 caplets",
     "price_cents": 1399,
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Tylenol_bottle_closeup.jpg/960px-Tylenol_bottle_closeup.jpg",
+    "image_url": "https://raw.githubusercontent.com/NatanTechofNY/fieldnote-assistant/main/server/catalog/images/WAG-6007.jpg",
     "product_url": "https://www.walgreens.com/search/results.jsp?Ntt=Tylenol%20PM%20Extra%20Strength",
+    "image_source": "https://commons.wikimedia.org/wiki/File:Tylenol_bottle_closeup.jpg",
     "popularity": 68
   }
 ]

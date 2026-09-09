@@ -1,4 +1,4 @@
-import { USER_ID, id, now, queueIndexJob } from "../db.ts";
+import { USER_ID, id, lifeAreaSlug, now, queueIndexJob, renameLifeArea } from "../db.ts";
 import { failure, success } from "../http.ts";
 import { categoryCreate, lifeAreaCreate } from "../schemas.ts";
 import type { RouteContext } from "./context.ts";
@@ -41,7 +41,8 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
   app.get("/api/life-areas", (_req, res) => {
     const rows = db.prepare(`
       SELECT id,slug,name,color,
-        CASE WHEN slug IN ('work','personal','side-project') THEN 1 ELSE 0 END is_builtin
+        CASE WHEN slug IN ('work','personal','side-project') THEN 1 ELSE 0 END is_builtin,
+        CASE WHEN thread_id IS NOT NULL THEN 1 ELSE 0 END is_group
       FROM life_areas WHERE user_id=? ORDER BY
         CASE slug WHEN 'work' THEN 0 WHEN 'personal' THEN 1 WHEN 'side-project' THEN 2 ELSE 3 END,name
     `).all(USER_ID);
@@ -49,33 +50,35 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
   });
   app.post("/api/life-areas", (req, res) => {
     const body = lifeAreaCreate.parse(req.body);
-    const base = body.name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "area";
-    let slug = base;
-    let suffix = 2;
-    while (db.prepare("SELECT 1 found FROM life_areas WHERE user_id=? AND slug=?").get(USER_ID, slug)) {
-      slug = `${base}-${suffix++}`;
-    }
+    const slug = lifeAreaSlug(db, body.name);
     const areaId = id("area");
     const timestamp = now();
     db.prepare(`
       INSERT INTO life_areas(id,user_id,slug,name,color,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?)
     `).run(areaId, USER_ID, slug, body.name, body.color, timestamp, timestamp);
-    return success(res, { id: areaId, slug, ...body, is_builtin: 0 }, 201);
+    return success(res, { id: areaId, slug, ...body, is_builtin: 0, is_group: 0 }, 201);
   });
   app.patch("/api/life-areas/:id", (req, res) => {
     const body = lifeAreaCreate.partial().refine(value => Object.keys(value).length > 0).parse(req.body);
-    const current = db.prepare("SELECT id,slug,name,color FROM life_areas WHERE id=? AND user_id=?")
-      .get(req.params.id, USER_ID) as { id: string; slug: string; name: string; color: string } | undefined;
+    const current = db.prepare("SELECT id,slug,name,color,thread_id FROM life_areas WHERE id=? AND user_id=?")
+      .get(req.params.id, USER_ID) as { id: string; slug: string; name: string; color: string; thread_id: string | null } | undefined;
     if (!current) return failure(res, 404, "Life area not found");
-    db.prepare("UPDATE life_areas SET name=?,color=?,updated_at=? WHERE id=? AND user_id=?")
-      .run(body.name ?? current.name, body.color ?? current.color, now(), current.id, USER_ID);
+    // The name is on every indexed record of the area, so a rename goes through
+    // the helper that queues the rewrites; the colour lives only here.
+    if (body.name !== undefined && body.name !== current.name) renameLifeArea(db, current.id, body.name);
+    if (body.color !== undefined) {
+      db.prepare("UPDATE life_areas SET color=?,updated_at=? WHERE id=? AND user_id=?")
+        .run(body.color, now(), current.id, USER_ID);
+    }
+    search.flushSoon();
     return success(res, {
       id: current.id,
       slug: current.slug,
       name: body.name ?? current.name,
       color: body.color ?? current.color,
       is_builtin: ["work", "personal", "side-project"].includes(current.slug) ? 1 : 0,
+      is_group: current.thread_id ? 1 : 0,
     });
   });
   app.delete("/api/life-areas/:id", (req, res) => {

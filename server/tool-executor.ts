@@ -5,14 +5,15 @@ import {
 } from "./atlassian-service.ts";
 import { productCaption, productJson, searchStoreProductsLocally, STORE_NAME } from "./catalog.ts";
 import {
-  getMemory, getReminders, getStoreProduct, getTodo, id, insertOutboundChannelMessage, instant, now,
-  queueIndexJob, recordMessageReaction, syncTodoReminders, USER_ID, userTimezone,
+  getMemory, getReminders, getStoreProduct, getTodo, GROUP_NAME_SQL, id, insertOutboundChannelMessage, instant, now,
+  queueIndexJob, recordMessageReaction, renameLifeArea, syncTodoReminders, USER_ID, userTimezone,
 } from "./db.ts";
 import {
   DERIVED_REMINDER, DERIVED_SCHEDULE, REPEATING_PARENT, REPEATING_SUBTASK,
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
+import { speakerNameOf } from "./group-thread.ts";
 import type { SmsProvider } from "./integrations.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
@@ -196,6 +197,20 @@ function agentEvidence<T extends {
 }
 
 /**
+ * The fence around a group chat turn. Everything the group creates is filed
+ * under its own life area, and from inside the group nothing else of the
+ * owner's exists: the by-id reads, the lists, and the conversation lookup all
+ * stop at this area and this thread. The owner sees the group's records from
+ * the app and their own 1:1 thread; the fence is one-directional.
+ */
+export type GroupScope = {
+  lifeAreaId: string;
+  threadId: string;
+  /** The assistant has not yet answered in this group since the area was created, so it still owes it a name. */
+  lifeAreaIsNew?: boolean;
+};
+
+/**
  * What a tool needs to know about the turn it is running inside. Every other
  * tool reads and writes the user's own records and needs none of this; the two
  * iMessage tools act on the conversation itself, which has no representation in
@@ -206,6 +221,20 @@ export type ToolTurnContext = {
   address: string;
   threadId: string;
   provider?: SmsProvider;
+  /**
+   * The iMessage group the turn is answering in, when it is one. A text sent
+   * mid-turn goes to the group, and a todo created here keeps the thread so its
+   * reminders come back to the same chat.
+   */
+  groupId?: string;
+  /** Set on a group turn; the single field that says "this turn belongs to a group". */
+  scope?: GroupScope;
+  /**
+   * The message being answered came from the recipient's own number. Decided by
+   * the worker, not by the agent from a label, so the tools that only the owner
+   * may drive in a group have something to check.
+   */
+  speakerIsOwner?: boolean;
   /** The message being answered, and so the only one a tapback may land on. */
   inboundMessageHandle?: string;
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
@@ -216,9 +245,69 @@ export type ToolTurnContext = {
    * rather than a filler sentence.
    */
   reacted?: boolean;
+  /**
+   * Set once `send_message` has texted mid-turn. Like a tapback, a turn that
+   * said everything through it has answered and owes no closing bubble.
+   */
+  sentText?: boolean;
   /** How a tool that texts mid-turn sends; the active provider unless a test supplies one. */
   sendSms?: SmsSender;
 };
+
+/**
+ * Tools that read the owner's working life or their Atlassian account. None of
+ * it belongs in a group chat, so in a group they are refused before touching the
+ * database or the network rather than filtered.
+ */
+const OWNER_ONLY_TOOLS = new Set([
+  "get_review_evidence", "get_reflection_evidence",
+  "list_jira_boards", "list_jira_issues", "get_jira_issue", "list_jira_users",
+  "list_confluence_spaces", "list_confluence_pages", "get_confluence_page", "list_confluence_comments",
+]);
+
+/**
+ * A todo as the turn may see it. Outside a group this is `getTodo`; inside one,
+ * a todo from any other life area is indistinguishable from one that does not
+ * exist, so the caller's own "not found" fires and nothing about the owner's
+ * other records leaks through the error.
+ */
+function scopedTodo(db: Db, todoId: string, scope: GroupScope | undefined): TodoRow | undefined {
+  const row = getTodo(db, todoId);
+  if (row && scope && row.life_area_id !== scope.lifeAreaId) return undefined;
+  return row;
+}
+
+function scopedMemory(db: Db, memoryId: string, scope: GroupScope | undefined): MemoryRow | undefined {
+  const row = getMemory(db, memoryId);
+  if (row && scope && row.life_area_id !== scope.lifeAreaId) return undefined;
+  return row;
+}
+
+/**
+ * How a new record is classified: in a group, the group's own area and no
+ * category; elsewhere, what the agent chose. Categories are the owner's taxonomy
+ * and a group turn has no way to list them, so accepting one would only make
+ * the tool an oracle for their names.
+ */
+function classificationForWrite(
+  scope: GroupScope | undefined,
+  chosen: { life_area_id?: unknown; category_id?: unknown },
+): { life_area_id: string | null; life_area_source: "agent" | null; category_id: string | null } {
+  const lifeAreaId = scope?.lifeAreaId ?? (typeof chosen.life_area_id === "string" && chosen.life_area_id ? chosen.life_area_id : null);
+  const categoryId = !scope && typeof chosen.category_id === "string" && chosen.category_id ? chosen.category_id : null;
+  return { life_area_id: lifeAreaId, life_area_source: lifeAreaId ? "agent" : null, category_id: categoryId };
+}
+
+/**
+ * A turn that can text: an SMS conversation, group or 1:1. The browser has no
+ * bubbles to send, so on web the tool tells the agent to put it in the reply.
+ */
+function textingTurn(context: ToolTurnContext | undefined): ToolTurnContext {
+  if (!context || context.channel !== "sms") {
+    throw new Error("This is not a text conversation; put the message in the reply instead");
+  }
+  return context;
+}
 
 /**
  * Catalog search goes to Algolia when it is configured and falls back to the
@@ -276,6 +365,35 @@ export async function executeAgentTool(
   // as a 400 through the shared error handler.
   const schema = toolInput[name as ToolName];
   if (schema) input = schema.parse(input) as Input;
+  const scope = context?.scope;
+  if (scope && OWNER_ONLY_TOOLS.has(name)) throw new Error(`${name} is not available in a group chat`);
+
+  if (name === "send_message") {
+    // One bubble now, ahead of the turn's own reply: an emoji, an "on it", a
+    // line that deserves to stand alone. Filed like a product card, so the
+    // archive and the index carry it as a message the assistant sent.
+    const turn = textingTurn(context);
+    const text = input.text as string;
+    const send = turn.sendSms ?? sendSms;
+    const delivered = await send(db, turn.address, text, turn.groupId ? { groupId: turn.groupId } : undefined);
+    insertOutboundChannelMessage(db, turn.threadId, text, delivered.sid, delivered.status, { kind: "message" });
+    turn.sentText = true;
+    search.flushSoon();
+    return { sent: true, message_handle: delivered.sid, status: delivered.status };
+  }
+  if (name === "name_group_chat") {
+    if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat");
+    // The first name is the assistant's to give; after that the area is the
+    // owner's record, and a rename asked for by anyone else is refused here
+    // rather than left to the prompt.
+    if (!scope.lifeAreaIsNew && !context.speakerIsOwner) {
+      throw new Error("Only the owner can rename the group chat");
+    }
+    const groupName = input.name as string;
+    renameLifeArea(db, scope.lifeAreaId, groupName);
+    search.flushSoon();
+    return { life_area_id: scope.lifeAreaId, name: groupName };
+  }
 
   if (name === "react_to_message") {
     const turn = imessageTurn(context);
@@ -335,9 +453,10 @@ export async function executeAgentTool(
       return { store: STORE_NAME, channel: "web", sent: 0, cards, failed };
     }
     const send = context.sendSms ?? sendSms;
+    const group = context.groupId ? { groupId: context.groupId } : undefined;
     const sent: Array<Record<string, unknown>> = [];
     if (note && found.length) {
-      const delivered = await send(db, context.address, note);
+      const delivered = await send(db, context.address, note, group);
       insertOutboundChannelMessage(db, context.threadId, note, delivered.sid, delivered.status, {
         kind: "product_note",
       });
@@ -347,7 +466,7 @@ export async function executeAgentTool(
     for (const row of found) {
       const caption = productCaption(row);
       try {
-        const delivered = await send(db, context.address, caption, { mediaUrl: row.image_url });
+        const delivered = await send(db, context.address, caption, { mediaUrl: row.image_url, ...group });
         insertOutboundChannelMessage(db, context.threadId, caption, delivered.sid, delivered.status, {
           kind: "product_card",
           productCard: productJson(row),
@@ -362,17 +481,19 @@ export async function executeAgentTool(
   }
 
   if (name === "get_todo") {
-    const todo = getTodo(db, input.id as string);
+    const todo = scopedTodo(db, input.id as string, scope);
     if (!todo) throw new Error("Todo not found");
     const stats = completionStats(db, todo);
     return {
       todo: todoJson(todo),
+      // The owner may file a subtask of a group todo elsewhere from the app;
+      // from inside the group that subtask does not exist.
       subtasks: (db.prepare(`
         SELECT t.*,c.name category_name,la.name life_area_name,la.slug life_area_slug
         FROM todos t LEFT JOIN categories c ON c.id=t.category_id
         LEFT JOIN life_areas la ON la.id=t.life_area_id
-        WHERE t.user_id=? AND t.parent_id=? ORDER BY t.created_at
-      `).all(USER_ID, todo.id) as TodoRow[]).map(todoJson),
+        WHERE t.user_id=? AND t.parent_id=? ${scope ? "AND t.life_area_id=?" : ""} ORDER BY t.created_at
+      `).all(...(scope ? [USER_ID, todo.id, scope.lifeAreaId] : [USER_ID, todo.id])) as TodoRow[]).map(todoJson),
       reminders: getReminders(db, todo.id),
       ...(stats ? {
         completions: stats.completions.map(row => ({ occurrence_at: row.occurrence_at, completed_at: row.completed_at })),
@@ -382,20 +503,26 @@ export async function executeAgentTool(
     };
   }
   if (name === "list_life_areas") {
+    // A group knows only its own area; the owner's three defaults are not
+    // something it can file under or ask about.
     return db.prepare(`
-      SELECT id,slug,name,color FROM life_areas WHERE user_id=? ORDER BY
+      SELECT id,slug,name,color,CASE WHEN thread_id IS NOT NULL THEN 1 ELSE 0 END is_group
+      FROM life_areas WHERE user_id=? ${scope ? "AND id=?" : ""} ORDER BY
         CASE slug WHEN 'work' THEN 0 WHEN 'personal' THEN 1 WHEN 'side-project' THEN 2 ELSE 3 END,name
-    `).all(USER_ID);
+    `).all(...(scope ? [USER_ID, scope.lifeAreaId] : [USER_ID]));
   }
   if (name === "get_conversation_context") {
     const threadId = input.thread_id as string;
-    const thread = db.prepare(
-      "SELECT id,channel FROM channel_threads WHERE id=? AND user_id=?",
-    ).get(threadId, USER_ID) as { id: string; channel: "web" | "sms" } | undefined;
-    if (!thread) throw new Error("Conversation not found");
+    const thread = db.prepare(`
+      SELECT t.id,t.channel,${GROUP_NAME_SQL} group_name FROM channel_threads t
+      LEFT JOIN life_areas la ON la.thread_id=t.id
+      WHERE t.id=? AND t.user_id=?
+    `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; group_name: string | null } | undefined;
+    // From inside a group, the owner's other conversations do not exist.
+    if (!thread || (scope && thread.id !== scope.threadId)) throw new Error("Conversation not found");
     const limit = Math.min(Math.max(Number(input.limit) || 20, 1), 40);
     const rows = db.prepare(`
-      SELECT id,role,content,created_at FROM channel_messages
+      SELECT id,role,content,created_at,metadata_json FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant')
       ORDER BY created_at,rowid
     `).all(threadId) as Array<{
@@ -403,6 +530,7 @@ export async function executeAgentTool(
       role: "user" | "assistant";
       content: string;
       created_at: string;
+      metadata_json: string;
     }>;
     const messageId = typeof input.message_id === "string" ? input.message_id : null;
     const anchorIndex = messageId ? rows.findIndex(row => row.id === messageId) : rows.length - 1;
@@ -412,8 +540,23 @@ export async function executeAgentTool(
       Math.max(0, center - Math.floor((limit - 1) / 2)),
       Math.max(0, rows.length - limit),
     );
-    const messages = rows.slice(start, Math.min(rows.length, start + limit));
-    return { thread_id: thread.id, channel: thread.channel, messages };
+    const messages = rows.slice(start, Math.min(rows.length, start + limit)).map(row => {
+      const speaker = speakerNameOf(row.metadata_json);
+      return {
+        id: row.id,
+        role: row.role,
+        content: row.content,
+        created_at: row.created_at,
+        // Who said it, by name only: the phone number stays out of tool results.
+        ...(row.role === "user" && speaker ? { speaker } : {}),
+      };
+    });
+    return {
+      thread_id: thread.id,
+      channel: thread.channel,
+      ...(thread.group_name ? { group_name: thread.group_name } : {}),
+      messages,
+    };
   }
   if (name === "list_todos") {
     let rows = db.prepare(`
@@ -422,6 +565,8 @@ export async function executeAgentTool(
       LEFT JOIN life_areas la ON la.id=t.life_area_id
       WHERE t.user_id=? ORDER BY t.created_at DESC
     `).all(USER_ID) as TodoRow[];
+    // A group lists its own area whatever the agent asked for.
+    if (scope) input = { ...input, life_area_id: scope.lifeAreaId };
     for (const key of ["status", "priority", "category_id", "life_area_id", "parent_id"] as const) {
       if (input[key] != null) rows = rows.filter(row => row[key] === input[key]);
     }
@@ -445,7 +590,12 @@ export async function executeAgentTool(
       if (subtasks.length) throw new Error(REPEATING_PARENT);
       if (input.due_at || input.reminder_at || extras.length) throw new Error(DERIVED_SCHEDULE);
     }
-    if (input.parent_id && getTodo(db, input.parent_id as string)?.recurrence_json) throw new Error(REPEATING_PARENT);
+    if (input.parent_id) {
+      const parent = scopedTodo(db, input.parent_id as string, scope);
+      if (!parent) throw new Error("Parent todo not found");
+      if (parent.recurrence_json) throw new Error(REPEATING_PARENT);
+    }
+    const area = classificationForWrite(scope, input);
     const schedule = repeat.derived ?? {
       due_at: (input.due_at as string | null | undefined) ?? null,
       reminder_at: (input.reminder_at as string | null | undefined) ?? null,
@@ -455,14 +605,18 @@ export async function executeAgentTool(
       db.prepare(`
         INSERT INTO todos(
           id,user_id,title,notes,category_id,life_area_id,life_area_source,parent_id,due_at,reminder_at,extra_reminders_json,
-          priority,status,started_at,completed_at,recurrence_json,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          priority,status,started_at,completed_at,recurrence_json,reply_thread_id,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         todoId, USER_ID, input.title as string, input.notes ?? null,
-        input.category_id ?? null, input.life_area_id ?? null,
-        input.life_area_id ? "agent" : null, input.parent_id ?? null, schedule.due_at,
+        area.category_id, area.life_area_id,
+        area.life_area_source, input.parent_id ?? null, schedule.due_at,
         schedule.reminder_at, schedule.extra_reminders_json,
-        input.priority ?? null, "pending", null, null, repeat.recurrence_json, timestamp, timestamp,
+        input.priority ?? null, "pending", null, null, repeat.recurrence_json,
+        // Only a group chat is remembered: a 1:1 or web todo reminds the
+        // recipient's own number, which needs no thread to find.
+        context?.groupId ? context.threadId : null,
+        timestamp, timestamp,
       );
       const created = getTodo(db, todoId);
       if (created) syncTodoReminders(db, created);
@@ -476,8 +630,8 @@ export async function executeAgentTool(
           ) VALUES(?,?,?,?,?,?,?,?,?,NULL,'[]',?,'pending',?,?)
         `).run(
           childId, USER_ID, subtask.title as string, subtask.notes ?? null,
-          input.category_id ?? null, input.life_area_id ?? null,
-          input.life_area_id ? "agent" : null, todoId, subtask.due_at ?? null,
+          area.category_id, area.life_area_id,
+          area.life_area_source, todoId, subtask.due_at ?? null,
           subtask.priority ?? null, timestamp, timestamp,
         );
         queueIndexJob(db, "todo", childId);
@@ -489,19 +643,20 @@ export async function executeAgentTool(
   }
   if (name === "update_todo") {
     const todoId = input.id as string;
-    const current = getTodo(db, todoId);
+    const current = scopedTodo(db, todoId, scope);
     if (!current) throw new Error("Todo not found");
     const patch = (input.patch || {}) as Input;
     const clear = new Set(Array.isArray(patch.clear_fields) ? patch.clear_fields.map(String) : []);
     const value = (key: string, currentValue: unknown) =>
       clear.has(key) ? (key === "extra_reminders" ? [] : null) : patch[key] ?? currentValue;
-    if (current.life_area_source === "user"
+    if (!scope && current.life_area_source === "user"
       && patch.life_area_id !== undefined
       && patch.life_area_id !== current.life_area_id
       && input.override_user_classification !== true) {
       throw new Error("Life area is user-classified; explicit override confirmation is required");
     }
-    const lifeAreaId = value("life_area_id", current.life_area_id);
+    // In a group the area is the group's and stays so; nothing can be moved out.
+    const lifeAreaId = scope ? scope.lifeAreaId : value("life_area_id", current.life_area_id);
     const lifeAreaSource = lifeAreaId === current.life_area_id
       ? current.life_area_source
       : lifeAreaId ? "agent" : null;
@@ -518,8 +673,10 @@ export async function executeAgentTool(
       if (patch.due_at || patch.reminder_at || extras.length) throw new Error(DERIVED_SCHEDULE);
       if (!current.recurrence_json && hasSubtasks(db, current.id)) throw new Error(REPEATING_PARENT);
     }
-    if (parentId && parentId !== current.parent_id && getTodo(db, parentId)?.recurrence_json) {
-      throw new Error(REPEATING_PARENT);
+    if (parentId && parentId !== current.parent_id) {
+      const parent = scopedTodo(db, parentId, scope);
+      if (!parent) throw new Error("Parent todo not found");
+      if (parent.recurrence_json) throw new Error(REPEATING_PARENT);
     }
     const schedule = repeat.derived ?? {
       due_at: value("due_at", current.due_at) as string | null,
@@ -536,7 +693,7 @@ export async function executeAgentTool(
         WHERE id=? AND user_id=?
       `).run(
         value("title", current.title), value("notes", current.notes),
-        value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
+        scope ? current.category_id : value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
         parentId, schedule.due_at, schedule.reminder_at, schedule.extra_reminders_json,
         value("priority", current.priority), repeat.recurrence_json,
         reopen ? "pending" : current.status,
@@ -556,7 +713,7 @@ export async function executeAgentTool(
   if (name === "set_todo_status") {
     const todoId = input.id as string;
     const status = input.status as TodoStatus;
-    const current = getTodo(db, todoId);
+    const current = scopedTodo(db, todoId, scope);
     if (!current) throw new Error("Todo not found");
     const timestamp = now();
     const updated = db.transaction(() => {
@@ -571,7 +728,7 @@ export async function executeAgentTool(
       const row = getTodo(db, todoId) as TodoRow;
       syncTodoReminders(db, row);
       syncOccurrenceCompletion(db, row);
-      completeParentIfSettled(db, row);
+      completeParentIfSettled(db, row, scope?.lifeAreaId);
       queueIndexJob(db, "todo", todoId);
       // Re-read: logging an occurrence stamps last_completed_at on the row.
       return getTodo(db, todoId) as TodoRow;
@@ -582,7 +739,7 @@ export async function executeAgentTool(
   if (name === "delete_todo") {
     if (input.confirmed !== true) throw new Error("Explicit confirmation is required");
     const todoId = input.id as string;
-    if (!getTodo(db, todoId)) throw new Error("Todo not found");
+    if (!scopedTodo(db, todoId, scope)) throw new Error("Todo not found");
     db.transaction(() => {
       db.prepare("DELETE FROM todos WHERE id=? AND user_id=?").run(todoId, USER_ID);
       queueIndexJob(db, "todo", todoId, "delete");
@@ -591,13 +748,14 @@ export async function executeAgentTool(
     return { id: todoId };
   }
   if (name === "get_memory") {
-    const memory = getMemory(db, input.id as string);
+    const memory = scopedMemory(db, input.id as string, scope);
     if (!memory) throw new Error("Memory not found");
     return memoryJson(memory);
   }
   if (name === "create_memory") {
     const timestamp = now();
     const memoryId = id("memory");
+    const area = classificationForWrite(scope, input);
     db.prepare(`
       INSERT INTO memories(
         id,user_id,title,content,kind,mood_label,mood_score,category_id,life_area_id,life_area_source,
@@ -605,8 +763,8 @@ export async function executeAgentTool(
       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       memoryId, USER_ID, input.title ?? null, input.content as string, input.kind || "note",
-      input.mood_label ?? null, input.mood_score ?? null, input.category_id ?? null,
-      input.life_area_id ?? null, input.life_area_id ? "agent" : null,
+      input.mood_label ?? null, input.mood_score ?? null, area.category_id,
+      area.life_area_id, area.life_area_source,
       input.occurred_at ?? null, input.review_worthy === true ? 1 : 0,
       JSON.stringify(input.tags ?? []), timestamp, timestamp,
     );
@@ -616,19 +774,19 @@ export async function executeAgentTool(
   }
   if (name === "update_memory") {
     const memoryId = input.id as string;
-    const current = getMemory(db, memoryId);
+    const current = scopedMemory(db, memoryId, scope);
     if (!current) throw new Error("Memory not found");
     const patch = (input.patch || {}) as Input;
     const clear = new Set(Array.isArray(patch.clear_fields) ? patch.clear_fields.map(String) : []);
     const value = (key: string, currentValue: unknown) =>
       clear.has(key) ? (key === "tags" ? [] : null) : patch[key] ?? currentValue;
-    if (current.life_area_source === "user"
+    if (!scope && current.life_area_source === "user"
       && patch.life_area_id !== undefined
       && patch.life_area_id !== current.life_area_id
       && input.override_user_classification !== true) {
       throw new Error("Life area is user-classified; explicit override confirmation is required");
     }
-    const lifeAreaId = value("life_area_id", current.life_area_id);
+    const lifeAreaId = scope ? scope.lifeAreaId : value("life_area_id", current.life_area_id);
     const lifeAreaSource = lifeAreaId === current.life_area_id
       ? current.life_area_source
       : lifeAreaId ? "agent" : null;
@@ -640,7 +798,7 @@ export async function executeAgentTool(
       `).run(
         value("kind", current.kind), value("title", current.title), value("content", current.content),
         value("mood_label", current.mood_label), value("mood_score", current.mood_score),
-        value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
+        scope ? current.category_id : value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
         value("occurred_at", current.occurred_at),
         value("review_worthy", Boolean(current.review_worthy)) ? 1 : 0,
         JSON.stringify(value("tags", JSON.parse(current.tags_json))), now(), memoryId, USER_ID,
@@ -653,7 +811,7 @@ export async function executeAgentTool(
   if (name === "delete_memory") {
     if (input.confirmed !== true) throw new Error("Explicit confirmation is required");
     const memoryId = input.id as string;
-    if (!getMemory(db, memoryId)) throw new Error("Memory not found");
+    if (!scopedMemory(db, memoryId, scope)) throw new Error("Memory not found");
     db.transaction(() => {
       db.prepare("DELETE FROM memories WHERE id=? AND user_id=?").run(memoryId, USER_ID);
       queueIndexJob(db, "memory", memoryId, "delete");
@@ -666,12 +824,12 @@ export async function executeAgentTool(
     const end = input.end_date as string;
     const todos = (db.prepare(`
       SELECT t.*,c.name category_name FROM todos t LEFT JOIN categories c ON c.id=t.category_id
-      WHERE t.user_id=? AND t.due_at IS NOT NULL ORDER BY t.due_at
-    `).all(USER_ID) as TodoRow[]).filter(todo => {
+      WHERE t.user_id=? AND t.due_at IS NOT NULL ${scope ? "AND t.life_area_id=?" : ""} ORDER BY t.due_at
+    `).all(...(scope ? [USER_ID, scope.lifeAreaId] : [USER_ID])) as TodoRow[]).filter(todo => {
       const date = todo.due_at?.slice(0, 10) || "";
       return date >= start && date <= end;
     });
-    const reminders = getReminders(db).filter(reminder => {
+    const reminders = getReminders(db, undefined, { lifeAreaId: scope?.lifeAreaId }).filter(reminder => {
       const date = reminder.scheduled_for.slice(0, 10);
       return date >= start && date <= end;
     });
@@ -698,7 +856,7 @@ export async function executeAgentTool(
     }));
   }
   if (name === "create_reminder") {
-    const todo = getTodo(db, input.todo_id as string);
+    const todo = scopedTodo(db, input.todo_id as string, scope);
     if (!todo) throw new Error("Todo not found");
     const reminderAt = input.reminder_at as string;
     const extras = JSON.parse(todo.extra_reminders_json) as string[];
@@ -720,17 +878,17 @@ export async function executeAgentTool(
   if (name === "list_reminders") {
     const from = instant(input.from as string);
     const to = instant(input.to as string);
-    return getReminders(db)
+    return getReminders(db, undefined, { lifeAreaId: scope?.lifeAreaId })
       .filter(reminder => instant(reminder.scheduled_for) >= from && instant(reminder.scheduled_for) <= to)
       .slice(0, Number(input.limit) || 50);
   }
   if (name === "update_reminder") {
     const reminderId = input.id as string;
     const reminderAt = input.reminder_at as string;
-    const reminder = getReminders(db).find(row => row.id === reminderId);
+    const reminder = getReminders(db, undefined, { lifeAreaId: scope?.lifeAreaId }).find(row => row.id === reminderId);
     if (!reminder) throw new Error("Reminder not found");
-    const todo = getTodo(db, reminder.todo_id);
-    if (!todo) throw new Error("Todo not found");
+    const todo = scopedTodo(db, reminder.todo_id, scope);
+    if (!todo) throw new Error("Reminder not found");
     if (isDerivedReminder(todo, reminder.kind)) throw new Error(DERIVED_REMINDER);
     db.transaction(() => {
       if (reminder.kind === "due") {
@@ -754,10 +912,10 @@ export async function executeAgentTool(
   if (name === "delete_reminder") {
     if (input.confirmed !== true) throw new Error("Explicit confirmation is required");
     const reminderId = input.id as string;
-    const reminder = getReminders(db).find(row => row.id === reminderId);
+    const reminder = getReminders(db, undefined, { lifeAreaId: scope?.lifeAreaId }).find(row => row.id === reminderId);
     if (!reminder) throw new Error("Reminder not found");
-    const todo = getTodo(db, reminder.todo_id);
-    if (!todo) throw new Error("Todo not found");
+    const todo = scopedTodo(db, reminder.todo_id, scope);
+    if (!todo) throw new Error("Reminder not found");
     if (isDerivedReminder(todo, reminder.kind)) throw new Error(DERIVED_REMINDER);
     db.transaction(() => {
       if (reminder.kind === "due") {

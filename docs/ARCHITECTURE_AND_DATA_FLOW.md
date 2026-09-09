@@ -78,7 +78,7 @@ Conversation storage is split for historical reasons: `channel_threads` / `chann
 
 ### Conversation identity
 
-A thread is keyed on its `address` and lives forever; the `agent_conversation_id` beside it does not. Agent Studio files each turn under that id, titles the conversation from its first message, and never retitles it, so an id that outlives its context window collects weeks of unrelated turns under one stale title. Both channels therefore retire it once the thread has been idle past the 24-hour window a turn is answered against, which keeps one Agent Studio conversation equal to one sitting:
+A thread is keyed on its `address` and lives forever; the `agent_conversation_id` beside it does not. For a text the address is the sender's phone number, except in an iMessage group chat, where it is `group:<group_id>` so everyone in the group shares one thread and each inbound row names its speaker in `metadata_json` (see [Group chats](SMS_AND_EVENTS.md#group-chats)). Agent Studio files each turn under that id, titles the conversation from its first message, and never retitles it, so an id that outlives its context window collects weeks of unrelated turns under one stale title. Both channels therefore retire it once the thread has been idle past the 24-hour window a turn is answered against, which keeps one Agent Studio conversation equal to one sitting:
 
 - **SMS and scheduled sends.** `rotateStaleConversation()` in [`server/agent-runner.ts`](../server/agent-runner.ts) checks the newest message on every `getOrCreateThread()` and issues a new `alg_cnv_…` when the thread has gone cold.
 - **Browser.** The widget would otherwise invent an id per mount, leaving nothing to correlate against. [`src/features/chat/conversation-id.ts`](../src/features/chat/conversation-id.ts) resolves one from `localStorage` under the same idle rule, passes it as the `Chat` `id` prop, and sends it to `POST /api/conversations/web/sync` as `agentConversationId`.
@@ -108,6 +108,8 @@ For exact current state the agent calls `get_agenda`, `list_todos`, `get_todo`, 
 
 For fuzzy discovery it calls `personal_data_search`, which Algolia executes against the three personal-data indices with a fixed `userId` filter and an allowlist of retrievable attributes. Before any update or delete it re-reads the record from SQLite by ID.
 
+A turn answered in an iMessage group chat reads inside a fence. The runner puts `scope` (the group's life area and thread) on `ToolTurnContext`, and [`server/tool-executor.ts`](../server/tool-executor.ts) treats a record from any other area as not found, filters every list to the area, opens only the group's own thread in `get_conversation_context`, and refuses the reflection, review, and Atlassian tools. The hosted search tool runs on Algolia's side, so the same completion request carries `algolia.searchParameters` keyed by index name that pin todos and memories to the area's `life_area_id` and messages to the group's `threadId`; a query-time filter replaces the tool's own, so the `userId` clause is repeated in it. See [Group chats](SMS_AND_EVENTS.md#group-chats).
+
 Older conversation recall is a two-step: search the message index semantically, then call `get_conversation_context` with the returned `threadId` and `objectID` to read a bounded window of surrounding messages out of SQLite. Recent context does not need search — the SMS runner loads a 24-hour, 40-message window from SQLite on every turn, carrying each past turn's successful write results with it as described under Conversation identity.
 
 When Algolia is unavailable, `GET /api/search` and `GET /api/conversations/search` fall back to a bounded SQLite `LIKE` scan, and the agent panel serves a small deterministic assistant instead of Agent Studio. Direct CRUD and agenda reads are unaffected.
@@ -132,7 +134,9 @@ Todos carry `objectID`, `userId`, `title`, `notes`, `status`, `priority`, `categ
 
 Memories carry `objectID`, `userId`, `kind` (exactly `fact`, `note`, or `journal`), `title`, `content`, `mood_label`, `mood_score`, `category_id`, `category_name`, `tags`, `occurred_at`, `occurred_on` and `occurred_on_text` (the local day, as `2026-07-31` and `Friday, July 31, 2026`, searchable so a date works as a query term), `review_worthy`, `created_at`, `updated_at`, and the same life-area fields.
 
-Messages carry `objectID`, `userId`, `threadId`, `channel`, `role`, `content`, and `created_at`. Phone numbers, provider message IDs, delivery metadata, tool inputs and results, and the raw `metadata_json` stay in SQLite only.
+Messages carry `objectID`, `userId`, `threadId`, `channel`, `role`, `content`, and `created_at`. A message from a group chat also carries `group_id` (a `filterOnly` facet), `group_name`, and, on a user message, `speaker_name` — the name from the trusted-contacts list, so recall can answer "what did Cementa ask for". Phone numbers, provider message IDs, delivery metadata, tool inputs and results, and the raw `metadata_json` stay in SQLite only; the completion request likewise names a group speaker by name or by a redacted number, never the full one.
+
+Life areas are not indexed, but each group chat owns one: `life_areas.thread_id` points at the group's thread, a unique partial index allows one area per thread, and every todo and memory created in that group is filed under it. Renaming the area queues a rewrite of every todo and memory that carries its `life_area_name` and of every message of the thread, whose `group_name` is the same name.
 
 Secrets and highly sensitive content should not go into a memory at all, and therefore never into an index.
 

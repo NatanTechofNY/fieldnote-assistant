@@ -21,6 +21,8 @@ export interface CatalogProduct {
   size: string | null;
   price_cents: number;
   image_url: string;
+  /** Where the checked-in image came from (a Wikimedia Commons file page), for attribution. */
+  image_source?: string;
   product_url: string;
   popularity: number;
 }
@@ -62,6 +64,8 @@ export interface TodoRow {
   completed_at: string | null;
   recurrence_json: string | null;
   last_completed_at: string | null;
+  /** The chat thread whose reminders should be answered in place; null means the recipient phone. */
+  reply_thread_id: string | null;
   created_at: string;
   updated_at: string;
   category_name?: string | null;
@@ -105,6 +109,8 @@ export interface LifeAreaRow {
   slug: string;
   name: string;
   color: string;
+  /** The group chat this area belongs to, when it is a group's own area. */
+  thread_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -125,6 +131,13 @@ export interface ReminderRow {
   created_at: string;
   updated_at: string;
   todo_title?: string;
+  /** The todo's current life area; joined on claim, and what a group-bound reminder's subtasks are filtered to. */
+  todo_life_area_id?: string | null;
+  /**
+   * The group thread the reminder goes back to, joined on claim and only while
+   * the todo is still filed in that group's life area; null otherwise.
+   */
+  reply_address?: string | null;
 }
 
 export interface IntegrationSettingRow {
@@ -151,6 +164,8 @@ export interface NotificationPreferencesRow {
   quiet_hours_start: string | null;
   quiet_hours_end: string | null;
   opted_out_at: string | null;
+  trusted_contacts_json: string;
+  group_allow_all: 0 | 1;
   created_at: string;
   updated_at: string;
 }
@@ -213,6 +228,9 @@ export interface ChannelMessageRow {
   updated_at: string;
   user_id?: string;
   channel?: "web" | "sms";
+  address?: string;
+  /** The thread's title when it is a group chat: its life area's name, else the name iMessage gave it. */
+  group_name?: string | null;
 }
 
 export interface IndexJobRow {
