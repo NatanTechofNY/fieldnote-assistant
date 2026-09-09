@@ -2426,8 +2426,13 @@ describe("store catalog and shopping tools", () => {
     assert.deepEqual(sent.map(message => message.to), [ADDRESS, ADDRESS]);
     // The agent's ranking is the order the cards land in.
     assert.match(sent[0].body, /^Advil Ibuprofen Tablets 200 mg \(100 tablets\) — \$11\.49\nhttps:\/\/www\.walgreens\.com\//);
+    assert.match(sent[0].body, /\nTap to view at Walgreens$/, "the link is never the last thing in the caption, so iMessage does not render a preview of walgreens.com's bot challenge");
     assert.match(sent[1].body, /^Tylenol Extra Strength Caplets 500 mg/);
-    assert.match(String(sent[0].options?.mediaUrl), /^https:\/\/upload\.wikimedia\.org\/.*\.jpg$/, "the picture rides as media on the same message");
+    assert.match(
+      String(sent[0].options?.mediaUrl),
+      /^https:\/\/raw\.githubusercontent\.com\/.*\/server\/catalog\/images\/WAG-1002\.jpg$/,
+      "the picture rides as media on the same message, from a host that serves anonymous fetchers",
+    );
     assert.equal(sent[0].options?.replyTo, undefined, "cards are never threaded");
 
     const rows = db.prepare(`

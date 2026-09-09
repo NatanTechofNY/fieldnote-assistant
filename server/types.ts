@@ -21,6 +21,8 @@ export interface CatalogProduct {
   size: string | null;
   price_cents: number;
   image_url: string;
+  /** Where the checked-in image came from (a Wikimedia Commons file page), for attribution. */
+  image_source?: string;
   product_url: string;
   popularity: number;
 }

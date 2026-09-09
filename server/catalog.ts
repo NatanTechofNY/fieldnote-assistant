@@ -42,10 +42,17 @@ export function productJson(row: StoreProductRow): ProductJson {
   };
 }
 
-/** The text that rides under a product image in Messages. */
+/**
+ * The text that rides under a product image in Messages. The link sits in the
+ * middle of the text on purpose: iMessage only builds a rich preview for a URL
+ * at the very start or end of a message, and walgreens.com answers preview
+ * crawlers with a bot challenge, which would otherwise render as a red
+ * "Challenge Validation" bubble under every card. Mid-text it stays a plain
+ * tappable link and the picture above it is the card.
+ */
 export function productCaption(row: StoreProductRow): string {
   const size = row.size ? ` (${row.size})` : "";
-  return `${row.name}${size} — ${formatPrice(row.price_cents)}\n${row.product_url}`;
+  return `${row.name}${size} — ${formatPrice(row.price_cents)}\n${row.product_url}\nTap to view at ${row.store}`;
 }
 
 /**
