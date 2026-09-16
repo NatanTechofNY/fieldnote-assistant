@@ -135,8 +135,44 @@ const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_prod
  * completion, arrives the moment the first tool call comes back, and is always
  * taken off again — either before the reply, or before the agent's own tapback
  * so that one stands alone.
+ *
+ * Which mark goes up says *what* is being looked at: the todo list, the
+ * memories, the calendar, a Jira board. A batch of tools that all read the same
+ * store gets that store's mark; a batch that spans stores, or a tool with no
+ * entry here, gets the plain magnifier. iMessage keeps one tapback per sender
+ * per message, so when the next round turns to a different store the new mark
+ * simply replaces the old one on the device, and the archive is told the same.
+ *
+ * The hosted `personal_data_search` tool is not in this table because the
+ * runner never sees it in flight: Algolia runs it inside the completion and
+ * the `algolia_search_index_<index>` parts arrive with their hits already in
+ * them, so there is no moment at which a mark could be raised. The client
+ * tools that read the same records are what the marks follow.
  */
-const PROGRESS_REACTION = "🔍";
+const PROGRESS_REACTIONS: Record<string, string> = {
+  list_todos: "📋", get_todo: "📋", create_todo: "📋", update_todo: "📋", set_todo_status: "📋", delete_todo: "📋",
+  get_memory: "🧠", create_memory: "🧠", update_memory: "🧠", delete_memory: "🧠",
+  list_reminders: "⏰", create_reminder: "⏰", update_reminder: "⏰", delete_reminder: "⏰",
+  get_agenda: "📅",
+  get_conversation_context: "💬",
+  list_life_areas: "🗂️",
+  get_review_evidence: "🪞", get_reflection_evidence: "🪞",
+  list_jira_boards: "🎫", list_jira_issues: "🎫", get_jira_issue: "🎫", list_jira_users: "🎫",
+  list_confluence_spaces: "📄", list_confluence_pages: "📄", get_confluence_page: "📄", list_confluence_comments: "📄",
+  search_store_products: "🛒",
+};
+const GENERAL_PROGRESS_REACTION = "🔍";
+/** Every mark the runtime may place, so the archive can tell them from the agent's own reactions. */
+const PROGRESS_MARKS = new Set([...Object.values(PROGRESS_REACTIONS), GENERAL_PROGRESS_REACTION]);
+
+/** The mark for one round of tool calls, or `undefined` when the round is gestures only. */
+function progressReactionFor(toolNames: string[]): string | undefined {
+  const marks = new Set(
+    toolNames.filter(name => !GESTURE_TOOLS.has(name)).map(name => PROGRESS_REACTIONS[name] ?? GENERAL_PROGRESS_REACTION),
+  );
+  if (marks.size === 0) return undefined;
+  return marks.size === 1 ? [...marks][0] : GENERAL_PROGRESS_REACTION;
+}
 
 /**
  * Rebuilds one stored assistant turn for the replayed window.
@@ -407,9 +443,11 @@ function saveToolTrace(db: Db, threadId: string, part: AgentPart): void {
  * The search filters a group turn sends with its completion.
  *
  * The hosted `personal_data_search` tool runs inside Agent Studio with a fixed
- * `userId` filter, and the server never sees its queries or its hits, so nothing
- * in the tool executor could stop a question asked in a group from pulling the
- * owner's other todos back. Agent Studio accepts per-request overrides keyed by
+ * `userId` filter. Its calls do come back in the completion, as
+ * `algolia_search_index_<index>` parts already carrying their hits, but by
+ * then the search has run, so nothing in the tool executor could stop a
+ * question asked in a group from pulling the owner's other todos back. Agent
+ * Studio accepts per-request overrides keyed by
  * index name, and a query-time `filters` outranks the one in the tool
  * configuration; it replaces rather than merges, so the user clause is repeated.
  * Todos and memories are fenced to the group's life area, messages to its thread.
@@ -635,23 +673,34 @@ export async function runChannelAgent(
     ? context.inboundMessageHandle
     : undefined;
   const alreadyOn = progressHandle ? reactionsOn(db, thread.id, progressHandle) : [];
-  let progressShown = alreadyOn.includes(PROGRESS_REACTION);
+  /** The mark currently on the message, per the archive; `undefined` when there is none. */
+  let progressShown: string | undefined = alreadyOn.find(reaction => PROGRESS_MARKS.has(reaction));
   /*
-   * iMessage keeps one tapback per sender per message, so the 🔍 does not sit
+   * iMessage keeps one tapback per sender per message, so the mark does not sit
    * beside the agent's own reaction: it replaces it, and lifting it afterwards
    * leaves the message bare. A heart in the first round followed by a lookup in
    * the second ended with no tapback at all. Once the agent has reacted — this
    * attempt or, per the archive, an earlier one — the placeholder stays off.
    */
-  const agentReacted = (): boolean => context.reacted || alreadyOn.some(reaction => reaction !== PROGRESS_REACTION);
-  const setProgress = async (on: boolean): Promise<void> => {
-    if (!progressHandle || progressShown === on) return;
-    if (on && agentReacted()) return;
-    const reaction = on ? PROGRESS_REACTION : `-${PROGRESS_REACTION}`;
+  const agentReacted = (): boolean => context.reacted || alreadyOn.some(reaction => !PROGRESS_MARKS.has(reaction));
+  /**
+   * Puts `reaction` up, or takes the current mark down when it is `undefined`.
+   * Switching marks is one send: the new tapback replaces the old one on the
+   * device, so only the archive has to be told the old entry is gone.
+   */
+  const setProgress = async (reaction: string | undefined): Promise<void> => {
+    if (!progressHandle || progressShown === reaction) return;
+    if (reaction && agentReacted()) return;
     try {
-      await sendSendblueReaction(db, progressHandle, reaction);
-      recordMessageReaction(db, thread.id, progressHandle, reaction);
-      progressShown = on;
+      if (reaction) {
+        await sendSendblueReaction(db, progressHandle, reaction);
+        if (progressShown) recordMessageReaction(db, thread.id, progressHandle, `-${progressShown}`);
+        recordMessageReaction(db, thread.id, progressHandle, reaction);
+      } else if (progressShown) {
+        await sendSendblueReaction(db, progressHandle, `-${progressShown}`);
+        recordMessageReaction(db, thread.id, progressHandle, `-${progressShown}`);
+      }
+      progressShown = reaction;
     } catch (error) {
       console.warn("Progress tapback failed:", error instanceof Error ? error.message : error);
     }
@@ -676,7 +725,7 @@ export async function runChannelAgent(
         && (part.toolCallId || part.tool_call_id),
       );
       if (!toolParts.length) {
-        await setProgress(false);
+        await setProgress(undefined);
         const text = response.parts
           .filter(part => part.type === "text" && typeof part.text === "string")
           .map(part => part.text)
@@ -705,16 +754,18 @@ export async function runChannelAgent(
         return { text: finalText, threadId: thread.id, replyTo: context.replyToMessageHandle };
       }
 
-      // Real work is about to start. A batch that already carries the agent's
-      // own tapback needs no placeholder in front of it.
+      // Real work is about to start, and the mark says on what. A batch that
+      // already carries the agent's own tapback needs no placeholder in front
+      // of it; a gestures-only batch resolves to no mark and changes nothing.
       const toolNames = toolParts.map(part => String(part.type).slice(5));
-      if (toolNames.some(name => !GESTURE_TOOLS.has(name)) && !toolNames.includes("react_to_message")) {
-        await setProgress(true);
+      const mark = progressReactionFor(toolNames);
+      if (mark && !toolNames.includes("react_to_message")) {
+        await setProgress(mark);
       }
       for (const part of toolParts) {
         const toolName = String(part.type).slice(5);
         // The agent's tapback is the one that stays; the placeholder comes off first.
-        if (toolName === "react_to_message") await setProgress(false);
+        if (toolName === "react_to_message") await setProgress(undefined);
         try {
           const data = await executeAgentTool(db, search, toolName, part.input || {}, context);
           // An undefined payload disappears from the serialized body, leaving a
@@ -747,11 +798,11 @@ export async function runChannelAgent(
     throw new Error("Agent exceeded the maximum tool-call iterations");
   } catch (error) {
     /*
-     * The 🔍 is deliberately left up. Every failed inbound turn is retried
-     * behind a short backoff, so the search really is still running as far as
-     * the user is concerned, and lifting and replacing it on every attempt is
-     * the flicker that made a two-minute turn look like six tapbacks. The
-     * attempt that finally answers takes it down.
+     * The progress mark is deliberately left up. Every failed inbound turn is
+     * retried behind a short backoff, so the search really is still running as
+     * far as the user is concerned, and lifting and replacing it on every
+     * attempt is the flicker that made a two-minute turn look like six
+     * tapbacks. The attempt that finally answers takes it down.
      */
     /*
      * An app-composed turn is written again from scratch on the next attempt, so

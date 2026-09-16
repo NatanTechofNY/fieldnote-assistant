@@ -3431,8 +3431,9 @@ describe("Sendblue provider", () => {
 
   /*
    * A turn that goes off to look something up says so on the message itself: a
-   * 🔍 from the moment the first tool call comes back until the answer is ready.
-   * It is the runtime's gesture, not the model's, and it never outlives the turn.
+   * mark from the moment the first tool call comes back until the answer is
+   * ready, chosen by what the tools read — here the life areas, so 🗂️. It is
+   * the runtime's gesture, not the model's, and it never outlives the turn.
    */
   it("marks the message with a searching tapback while tools run and lifts it before answering", async () => {
     const { db } = connectedFixture();
@@ -3449,7 +3450,7 @@ describe("Sendblue provider", () => {
     assert.equal(response?.text, "Work, Personal, and Side Project.");
     assert.deepEqual(
       stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
-      ["🔍", "-🔍"],
+      ["🗂️", "-🗂️"],
       "on when work starts, off before the reply",
     );
     const inbound = db.prepare(`
@@ -3486,7 +3487,7 @@ describe("Sendblue provider", () => {
 
     assert.deepEqual(
       stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
-      ["🔍", "-🔍", "like"],
+      ["🗂️", "-🗂️", "like"],
       "the placeholder comes off before the agent's reaction lands, and is not lifted twice",
     );
     const inbound = db.prepare(`
@@ -3496,8 +3497,8 @@ describe("Sendblue provider", () => {
   });
 
   /*
-   * iMessage holds one tapback per sender per message. A 🔍 raised after the
-   * agent's heart replaced the heart, and taking the 🔍 down again left the
+   * iMessage holds one tapback per sender per message. A mark raised after the
+   * agent's heart replaced the heart, and taking the mark down again left the
    * message bare — the heart never came back. Once the agent has reacted, the
    * placeholder stays off for the rest of the turn, however many lookups follow.
    */
@@ -3526,7 +3527,7 @@ describe("Sendblue provider", () => {
 
     assert.deepEqual(
       stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
-      ["🔍", "-🔍", "love"],
+      ["🗂️", "-🗂️", "love"],
       "the lookups after the heart raise no placeholder, so nothing is lifted at the end",
     );
     const inbound = db.prepare(`
@@ -3566,11 +3567,80 @@ describe("Sendblue provider", () => {
   });
 
   /*
+   * The mark follows the store being read. A turn that checks the todo list and
+   * then goes back for a memory shows 📋 and then 🧠, and since iMessage keeps
+   * one tapback per sender per message the second simply replaces the first —
+   * no removal goes out between them, only the last one is taken down, and the
+   * archive ends up bare.
+   */
+  it("changes the searching tapback to match the store each round reads", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let call = 0;
+    const turns = [
+      [{ type: "tool-list_todos", tool_call_id: "call_1", state: "input-available", input: {} }],
+      [{ type: "tool-get_memory", tool_call_id: "call_2", state: "input-available", input: { id: "mem_missing" } }],
+      [{ type: "tool-list_todos", tool_call_id: "call_3", state: "input-available", input: {} }],
+      [{ type: "text", text: "You wrote that down last spring." }],
+    ];
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "did I ever note why I dropped that?", "SB_stores", {
+        fetcher: async () => {
+          const parts = turns[call];
+          call += 1;
+          return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+        },
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["📋", "🧠", "📋", "-📋"],
+      "each switch is one send that replaces the mark, and only the final mark is lifted",
+    );
+    const inbound = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_stores'
+    `).get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, [], "no superseded mark is left in the archive");
+  });
+
+  it("falls back to the plain magnifier when one round spans several stores", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let call = 0;
+    const turns = [
+      [
+        { type: "tool-list_todos", tool_call_id: "call_1", state: "input-available", input: {} },
+        { type: "tool-list_reminders", tool_call_id: "call_2", state: "input-available", input: { from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z" } },
+      ],
+      [{ type: "text", text: "Nothing due." }],
+    ];
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "what's on today?", "SB_mixed", {
+        fetcher: async () => {
+          const parts = turns[call];
+          call += 1;
+          return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+        },
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["🔍", "-🔍"],
+    );
+  });
+
+  /*
    * A turn that timed out after its write was retried from scratch: the retry
    * saw the request and none of what the first attempt did, wrote again, and the
    * attempt after that described the change as something that had always been
    * there. The tool rows outlive the failure, so the retry resumes from them —
-   * and the 🔍 stays up between attempts instead of blinking on every one.
+   * and the mark stays up between attempts instead of blinking on every one.
    */
   it("resumes a retried turn from the writes its first attempt made", async () => {
     const { db, api } = connectedFixture();
@@ -3625,7 +3695,7 @@ describe("Sendblue provider", () => {
     );
     assert.deepEqual(
       stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
-      ["🔍", "-🔍"],
+      ["📋", "-📋"],
       "the mark goes up once, survives the failed attempt, and comes down with the answer",
     );
   });
