@@ -132,9 +132,9 @@ const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_prod
  * up. The typing bubble says someone is there; this says what they are doing,
  * which on a turn of two or three tool rounds is the difference between a pause
  * and a stall. It is placed by the runtime rather than the model so it costs no
- * completion, arrives the moment the first tool call comes back, and is always
- * taken off again — either before the reply, or before the agent's own tapback
- * so that one stands alone.
+ * completion, arrives the moment the first tool call comes back, and never
+ * outlives the work: it gives way to the closing mark below when the answer is
+ * in, or comes off before the agent's own tapback so that one stands alone.
  *
  * Which mark goes up says *what* is being looked at: the todo list, the
  * memories, the calendar, a Jira board. A batch of tools that all read the same
@@ -164,6 +164,24 @@ const PROGRESS_REACTIONS: Record<string, string> = {
 const GENERAL_PROGRESS_REACTION = "🔍";
 /** Every mark the runtime may place, so the archive can tell them from the agent's own reactions. */
 const PROGRESS_MARKS = new Set([...Object.values(PROGRESS_REACTIONS), GENERAL_PROGRESS_REACTION]);
+
+/**
+ * The tapback left on the message once the turn has answered, when the agent
+ * did not leave one of its own. A progress mark that is simply lifted leaves
+ * the message bare, and a reply about a todo that was just created reads
+ * better under a ✅ than under nothing: the mark is the receipt. A turn that
+ * only looked things up gets Apple's thumbs-up, the ordinary "got it". A turn
+ * that ran no tools gets nothing from the runtime — whether "I had a rough
+ * day" deserves a reaction, and which one, is the model's call, and the prompt
+ * already asks it to react to what the user shares.
+ */
+const CLOSING_REACTIONS = { changed: "✅", answered: "like" } as const;
+
+/**
+ * The writes a ✅ confirms: the ones that change a record. Gestures sit in
+ * `WRITE_TOOLS` so a retry does not repeat them, but they confirm nothing.
+ */
+const RECORD_WRITE_TOOLS = new Set([...WRITE_TOOLS].filter(name => !GESTURE_TOOLS.has(name)));
 
 /** The mark for one round of tool calls, or `undefined` when the round is gestures only. */
 function progressReactionFor(toolNames: string[]): string | undefined {
@@ -665,22 +683,23 @@ export async function runChannelAgent(
     });
   }
 
-  // Best effort at both ends: a progress tapback that fails to land, or to lift,
-  // is not a reason to lose the answer. The archive is what says whether it is
-  // up, so a retried attempt neither sends it twice nor takes it down between
-  // attempts: the turn is still being worked, and the mark stays until it ends.
-  const progressHandle = channel === "sms" && options.inbound?.provider === "sendblue"
+  // Best effort at both ends: a runtime tapback that fails to land, or to
+  // change, is not a reason to lose the answer. The archive is what says
+  // whether a mark is up, so a retried attempt neither sends it twice nor takes
+  // it down between attempts: the turn is still being worked, and the mark
+  // stays until it ends.
+  const markHandle = channel === "sms" && options.inbound?.provider === "sendblue"
     ? context.inboundMessageHandle
     : undefined;
-  const alreadyOn = progressHandle ? reactionsOn(db, thread.id, progressHandle) : [];
-  /** The mark currently on the message, per the archive; `undefined` when there is none. */
-  let progressShown: string | undefined = alreadyOn.find(reaction => PROGRESS_MARKS.has(reaction));
+  const alreadyOn = markHandle ? reactionsOn(db, thread.id, markHandle) : [];
+  /** The runtime's mark currently on the message, per the archive; `undefined` when there is none. */
+  let markShown: string | undefined = alreadyOn.find(reaction => PROGRESS_MARKS.has(reaction));
   /*
    * iMessage keeps one tapback per sender per message, so the mark does not sit
    * beside the agent's own reaction: it replaces it, and lifting it afterwards
    * leaves the message bare. A heart in the first round followed by a lookup in
    * the second ended with no tapback at all. Once the agent has reacted — this
-   * attempt or, per the archive, an earlier one — the placeholder stays off.
+   * attempt or, per the archive, an earlier one — the runtime places nothing.
    */
   const agentReacted = (): boolean => context.reacted || alreadyOn.some(reaction => !PROGRESS_MARKS.has(reaction));
   /**
@@ -688,22 +707,31 @@ export async function runChannelAgent(
    * Switching marks is one send: the new tapback replaces the old one on the
    * device, so only the archive has to be told the old entry is gone.
    */
-  const setProgress = async (reaction: string | undefined): Promise<void> => {
-    if (!progressHandle || progressShown === reaction) return;
+  const setMark = async (reaction: string | undefined): Promise<void> => {
+    if (!markHandle || markShown === reaction) return;
     if (reaction && agentReacted()) return;
     try {
       if (reaction) {
-        await sendSendblueReaction(db, progressHandle, reaction);
-        if (progressShown) recordMessageReaction(db, thread.id, progressHandle, `-${progressShown}`);
-        recordMessageReaction(db, thread.id, progressHandle, reaction);
-      } else if (progressShown) {
-        await sendSendblueReaction(db, progressHandle, `-${progressShown}`);
-        recordMessageReaction(db, thread.id, progressHandle, `-${progressShown}`);
+        await sendSendblueReaction(db, markHandle, reaction);
+        if (markShown) recordMessageReaction(db, thread.id, markHandle, `-${markShown}`);
+        recordMessageReaction(db, thread.id, markHandle, reaction);
+      } else if (markShown) {
+        await sendSendblueReaction(db, markHandle, `-${markShown}`);
+        recordMessageReaction(db, thread.id, markHandle, `-${markShown}`);
       }
-      progressShown = reaction;
+      markShown = reaction;
     } catch (error) {
-      console.warn("Progress tapback failed:", error instanceof Error ? error.message : error);
+      console.warn("Runtime tapback failed:", error instanceof Error ? error.message : error);
     }
+  };
+  // What the turn has done so far, for the closing mark. A write an earlier
+  // attempt landed counts: the retry that answers is confirming that write.
+  let changedRecord = priorWrites.some(part => RECORD_WRITE_TOOLS.has(String(part.type).slice(5)));
+  let lookedUp = false;
+  const closingMark = (): string | undefined => {
+    if (changedRecord) return CLOSING_REACTIONS.changed;
+    if (lookedUp) return CLOSING_REACTIONS.answered;
+    return undefined;
   };
 
   try {
@@ -725,7 +753,10 @@ export async function runChannelAgent(
         && (part.toolCallId || part.tool_call_id),
       );
       if (!toolParts.length) {
-        await setProgress(undefined);
+        // The answer is in. The progress mark gives way to the closing one, or
+        // comes down when there is nothing to confirm; the agent's own reaction,
+        // if it made one, is left exactly where it is.
+        await setMark(closingMark());
         const text = response.parts
           .filter(part => part.type === "text" && typeof part.text === "string")
           .map(part => part.text)
@@ -760,12 +791,13 @@ export async function runChannelAgent(
       const toolNames = toolParts.map(part => String(part.type).slice(5));
       const mark = progressReactionFor(toolNames);
       if (mark && !toolNames.includes("react_to_message")) {
-        await setProgress(mark);
+        await setMark(mark);
       }
       for (const part of toolParts) {
         const toolName = String(part.type).slice(5);
         // The agent's tapback is the one that stays; the placeholder comes off first.
-        if (toolName === "react_to_message") await setProgress(undefined);
+        if (toolName === "react_to_message") await setMark(undefined);
+        if (!GESTURE_TOOLS.has(toolName)) lookedUp = true;
         try {
           const data = await executeAgentTool(db, search, toolName, part.input || {}, context);
           // An undefined payload disappears from the serialized body, leaving a
@@ -773,6 +805,8 @@ export async function runChannelAgent(
           // a confirmation. An explicit null says the write landed and returned
           // nothing to show for it.
           part.output = { success: true, data: data ?? null };
+          // Only a write that landed earns the ✅; a refused delete confirms nothing.
+          if (RECORD_WRITE_TOOLS.has(toolName)) changedRecord = true;
         } catch (error) {
           part.output = { success: false, error: error instanceof Error ? error.message : "Tool failed" };
         }

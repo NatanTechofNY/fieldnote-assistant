@@ -3432,10 +3432,11 @@ describe("Sendblue provider", () => {
   /*
    * A turn that goes off to look something up says so on the message itself: a
    * mark from the moment the first tool call comes back until the answer is
-   * ready, chosen by what the tools read — here the life areas, so 🗂️. It is
-   * the runtime's gesture, not the model's, and it never outlives the turn.
+   * ready, chosen by what the tools read — here the life areas, so 🗂️. When
+   * the answer is in, a lookup-only turn closes with Apple's thumbs-up in its
+   * place. Both are the runtime's gestures, not the model's.
    */
-  it("marks the message with a searching tapback while tools run and lifts it before answering", async () => {
+  it("marks the message with a searching tapback while tools run and closes with a thumbs-up", async () => {
     const { db } = connectedFixture();
     agentStudioEnv();
     const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
@@ -3450,13 +3451,13 @@ describe("Sendblue provider", () => {
     assert.equal(response?.text, "Work, Personal, and Side Project.");
     assert.deepEqual(
       stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
-      ["🗂️", "-🗂️"],
-      "on when work starts, off before the reply",
+      ["🗂️", "like"],
+      "on when work starts, replaced by the closing mark before the reply — no separate removal",
     );
     const inbound = db.prepare(`
       SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_areas'
     `).get() as { metadata_json: string };
-    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, [], "the archive does not keep the placeholder");
+    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, ["like"], "the archive keeps only the closing mark");
     assert.equal(
       (db.prepare("SELECT count(*) count FROM channel_messages WHERE role='tool'").get() as { count: number }).count,
       1,
@@ -3597,13 +3598,13 @@ describe("Sendblue provider", () => {
 
     assert.deepEqual(
       stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
-      ["📋", "🧠", "📋", "-📋"],
-      "each switch is one send that replaces the mark, and only the final mark is lifted",
+      ["📋", "🧠", "📋", "like"],
+      "each switch is one send that replaces the mark, and the closing mark replaces the last",
     );
     const inbound = db.prepare(`
       SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_stores'
     `).get() as { metadata_json: string };
-    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, [], "no superseded mark is left in the archive");
+    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, ["like"], "no superseded mark is left in the archive");
   });
 
   it("falls back to the plain magnifier when one round spans several stores", async () => {
@@ -3631,8 +3632,87 @@ describe("Sendblue provider", () => {
 
     assert.deepEqual(
       stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
-      ["🔍", "-🔍"],
+      ["🔍", "like"],
     );
+  });
+
+  /*
+   * A reply about a todo that was just created reads better under a ✅ than
+   * under nothing: the mark is the receipt. Only a write that landed earns it —
+   * a delete the executor refused confirms nothing, so that turn closes like a
+   * lookup. The agent's own reaction always takes the closing mark's place.
+   */
+  it("closes a turn that changed a record with a checkmark", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "remind me to call the vet", "SB_vet", {
+        fetcher: agentCalling("create_todo", { title: "Call the vet" }, "Added."),
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["📋", "✅"],
+    );
+    const inbound = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_vet'
+    `).get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, ["✅"]);
+  });
+
+  it("does not confirm a write that was refused", async () => {
+    const { db, api } = connectedFixture();
+    agentStudioEnv();
+    const todo = (await api.post("/api/todos").send({ title: "Keep this" }).expect(201)).body.data;
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "delete that", "SB_refused", {
+        // No `confirmed: true`, so the executor throws and the trace records a failure.
+        fetcher: agentCalling("delete_todo", { id: todo.id }, "I need you to confirm that first."),
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["📋", "like"],
+      "a failed write closes like a lookup, never with a checkmark",
+    );
+  });
+
+  it("leaves the agent's own reaction in place instead of a closing mark", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    let call = 0;
+    const turns = [
+      [{ type: "tool-create_memory", tool_call_id: "call_1", state: "input-available", input: { content: "Got the job." } }],
+      [{ type: "tool-react_to_message", tool_call_id: "call_2", state: "input-available", input: { reaction: "🎉" } }],
+      [{ type: "text", text: "Saved. Congratulations!" }],
+    ];
+    try {
+      await runSmsAgent(db, fakeSearch(db), RECIPIENT, "I got the job!!", "SB_job", {
+        fetcher: async () => {
+          const parts = turns[call];
+          call += 1;
+          return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+        },
+        inbound: { provider: "sendblue" },
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(
+      stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
+      ["🧠", "-🧠", "🎉"],
+      "the write happened, but the agent's reaction outranks the runtime's receipt",
+    );
+    const inbound = db.prepare(`
+      SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_job'
+    `).get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, ["🎉"]);
   });
 
   /*
@@ -3640,7 +3720,8 @@ describe("Sendblue provider", () => {
    * saw the request and none of what the first attempt did, wrote again, and the
    * attempt after that described the change as something that had always been
    * there. The tool rows outlive the failure, so the retry resumes from them —
-   * and the mark stays up between attempts instead of blinking on every one.
+   * the mark stays up between attempts instead of blinking on every one, and
+   * the attempt that answers confirms the write the first one made.
    */
   it("resumes a retried turn from the writes its first attempt made", async () => {
     const { db, api } = connectedFixture();
@@ -3695,8 +3776,8 @@ describe("Sendblue provider", () => {
     );
     assert.deepEqual(
       stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction),
-      ["📋", "-📋"],
-      "the mark goes up once, survives the failed attempt, and comes down with the answer",
+      ["📋", "✅"],
+      "the mark goes up once, survives the failed attempt, and the answer closes with the receipt for the earlier write",
     );
   });
 
