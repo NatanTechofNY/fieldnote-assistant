@@ -25,7 +25,7 @@ import {
   setSmsProvider,
 } from "../server/integrations.ts";
 import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } from "../server/event-ingestion.ts";
-import { cleanGroupName, redactedNumber } from "../server/group-thread.ts";
+import { addressesAssistant, cleanGroupName, redactedNumber } from "../server/group-thread.ts";
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
@@ -5151,6 +5151,15 @@ describe("Sendblue provider", () => {
       assert.equal(answered.text, "Actually, that one's on the list for Saturday.", "the answer stands");
       assert.deepEqual(stub.calls.map(call => call.body.reaction), ["📋", "like"], "and it closes like any lookup, quiet or not");
     } finally { stub.restore(); }
+
+    // Named, so for the assistant whatever else it says, and whoever says it:
+    // the one judgment the server keeps for itself.
+    const named = agentCallingMany([{ tool: "stay_quiet", input: { reason: "they're chatting" } }], "Saturday works, I'll remind you both.");
+    const answeredAnyway = await runSmsAgent(db, search, address, "tom says fieldnote can remind us saturday", "SB_named", groupTurnOptions(named.fetcher));
+    assert.equal(answeredAnyway.text, "Saturday works, I'll remind you both.");
+    assert.equal(toolOutputs(db, address).stay_quiet.error, "This message names Fieldnote; it is for you, whoever wrote it");
+    assert.equal(addressesAssistant("FIELDNOTE, remind us"), true);
+    assert.equal(addressesAssistant("my fieldnotes from the trip"), false, "a word that merely contains the name is not the name");
 
     // Wrote first, then tried to say nothing.
     round = 0;
