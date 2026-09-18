@@ -6,14 +6,17 @@ import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import { recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "./agent-runner.ts";
 import { composeDigestTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
-import { claimExternalEvents, completeExternalEvent, pollGranola } from "./event-ingestion.ts";
+import {
+  claimExternalEvents, completeExternalEvent, deferExternalEvent, nextExternalEventAvailableAt, pollGranola,
+  STALE_CLAIM_MS, unsettledExternalEventsBefore,
+} from "./event-ingestion.ts";
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
 import { groupAddress, groupIdOfAddress, OWNER_SPEAKER_NAME } from "./group-thread.ts";
 import { readSendblueInbound, type StopTypingIndicator } from "./sendblue-service.ts";
-import type { Db, DigestBriefRow, ReminderRow, TodoRow } from "./types.ts";
+import type { Db, DigestBriefRow, ExternalEventRow, ReminderRow, TodoRow } from "./types.ts";
 
 type SearchWriter = Pick<AlgoliaSync, "flushSoon" | "flush">;
 
@@ -103,9 +106,70 @@ function groupTurn(
       ...(speakerName ? { speakerName } : {}),
       // What the tools that only the owner may drive check, decided here where
       // the recipient number is known rather than by the agent from a label.
-      ...(speakerIsOwner ? { speakerIsOwner: true } : {}),
+      // Always present: a missing flag left the model guessing, and it guessed
+      // that a rename from the owner's wife was the owner's to make.
+      speakerIsOwner,
     },
   };
+}
+
+/** The thread an inbound text belongs to: the group when it came from one, else the sender. */
+function inboundAddress(message: InboundMessage): string {
+  return message.groupId ? groupAddress(message.groupId) : message.from ?? "";
+}
+
+/**
+ * How many times an earlier text in the same thread may fail before the texts
+ * behind it stop waiting for it. Ordering is worth a few short retries; it is
+ * not worth an hour of silence behind a turn that is never going to answer.
+ */
+const MAX_ORDERED_ATTEMPTS = 3;
+/** How long a deferred text waits when the text in front of it is claimed rather than scheduled. */
+const DEFER_BEHIND_CLAIM_MS = 2_000;
+/** The shortest wait before a retry wake, so a drain that failed early cannot spin. */
+const RETRY_WAKE_FLOOR_MS = 250;
+
+/**
+ * The earlier text in `event`'s thread that has to be answered first, if any.
+ *
+ * Texts in one thread are answered in the order they were sent. A turn that
+ * fails is retried behind a backoff, and a text that arrived a few seconds
+ * behind it used to be claimed in that gap: it read the thread with the failed
+ * turn unanswered and did that turn's work again. "Yes, make those todos" hit
+ * the iteration cap after ten creates; "all due Sunday" ran next, saw the list
+ * untouched, and created all ten again. So a text waits while an earlier text
+ * in its thread is unsettled — pending, failed, or still claimed — and is
+ * released once the earlier one has been retried a few times without answering.
+ */
+function threadBlocker(
+  db: Db,
+  source: SmsProvider,
+  read: (payload: Record<string, unknown>) => InboundMessage,
+  event: ExternalEventRow,
+  address: string,
+): { availableAt: string } | null {
+  for (const earlier of unsettledExternalEventsBefore(db, source, event)) {
+    if (earlier.id === event.id || earlier.attempts > MAX_ORDERED_ATTEMPTS) continue;
+    let earlierAddress: string;
+    try {
+      earlierAddress = inboundAddress(read(JSON.parse(earlier.payload_json) as Record<string, unknown>));
+    } catch {
+      continue;
+    }
+    if (earlierAddress !== address) continue;
+    /*
+     * The worker is one sequential loop, so an earlier text still marked
+     * `processing` is a claim a crash left behind, not one in flight; it comes
+     * back when the claim goes stale, and the text behind it waits for that
+     * moment rather than knocking every two seconds until then.
+     */
+    const dueAt = earlier.status === "processing"
+      ? new Date(Date.parse(earlier.updated_at) + STALE_CLAIM_MS).toISOString()
+      : earlier.available_at;
+    const behindClaim = new Date(Date.now() + DEFER_BEHIND_CLAIM_MS).toISOString();
+    return { availableAt: dueAt > behindClaim ? dueAt : behindClaim };
+  }
+  return null;
 }
 
 function inQuietHours(time: string, start: string | null, end: string | null): boolean {
@@ -488,8 +552,13 @@ export async function runWorkerOnce(
          * metadata so the transcript still says who asked for what. Typing
          * indicators are a 1:1 iMessage feature and are not raised for a group.
          */
+        const address = inboundAddress(message);
+        const blocker = threadBlocker(db, source, read, event, address);
+        if (blocker) {
+          deferExternalEvent(db, event.id, blocker.availableAt);
+          continue;
+        }
         const group = message.groupId ? groupTurn(db, message.groupId, message.from, message.groupName) : null;
-        const address = group ? group.address : message.from;
         // The bubble goes up before the turn starts and comes down once the reply
         // is out rather than in between, so the wait is covered end to end and no
         // bubble outlives the answer.
@@ -603,6 +672,8 @@ export function startWorker(
 ): () => void {
   let running = false;
   let woken = false;
+  let stopped = false;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const tick = async () => {
     if (running) return;
     running = true;
@@ -618,6 +689,7 @@ export function startWorker(
       console.error("Background worker failed", error);
     } finally {
       running = false;
+      scheduleRetryWake();
     }
   };
   // Interval ticks are still dropped while one is in flight; only an explicit
@@ -626,12 +698,41 @@ export function startWorker(
     if (running) woken = true;
     else void tick();
   };
+  /*
+   * A failed turn's retry and a text deferred behind it are both scheduled a
+   * few seconds out, which the interval alone would stretch to a minute. The
+   * drain leaves a one-shot wake at the earliest of them instead.
+   */
+  const scheduleRetryWake = () => {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    if (stopped) return;
+    let next: string | null;
+    try {
+      next = nextExternalEventAvailableAt(db, INBOUND_SOURCES.map(entry => entry.source));
+    } catch {
+      return;
+    }
+    if (!next) return;
+    const delay = Date.parse(next) - Date.now();
+    // The interval already covers anything a minute or more out, and a floor
+    // keeps a drain that threw before claiming from spinning on a zero delay.
+    if (delay >= 60_000) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      wake();
+    }, Math.max(RETRY_WAKE_FLOOR_MS, delay));
+    retryTimer.unref();
+  };
   wakeRunningWorker = wake;
   void tick();
   const timer = setInterval(() => void tick(), 60_000);
   timer.unref();
   return () => {
+    stopped = true;
     clearInterval(timer);
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
     if (wakeRunningWorker === wake) wakeRunningWorker = null;
   };
 }

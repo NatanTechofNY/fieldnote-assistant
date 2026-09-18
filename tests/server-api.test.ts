@@ -4515,7 +4515,8 @@ describe("Sendblue provider", () => {
       groupName: "Home",
       speaker: WIFE,
       speakerName: "Sarah",
-    }, "a trusted contact is named and is not the owner");
+      speakerIsOwner: false,
+    }, "a trusted contact is named and is told apart from the owner");
     assert.deepEqual(sends, [{ to: `group:${GROUP}`, options: { replyTo: undefined, groupId: GROUP } }]);
     assert.deepEqual(typing, [], "typing indicators are a 1:1 feature");
   });
@@ -4858,7 +4859,7 @@ describe("Sendblue provider", () => {
       inbound: { provider: "sendblue" as const, groupId: GROUP },
       userMessageMetadata: {
         groupId: GROUP, groupName: "Home", speaker, speakerName,
-        ...(speaker === RECIPIENT ? { speakerIsOwner: true } : {}),
+        speakerIsOwner: speaker === RECIPIENT,
       },
       sendSms: async () => ({ sid: `SB_${Math.random().toString(36).slice(2)}`, status: "queued" as const }),
     };
@@ -5002,6 +5003,338 @@ describe("Sendblue provider", () => {
     assert.equal(fresh.name, "Us two", "seeded from the thread's title rather than the stale iMessage name");
     const turn = ((later.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
     assert.equal(turn.groupLifeAreaIsNew, true, "and the agent is asked to name it again");
+  });
+
+  /*
+   * A non-owner's message once carried no speakerIsOwner at all, and the model,
+   * reading the area's name back out of the turn context, called name_group_chat
+   * with that same name and was refused. Nothing was being renamed.
+   */
+  it("tells the model a speaker is not the owner and lets anyone restate the current name", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    await runSmsAgent(db, fakeSearch(db), address, "hi", "SB_owner_first", groupTurnOptions(
+      agentCallingMany([{ tool: "name_group_chat", input: { name: "Us two" } }], "Hi.").fetcher, RECIPIENT, "the owner",
+    ));
+    const area = db.prepare("SELECT id,name FROM life_areas WHERE thread_id IS NOT NULL").get() as { id: string; name: string };
+    assert.equal(area.name, "Us two");
+
+    const restated = agentCallingMany([{ tool: "name_group_chat", input: { name: "Us two" } }], "Nice list.");
+    await runSmsAgent(db, fakeSearch(db), address, "here's my list", "SB_sarah_list", groupTurnOptions(restated.fetcher));
+    assert.deepEqual(
+      toolOutputs(db, address).name_group_chat,
+      { success: true, data: { life_area_id: area.id, name: "Us two", unchanged: true } },
+      "the name the group already has is not a rename, so nobody needs permission for it",
+    );
+    const context = ((restated.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+    assert.equal(context.speakerIsOwner, false, "stated, not left out");
+    assert.equal(context.speakerName, "Sarah");
+
+    const renamed = agentCallingMany([{ tool: "name_group_chat", input: { name: "Sarah's list" } }], "Renamed.");
+    await runSmsAgent(db, fakeSearch(db), address, "call it Sarah's list", "SB_sarah_rename", groupTurnOptions(renamed.fetcher));
+    assert.equal(toolOutputs(db, address).name_group_chat.error, "Only the owner can rename the group chat", "a real rename is still the owner's");
+  });
+
+  /*
+   * The duplicate preflight is an Algolia search, and thirty seconds after ten
+   * todos were written a search for their titles found two of them. The record
+   * is in SQLite, so SQLite is asked too, narrowly.
+   */
+  it("refuses to create an open todo that already exists under the same title, area, and parent", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const search = fakeSearch(db);
+    await runSmsAgent(db, search, address, "add USPS and the laundry", "SB_list_1", groupTurnOptions(agentCallingMany([
+      { tool: "create_todo", input: { title: "USPS" } },
+      { tool: "create_todo", input: { title: "Laundry - clean, fold, put away", subtasks: [{ title: "Fold" }] } },
+    ], "Added.").fetcher));
+    const usps = db.prepare("SELECT id FROM todos WHERE title='USPS'").get() as { id: string };
+    const laundry = db.prepare("SELECT id FROM todos WHERE title='Laundry - clean, fold, put away'").get() as { id: string };
+
+    const again = agentCallingMany([
+      { tool: "create_todo", input: { title: "  usps ", due_at: "2026-09-20T21:00:00-04:00" } },
+      { tool: "create_todo", input: { title: "Fold", parent_id: laundry.id } },
+    ], "Done.");
+    await runSmsAgent(db, search, address, "all due Sunday", "SB_list_2", groupTurnOptions(again.fetcher));
+    const outputs = db.prepare(`
+      SELECT m.metadata_json FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      WHERE t.address=? AND m.role='tool' AND m.content='create_todo' ORDER BY m.rowid
+    `).all(address).map(row => (JSON.parse((row as { metadata_json: string }).metadata_json) as { input: { title: string }; output: { success: boolean; error?: string } }));
+    assert.equal(outputs.length, 4);
+    assert.equal(
+      outputs[2].output.error,
+      `A todo titled "USPS" already exists (${usps.id}); update it with update_todo instead of creating another`,
+      "case and spacing do not make it a different task, and the refusal names the record to update",
+    );
+    const fold = db.prepare("SELECT id FROM todos WHERE title='Fold'").get() as { id: string };
+    assert.equal(outputs[3].output.error, `A todo titled "Fold" already exists (${fold.id}); update it with update_todo instead of creating another`);
+    assert.equal((db.prepare("SELECT count(*) count FROM todos WHERE lower(trim(title))='usps'").get() as { count: number }).count, 1);
+
+    // The same words are a different task under another parent, in another
+    // area, or once the first one is finished.
+    const area = db.prepare("SELECT id FROM life_areas WHERE thread_id IS NOT NULL").get() as { id: string };
+    const context: ToolTurnContext = { channel: "web", address: "web", threadId: "thread_web" };
+    const otherParent = await executeAgentTool(db, search, "create_todo", { title: "Trip to Lisbon", life_area_id: "area_personal" }, context) as { id: string };
+    await executeAgentTool(db, search, "create_todo", { title: "Fold", parent_id: otherParent.id, life_area_id: "area_personal" }, context);
+    await executeAgentTool(db, search, "create_todo", { title: "USPS", life_area_id: "area_work" }, context);
+    await assert.rejects(
+      executeAgentTool(db, search, "create_todo", { title: "USPS", life_area_id: "area_work" }, context),
+      /already exists/,
+      "the guard is not a group-chat rule",
+    );
+    db.prepare("UPDATE todos SET status='done',completed_at=? WHERE id=?").run(new Date().toISOString(), usps.id);
+    await executeAgentTool(db, search, "create_todo", { title: "USPS", life_area_id: area.id }, context);
+    assert.equal((db.prepare("SELECT count(*) count FROM todos WHERE title='USPS'").get() as { count: number }).count, 3);
+
+    // A repeating todo done for today is back tomorrow, so it is still the task.
+    const pills = await executeAgentTool(db, search, "create_todo", {
+      title: "Give the cat her pill", life_area_id: "area_personal", recurrence: { freq: "daily", time: "08:00" },
+    }, context) as { id: string };
+    db.prepare("UPDATE todos SET status='done',completed_at=? WHERE id=?").run(new Date().toISOString(), pills.id);
+    await assert.rejects(
+      executeAgentTool(db, search, "create_todo", { title: "give the cat her pill", life_area_id: "area_personal" }, context),
+      new RegExp(pills.id),
+    );
+  });
+
+  /*
+   * The round cap bounds a loop; the clock is what every other thread waits
+   * on. A turn whose rounds are slow is abandoned by time, well short of the
+   * sixteen rounds it is allowed.
+   */
+  it("abandons a turn that runs past its time budget before it runs out of rounds", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const realNow = Date.now;
+    const start = realNow();
+    let elapsed = 0;
+    Date.now = () => start + elapsed;
+    let round = 0;
+    const slowRounds: typeof fetch = async () => {
+      round += 1;
+      // Each round takes ninety seconds of wall clock.
+      elapsed += 90_000;
+      return new Response(JSON.stringify({
+        role: "assistant",
+        parts: [{ type: "tool-create_todo", tool_call_id: `call_slow_${round}`, state: "input-available", input: { title: `Slow item ${round}` } }],
+      }), { status: 200 });
+    };
+    try {
+      await assert.rejects(
+        runSmsAgent(db, fakeSearch(db), address, "do all of it", "SB_slow", groupTurnOptions(slowRounds)),
+        /time budget of 4 minutes/,
+      );
+    } finally { Date.now = realNow; }
+    assert.equal(round, 3, "three ninety-second rounds cross four minutes; the fourth is never asked for");
+    assert.equal((db.prepare("SELECT count(*) count FROM todos").get() as { count: number }).count, 3, "what was written stays written for the retry to see");
+  });
+
+  it("wakes for a retry at its backoff instead of the next interval, and not after it is stopped", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const turns: string[] = [];
+    let fail = true;
+    const stop = startWorker(db, fakeSearch(db), {
+      sendSms: async () => ({ sid: "SB_retry_wake", status: "queued" as const }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, body: string) => {
+        turns.push(body);
+        if (fail) throw new Error("upstream busy");
+        return { text: "ok", threadId: "thread_x" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    });
+    try {
+      await drainTicks();
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, "hello?")).expect(200);
+      await drainTicks();
+      assert.deepEqual(turns, ["hello?"], "the first attempt failed");
+      fail = false;
+      // The first backoff is two seconds; the interval is sixty.
+      await new Promise(resolve => setTimeout(resolve, 2_600));
+      assert.deepEqual(turns, ["hello?", "hello?"], "the retry ran on its own backoff, with no webhook and no interval tick");
+      assert.equal(
+        (db.prepare("SELECT status FROM external_events WHERE json_extract(payload_json,'$.content')='hello?'").get() as { status: string }).status,
+        "processed",
+      );
+
+      fail = true;
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, "still there?")).expect(200);
+      await drainTicks();
+      assert.equal(turns.length, 3, "and the next text failed once, arming another wake");
+    } finally { stop(); }
+    fail = false;
+    await new Promise(resolve => setTimeout(resolve, 2_600));
+    assert.equal(turns.length, 3, "a stopped worker does not wake for the retry it had armed");
+  });
+
+  /*
+   * "Yes" created ten todos one round at a time and ran out of rounds before it
+   * could answer, so no assistant row was written. "All due Sunday" arrived next
+   * and, reading the thread, saw "yes" unanswered and the list untouched.
+   */
+  it("shows the next turn what a turn that ran out of rounds already wrote", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const search = fakeSearch(db);
+    let round = 0;
+    const neverAnswers: typeof fetch = async () => {
+      round += 1;
+      return new Response(JSON.stringify({
+        role: "assistant",
+        parts: [{ type: "tool-create_todo", tool_call_id: `call_item_${round}`, state: "input-available", input: { title: `Item ${round}` } }],
+      }), { status: 200 });
+    };
+    await assert.rejects(
+      runSmsAgent(db, search, address, "yes, make those todos", "SB_yes", groupTurnOptions(neverAnswers)),
+      /maximum tool-call iterations/,
+    );
+    assert.equal(round, 16, "the ceiling clears an honest list before it stops a runaway loop");
+    assert.equal((db.prepare("SELECT count(*) count FROM todos").get() as { count: number }).count, 16);
+
+    type Message = { id: string; role: string; parts: Array<{ type: string; output?: { success?: boolean } }> };
+    const next = agentCallingMany([], "All set for Sunday.");
+    await runSmsAgent(db, search, address, "all due Sunday", "SB_sunday", groupTurnOptions(next.fetcher));
+    const window = next.requests[0].messages as Message[];
+    assert.deepEqual(window.map(message => message.role), ["user", "assistant", "user"]);
+    const replayed = window[1];
+    assert.ok(replayed.id.startsWith("alg_msg_writes_"), "the writes stand in for the reply that never came");
+    assert.equal(replayed.parts.length, 16);
+    assert.ok(replayed.parts.every(part => part.type === "tool-create_todo" && part.output?.success === true));
+    assert.equal(new Set(window.map(message => message.id)).size, window.length, "Agent Studio refuses repeated ids");
+
+    // The retry of the failed turn reads the same writes once, not once from
+    // the window and once more as its own resumed attempt.
+    const retry = agentCallingMany([], "Made all sixteen.");
+    await runSmsAgent(db, search, address, "yes, make those todos", "SB_yes", groupTurnOptions(retry.fetcher));
+    const retryWindow = retry.requests[0].messages as Message[];
+    assert.deepEqual(retryWindow.map(message => message.role), ["user", "assistant", "user", "assistant"]);
+    assert.equal(retryWindow.filter(message => message.id.startsWith("alg_msg_writes_")).length, 1);
+    assert.equal(retryWindow[1].parts.length, 16, "and they sit right after the message they answer");
+    assert.equal(new Set(retryWindow.map(message => message.id)).size, retryWindow.length);
+  });
+
+  /*
+   * An "on it 👀" bubble, a product card, and a delivered reminder are all
+   * assistant rows on the thread, and none of them is the reply. A turn that
+   * texted a bubble, wrote a todo, and then died must still show that todo to
+   * the next text.
+   */
+  it("does not mistake a mid-turn bubble or a reminder for the reply a failed turn never gave", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const search = fakeSearch(db);
+    let round = 0;
+    const bubbleThenDies: typeof fetch = async () => {
+      round += 1;
+      if (round === 1) {
+        return new Response(JSON.stringify({
+          role: "assistant",
+          parts: [
+            { type: "tool-send_message", tool_call_id: "call_bubble", state: "input-available", input: { text: "on it 👀" } },
+            { type: "tool-create_todo", tool_call_id: "call_bill", state: "input-available", input: { title: "Pay the electric bill" } },
+          ],
+        }), { status: 200 });
+      }
+      return new Response("upstream gone", { status: 502 });
+    };
+    await assert.rejects(
+      runSmsAgent(db, search, address, "add the electric bill", "SB_bill", groupTurnOptions(bubbleThenDies)),
+      /502/,
+    );
+    // A reminder for something else lands in the group before the next text.
+    const thread = db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string };
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('cm_reminder',?,'outbound','assistant','Reminder: Change cat water','sent','{"kind":"reminder"}',?,?)
+    `).run(thread.id, new Date().toISOString(), new Date().toISOString());
+
+    type Message = { id: string; role: string; parts: Array<{ type: string; text?: string }> };
+    const next = agentCallingMany([], "Sure.");
+    await runSmsAgent(db, search, address, "make it due Friday", "SB_friday", groupTurnOptions(next.fetcher));
+    const window = next.requests[0].messages as Message[];
+    const replay = window.find(message => message.id.startsWith("alg_msg_writes_"));
+    assert.ok(replay, "the bubble and the reminder did not pass for the reply");
+    assert.deepEqual(replay.parts.map(part => part.type), ["tool-send_message", "tool-create_todo"]);
+    assert.equal(window.indexOf(replay), 1, "and the writes sit right after the request they belong to");
+    assert.deepEqual(
+      window.map(message => message.role),
+      ["user", "assistant", "assistant", "assistant", "user"],
+      "the bubble and the reminder stay in the window as what they are",
+    );
+  });
+
+  it("answers a thread's texts in the order they were sent, even around a failed turn", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const inbound = (from: string, content: string) => api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(from, content)).expect(200);
+    await inbound(WIFE, "yes");
+    await inbound(WIFE, "all due Sunday");
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send({
+      from_number: RECIPIENT, content: "what is on my list", message_handle: "SB_private", is_outbound: false,
+    }).expect(200);
+    // Seven seconds apart in the real exchange; spelled out so two posts landing
+    // in the same millisecond cannot blur the order the test is about.
+    const sentAt = (content: string, secondsAgo: number) => db.prepare(
+      "UPDATE external_events SET created_at=? WHERE json_extract(payload_json,'$.content')=?",
+    ).run(new Date(Date.now() - secondsAgo * 1000).toISOString(), content);
+    sentAt("yes", 30);
+    sentAt("all due Sunday", 23);
+    sentAt("what is on my list", 20);
+
+    const turns: string[] = [];
+    let failYes = true;
+    const worker = {
+      sendSms: async () => ({ sid: `SB_${turns.length}`, status: "queued" as const }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, body: string) => {
+        turns.push(body);
+        if (body === "yes" && failYes) throw new Error("Agent exceeded the maximum tool-call iterations");
+        return { text: "ok", threadId: "thread_x" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    };
+    const event = (content: string) => db.prepare(
+      "SELECT status,attempts,available_at FROM external_events WHERE json_extract(payload_json,'$.content')=?",
+    ).get(content) as { status: string; attempts: number; available_at: string };
+
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(turns, ["yes", "what is on my list"], "the text behind the failed turn waits; another thread's text does not");
+    assert.equal(event("yes").status, "failed");
+    const deferred = event("all due Sunday");
+    assert.equal(deferred.status, "pending");
+    assert.equal(deferred.attempts, 0, "waiting is not an attempt");
+    assert.ok(deferred.available_at >= event("yes").available_at, "and it is due no earlier than the retry in front of it");
+
+    // Time passes: the retry is due, and so is the text behind it.
+    const past = new Date(Date.now() - 1000).toISOString();
+    db.prepare("UPDATE external_events SET available_at=? WHERE status IN ('pending','failed')").run(past);
+    failYes = false;
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(turns.slice(2), ["yes", "all due Sunday"], "answered in the order they were sent");
+    assert.equal(event("all due Sunday").status, "processed");
+    assert.equal(event("all due Sunday").attempts, 1);
+
+    // A turn that keeps failing stops holding the thread after a few tries.
+    await inbound(WIFE, "still there?");
+    await inbound(WIFE, "hello?");
+    sentAt("still there?", 10);
+    sentAt("hello?", 5);
+    turns.length = 0;
+    const stuck = (db.prepare("SELECT id FROM external_events WHERE json_extract(payload_json,'$.content')='still there?'").get() as { id: string }).id;
+    db.prepare("UPDATE external_events SET status='failed',attempts=4,available_at=? WHERE id=?").run(new Date(Date.now() + 3600_000).toISOString(), stuck);
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(turns, ["hello?"], "ordering is worth a few short retries, not an hour of silence");
   });
 
   it("keeps the owner's records out of a group chat", async () => {
