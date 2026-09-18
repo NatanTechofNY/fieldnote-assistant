@@ -1842,6 +1842,15 @@ it("groups the same tasks into columns on the board", async () => {
 
   // Cards are still draggable, which is the only reason the board is kept.
   expect(within(scheduled).getByRole("button", { name: "Drag task" })).toBeInTheDocument();
+
+  // Hiding done work takes the cards away and leaves the column: finishing a
+  // task is a drag to Done, and the target has to be there to drag to.
+  await userEvent.click(screen.getByRole("button", { name: /Hide done/ }));
+  const done = (await screen.findByText("Done")).closest("section") as HTMLElement;
+  expect(within(done).queryByText("Book the flight")).not.toBeInTheDocument();
+  expect(within(done).getByText("Done tasks are hidden")).toBeInTheDocument();
+  expect(within(done).getByText("Drop here to finish")).toBeInTheDocument();
+  expect(within(done).getByText("hidden")).toBeInTheDocument();
 });
 
 /** A card has room for the checklist, so the steps read and tick in place. */

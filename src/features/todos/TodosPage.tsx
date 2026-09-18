@@ -110,9 +110,19 @@ export function TodosPage() {
     </div>
     <LifeAreaFilter areas={lifeAreas} value={lifeAreaId} onChange={setLifeAreaId}/>
     {view === "table" && <TodoTable todos={top} children={children} onOpen={setEditor} onStatus={setStatus}/>}
+    {/* Hiding done work hides the cards, never the column: finishing a task
+        is a drag to Done, and the target has to be there to drag to. */}
     {view === "board" && <DndContext sensors={sensors} onDragEnd={onDragEnd}>
       <div className="board">
-        {boardStatuses.filter(s => showDone || s !== "done").map(status => <TodoColumn key={status} status={status} todos={top.filter(t => t.status === status)} children={children} onOpen={setEditor} onStatus={setStatus} />)}
+        {boardStatuses.map(status => <TodoColumn
+          key={status}
+          status={status}
+          todos={top.filter(t => t.status === status)}
+          children={children}
+          hiddenNote={status === "done" && !showDone ? "Done tasks are hidden" : undefined}
+          onOpen={setEditor}
+          onStatus={setStatus}
+        />)}
       </div>
     </DndContext>}
     {/* The calendar is given every task rather than only the top-level ones:
@@ -349,13 +359,21 @@ function StatusPicker({ todo, onStatus }: { todo: Todo; onStatus: (id: string, s
   </div>;
 }
 
-function TodoColumn({ status, todos, children, onOpen, onStatus }: { status: TodoStatus; todos: Todo[]; children: Map<string, Todo[]>; onOpen: (todo: Todo) => void; onStatus: (id: string, status: TodoStatus) => void }) {
+function TodoColumn({ status, todos, children, hiddenNote, onOpen, onStatus }: {
+  status: TodoStatus;
+  todos: Todo[];
+  children: Map<string, Todo[]>;
+  /** Set when the column's cards are hidden by choice, so the empty column says why and still takes a drop. */
+  hiddenNote?: string;
+  onOpen: (todo: Todo) => void;
+  onStatus: (id: string, status: TodoStatus) => void;
+}) {
   const { setNodeRef, isOver } = useDroppable({ id: status });
   const meta = statusMeta[status];
   return <section ref={setNodeRef} className="column" style={{ outline: isOver ? `1px solid ${meta.color}` : undefined }}>
-    <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong><span className="badge">{todos.length}</span></div>
+    <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong>{hiddenNote ? <span className="badge" title={hiddenNote}>hidden</span> : <span className="badge">{todos.length}</span>}</div>
     <div className="column-body">{todos.map(todo => <DraggableTodo key={todo.id} todo={todo} subtasks={children.get(todo.id) || []} onOpen={onOpen} onStatus={onStatus} />)}
-      {!todos.length && <div className="empty"><span className="eyebrow">Drop here</span></div>}
+      {!todos.length && <div className="empty"><span className="eyebrow">{hiddenNote ?? "Drop here"}</span>{hiddenNote && <span className="eyebrow">Drop here to finish</span>}</div>}
     </div>
   </section>;
 }
