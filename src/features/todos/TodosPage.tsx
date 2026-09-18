@@ -9,8 +9,8 @@ import type {
 import { PageHead } from "../../components/layout/PageHead";
 import { AttachButton, ErrorState, Loading } from "../../components/ui";
 import { LifeAreaFilter } from "../../components/ui/LifeAreaFilter";
-import { useSearchParams } from "react-router-dom";
-import { areaFilterParams, inAreaFilter, initialAreaFilter } from "../../lib/area-filter";
+import { areaFilterParams, inAreaFilter } from "../../lib/area-filter";
+import { useAreaFilter } from "../../lib/use-area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck } from "./SubtaskCheck";
@@ -33,16 +33,15 @@ export function TodosPage() {
   // to make again every morning.
   const [showDone, setShowDone] = usePreference("todos:show-done", true, BOOLEAN);
   const [view, setView] = usePreference<TodoView>("todos:view", "table", TODO_VIEWS);
-  // The board opens on the owner's own work. A group chat's tasks are shared
-  // with the people in it, and a busy chat or two would otherwise be most of
-  // what the first screen shows. A link to a specific task opens wide instead.
-  const [searchParams] = useSearchParams();
-  const [lifeAreaId, setLifeAreaId] = useState(() => initialAreaFilter(searchParams));
+  const { data: lifeAreas = [], isSuccess: areasLoaded } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
+  // The board opens on the owner's own work, or wherever it was left last
+  // time. A group chat's tasks are shared with the people in it, and a busy
+  // chat or two would otherwise be most of what the first screen shows.
+  const [lifeAreaId, setLifeAreaId] = useAreaFilter("todos:area", lifeAreas, areasLoaded);
   const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<Todo | "new" | null>(null);
   // A task captured from the calendar opens on the slot that was clicked.
   const [capturedAt, setCapturedAt] = useState("");
-  const { data: lifeAreas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
   const areaParams = areaFilterParams(lifeAreaId);
   const { data: fetched = [], isLoading, error } = useQuery({
     queryKey: ["todos", showDone, areaParams.life_area_id ?? "", areaParams.scope ?? ""],
@@ -384,7 +383,7 @@ function TodoColumn({ status, todos, children, hiddenNote, onOpen, onStatus }: {
         the setting, so the badge counts whenever there is something to count. */}
     <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong>{hiddenNote && !todos.length ? <span className="badge" title={hiddenNote}>hidden</span> : <span className="badge">{todos.length}</span>}</div>
     <div className="column-body">{todos.map(todo => <DraggableTodo key={todo.id} todo={todo} subtasks={children.get(todo.id) || []} onOpen={onOpen} onStatus={onStatus} />)}
-      {!todos.length && <div className="empty"><span className="eyebrow">{hiddenNote ?? "Drop here"}</span>{hiddenNote && <span className="eyebrow">Drop here to finish</span>}</div>}
+      {!todos.length && <div className="empty"><span className="eyebrow">{hiddenNote ? `${hiddenNote} · drop here to finish` : "Drop here"}</span></div>}
     </div>
   </section>;
 }

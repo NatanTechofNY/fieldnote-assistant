@@ -13,8 +13,8 @@ import { moodEmoji } from "../../lib/mood";
 import { useDebounced } from "../../lib/use-debounced";
 import { useDeepLinkTarget } from "../../lib/use-deep-link-target";
 import { LifeAreaFilter } from "../../components/ui/LifeAreaFilter";
-import { useSearchParams } from "react-router-dom";
-import { areaFilterParams, inAreaFilter, initialAreaFilter } from "../../lib/area-filter";
+import { areaFilterParams, inAreaFilter } from "../../lib/area-filter";
+import { useAreaFilter } from "../../lib/use-area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { MemoryModal } from "./MemoryModal";
 
@@ -22,13 +22,12 @@ export function MemoriesPage() {
   const queryClient = useQueryClient();
   const [kind, setKind] = useState<"all" | MemoryKind>("all");
   const [query, setQuery] = useState("");
-  // Opens on the owner's own memories; a group chat's are shared with the chat.
-  // A link to a specific memory opens wide instead, so the link can land.
-  const [searchParams] = useSearchParams();
-  const [lifeAreaId, setLifeAreaId] = useState(() => initialAreaFilter(searchParams));
+  const { data: lifeAreas = [], isSuccess: areasLoaded } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
+  // Opens on the owner's own memories, or wherever it was left last time; a
+  // group chat's are shared with the chat.
+  const [lifeAreaId, setLifeAreaId] = useAreaFilter("memories:area", lifeAreas, areasLoaded);
   const [editor, setEditor] = useState<Memory | "new" | null>(null);
   const debouncedQuery = useDebounced(query.trim());
-  const { data: lifeAreas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
   const areaParams = areaFilterParams(lifeAreaId);
   const { data, isLoading, error } = useQuery({
     queryKey: ["memories", kind, debouncedQuery, areaParams.life_area_id ?? "", areaParams.scope ?? ""],

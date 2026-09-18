@@ -25,6 +25,7 @@ beforeEach(() => {
   // Views and filters are remembered between visits, which would otherwise make
   // each test open in whatever state the one before it left behind.
   window.localStorage.clear();
+  servedLifeAreas = lifeAreas;
 });
 
 const health = {
@@ -42,6 +43,8 @@ const lifeAreas = [
   { id: "area_personal", slug: "personal", name: "Personal", color: "#b27a22", is_builtin: 1, is_group: 0 },
   { id: "area_group", slug: "home", name: "Home", color: "#2f7d6d", is_builtin: 0, is_group: 1 },
 ];
+/** What `/api/life-areas` answers; a test about a household with no group chats narrows it. */
+let servedLifeAreas = lifeAreas;
 const lifeAreaPatches: Array<{ id: string; body: Record<string, unknown> }> = [];
 
 const todo = (over: Partial<Record<string, unknown>> = {}) => ({
@@ -246,7 +249,7 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       const area = lifeAreas.find(item => item.id === id)!;
       return new Response(JSON.stringify({ success: true, data: { ...area, ...body } }));
     }
-    return new Response(JSON.stringify({ success: true, data: lifeAreas }));
+    return new Response(JSON.stringify({ success: true, data: servedLifeAreas }));
   }
   if (url.includes("/api/todos")) {
     const method = init?.method || "GET";
@@ -1749,6 +1752,38 @@ it("opens on my items and searches the tasks that are showing", async () => {
   expect(screen.getByText("No tasks match this view.")).toBeInTheDocument();
 });
 
+/** Which list you work from is a habit, like the view, and is remembered the same way. */
+it("remembers the area filter between visits and forgets one that no longer exists", async () => {
+  const first = renderAt("/todos");
+  expect(await screen.findByText("The board.")).toBeInTheDocument();
+  const areaTab = (name: string) => within(screen.getByLabelText("Life area filter")).getByRole("button", { name });
+  await userEvent.click(areaTab("Home"));
+  expect(await screen.findByText("Buy cat litter")).toBeInTheDocument();
+  first.unmount();
+
+  const second = renderAt("/todos");
+  expect(await screen.findByText("Buy cat litter")).toBeInTheDocument();
+  expect(areaTab("Home")).toHaveAttribute("aria-pressed", "true");
+  second.unmount();
+
+  // The remembered area is gone: the page falls back rather than filtering on nothing.
+  window.localStorage.setItem("fieldnote:todos:area", "area_deleted");
+  renderAt("/todos");
+  expect(await screen.findByText("Prepare the DevCon demo")).toBeInTheDocument();
+  await waitFor(() => expect(areaTab("My items")).toHaveAttribute("aria-pressed", "true"));
+});
+
+/** Without a group chat, "My items" is "All areas" under another name, so it is not offered. */
+it("hides the My items tab when no group chat has an area", async () => {
+  servedLifeAreas = lifeAreas.filter(area => !area.is_group);
+  renderAt("/todos");
+  expect(await screen.findByText("The board.")).toBeInTheDocument();
+  const filter = screen.getByLabelText("Life area filter");
+  await waitFor(() => expect(within(filter).getByRole("button", { name: "All areas" })).toHaveAttribute("aria-pressed", "true"));
+  expect(within(filter).queryByRole("button", { name: "My items" })).not.toBeInTheDocument();
+  expect(screen.getByText("Prepare the DevCon demo")).toBeInTheDocument();
+});
+
 /** A link is to a record, which may be a group's; a filter that hid it would defeat the link. */
 it("opens wide when a link asks for a specific task", async () => {
   renderAt("/todos?open=todo_group");
@@ -1871,8 +1906,7 @@ it("groups the same tasks into columns on the board", async () => {
   await userEvent.click(screen.getByRole("button", { name: /Hide done/ }));
   const done = (await screen.findByText("Done")).closest("section") as HTMLElement;
   expect(within(done).queryByText("Book the flight")).not.toBeInTheDocument();
-  expect(within(done).getByText("Done tasks are hidden")).toBeInTheDocument();
-  expect(within(done).getByText("Drop here to finish")).toBeInTheDocument();
+  expect(within(done).getByText("Done tasks are hidden · drop here to finish")).toBeInTheDocument();
   expect(within(done).getByText("hidden")).toBeInTheDocument();
 });
 
