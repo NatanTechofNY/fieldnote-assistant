@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { USER_ID, getMemory, id, likePattern, now, queueIndexJob } from "../db.ts";
+import { OWN_AREA_CLAUSE, USER_ID, getMemory, id, likePattern, now, queueIndexJob } from "../db.ts";
 import { failure, success } from "../http.ts";
 import { iso, memoryCreate, memoryPatch } from "../schemas.ts";
 import { memoryJson } from "../serializers.ts";
@@ -9,8 +9,9 @@ import type { RouteContext } from "./context.ts";
 
 /**
  * Loads ranked Algolia hits back out of SQLite in the order Algolia returned
- * them. Occurrence bounds are not facetable on the index, so they are applied
- * here; a hit whose row is already gone is dropped rather than returned empty.
+ * them. Occurrence bounds and the owner's-own scope are not facetable on the
+ * index, so they are applied here; a hit whose row is already gone is dropped
+ * rather than returned empty.
  */
 function hydrateRanked(
   db: Db,
@@ -18,6 +19,7 @@ function hydrateRanked(
   occurrence: {
     occurredFromClause: string;
     occurredToClause: string;
+    scopeClause: string;
     occurred_from?: string;
     occurred_to?: string;
   },
@@ -28,7 +30,7 @@ function hydrateRanked(
     FROM memories m LEFT JOIN categories c ON c.id=m.category_id
     LEFT JOIN life_areas la ON la.id=m.life_area_id
     WHERE m.user_id=@user_id AND m.id IN (${placeholders})
-      ${occurrence.occurredFromClause} ${occurrence.occurredToClause}
+      ${occurrence.occurredFromClause} ${occurrence.occurredToClause} ${occurrence.scopeClause}
   `).all({
     user_id: USER_ID,
     ...Object.fromEntries(objectIds.map((objectId, index) => [`id${index}`, objectId])),
@@ -52,11 +54,15 @@ export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
       occurred_from: iso.optional(),
       occurred_to: iso.optional(),
       mood_label: z.string().max(100).optional(),
+      /** `mine`: the owner's own memories, leaving out every group chat's area. */
+      scope: z.enum(["mine"]).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(500),
     }).parse(req.query);
     const kindClause = query.kind ? "AND m.kind=@kind" : "";
     const categoryClause = query.category_id ? "AND m.category_id=@category_id" : "";
     const lifeAreaClause = query.life_area_id ? "AND m.life_area_id=@life_area_id" : "";
+    // In SQL on both paths, so the row limit is spent on the owner's own rows.
+    const scopeClause = query.scope === "mine" ? `AND ${OWN_AREA_CLAUSE("m")}` : "";
     const reviewClause = query.review_worthy ? "AND m.review_worthy=@review_worthy" : "";
     const occurredFromClause = query.occurred_from ? "AND COALESCE(m.occurred_at,m.created_at)>=@occurred_from" : "";
     const occurredToClause = query.occurred_to ? "AND COALESCE(m.occurred_at,m.created_at)<@occurred_to" : "";
@@ -93,6 +99,7 @@ export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
         const hydrated = ranked.length ? hydrateRanked(db, ranked, {
           occurredFromClause,
           occurredToClause,
+          scopeClause,
           occurred_from: query.occurred_from,
           occurred_to: query.occurred_to,
         }) : [];
@@ -106,7 +113,7 @@ export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
       SELECT m.*,c.name category_name,la.name life_area_name,la.slug life_area_slug
       FROM memories m LEFT JOIN categories c ON c.id=m.category_id
       LEFT JOIN life_areas la ON la.id=m.life_area_id
-      WHERE m.user_id=@user_id ${kindClause} ${categoryClause} ${lifeAreaClause} ${reviewClause}
+      WHERE m.user_id=@user_id ${kindClause} ${categoryClause} ${lifeAreaClause} ${scopeClause} ${reviewClause}
         ${occurredFromClause} ${occurredToClause} ${moodClause} ${searchClause}
       ORDER BY m.created_at DESC LIMIT @limit
     `).all({

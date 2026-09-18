@@ -85,6 +85,11 @@ const todos = [
   // A task with a step still standing, so finishing it has something to ask about.
   todo({ id: "todo_open_parent", title: "Wrap the sprint", priority: null, due_at: null }),
   todo({ id: "todo_open_sub", title: "Send the recap", parent_id: "todo_open_parent", priority: null, due_at: null }),
+  // Asked for in a group chat, so filed under the group's own area.
+  todo({
+    id: "todo_group", title: "Buy cat litter", priority: null, due_at: null,
+    life_area_id: "area_group", life_area_name: "Home", life_area_slug: "home", life_area_source: "agent",
+  }),
 ];
 
 /** Stateful so a saved preference reads back the way the server would return it. */
@@ -1704,6 +1709,55 @@ it("lists tasks with status, schedule and subtask progress", async () => {
 });
 
 /**
+ * The board opens on the owner's own work; a group chat's tasks are one tab
+ * over. Search narrows whatever is showing and keeps a family together.
+ */
+it("opens on my items and searches the tasks that are showing", async () => {
+  renderAt("/todos");
+  expect(await screen.findByText("The board.")).toBeInTheDocument();
+
+  // Picking an area the server has not been asked for yet re-renders the page
+  // around a spinner, so the filter is looked up fresh each time.
+  const areaTab = (name: string) => within(screen.getByLabelText("Life area filter")).getByRole("button", { name });
+  expect(areaTab("My items")).toHaveClass("active");
+  expect(screen.getByText("Prepare the DevCon demo")).toBeInTheDocument();
+  expect(screen.queryByText("Buy cat litter")).not.toBeInTheDocument();
+  // Asked of the server, so the row limit is spent on the owner's own tasks.
+  expect(requestedUrls.some(url => url.includes("/api/todos?") && url.includes("scope=mine"))).toBe(true);
+
+  await userEvent.click(areaTab("All areas"));
+  expect(await screen.findByText("Buy cat litter")).toBeInTheDocument();
+  expect(screen.getByText("Prepare the DevCon demo")).toBeInTheDocument();
+
+  const beforeHome = requestedUrls.length;
+  await userEvent.click(areaTab("Home"));
+  expect(await screen.findByText("Buy cat litter")).toBeInTheDocument();
+  await waitFor(() => expect(requestedUrls.slice(beforeHome).some(url => url.includes("life_area_id=area_group"))).toBe(true));
+  await waitFor(() => expect(screen.queryByText("Prepare the DevCon demo")).not.toBeInTheDocument());
+
+  await userEvent.click(areaTab("My items"));
+  expect(await screen.findByText("Prepare the DevCon demo")).toBeInTheDocument();
+
+  // A step's words find its parent, so the match has somewhere to hang.
+  await userEvent.type(screen.getByLabelText("Search tasks"), "outline");
+  expect(screen.getByText("Prepare the DevCon demo")).toBeInTheDocument();
+  expect(screen.queryByText("Rehearse the walkthrough")).not.toBeInTheDocument();
+  expect(screen.queryByText("Book the flight")).not.toBeInTheDocument();
+
+  await userEvent.clear(screen.getByLabelText("Search tasks"));
+  await userEvent.type(screen.getByLabelText("Search tasks"), "nothing like this");
+  expect(screen.getByText("No tasks match this view.")).toBeInTheDocument();
+});
+
+/** A link is to a record, which may be a group's; a filter that hid it would defeat the link. */
+it("opens wide when a link asks for a specific task", async () => {
+  renderAt("/todos?open=todo_group");
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByLabelText("Task")).toHaveValue("Buy cat litter");
+  expect(within(screen.getByLabelText("Life area filter")).getByRole("button", { name: "All areas" })).toHaveClass("active");
+});
+
+/**
  * Dragging only exists on the board, so the list needs a way to move a task on
  * its own. Both views end up calling the same endpoint.
  */
@@ -1776,6 +1830,18 @@ it("asks what to do with the open steps before finishing their task", async () =
     "/api/todos/todo_open_sub/status",
     "/api/todos/todo_open_parent/status",
   ]);
+
+  // A search that shows the task but not its step changes what is drawn, not
+  // what is owed: the step still stands between the task and Done.
+  await userEvent.type(screen.getByLabelText("Search tasks"), "sprint");
+  expect(screen.queryByText("Prepare the DevCon demo")).not.toBeInTheDocument();
+  const narrowed = taskRow("Wrap the sprint");
+  await userEvent.click(within(narrowed).getByRole("button", { name: "Status: To do" }));
+  await userEvent.click(within(within(narrowed).getByRole("menu")).getByRole("menuitemradio", { name: "Done" }));
+  const askedAgain = await screen.findByRole("dialog");
+  expect(askedAgain).toHaveTextContent("Wrap the sprint still has 1 subtask to go");
+  expect(within(askedAgain).getByText("Send the recap")).toBeInTheDocument();
+  await userEvent.click(within(askedAgain).getByRole("button", { name: "Cancel" }));
 });
 
 it("groups the same tasks into columns on the board", async () => {
@@ -1799,6 +1865,15 @@ it("groups the same tasks into columns on the board", async () => {
 
   // Cards are still draggable, which is the only reason the board is kept.
   expect(within(scheduled).getByRole("button", { name: "Drag task" })).toBeInTheDocument();
+
+  // Hiding done work takes the cards away and leaves the column: finishing a
+  // task is a drag to Done, and the target has to be there to drag to.
+  await userEvent.click(screen.getByRole("button", { name: /Hide done/ }));
+  const done = (await screen.findByText("Done")).closest("section") as HTMLElement;
+  expect(within(done).queryByText("Book the flight")).not.toBeInTheDocument();
+  expect(within(done).getByText("Done tasks are hidden")).toBeInTheDocument();
+  expect(within(done).getByText("Drop here to finish")).toBeInTheDocument();
+  expect(within(done).getByText("hidden")).toBeInTheDocument();
 });
 
 /** A card has room for the checklist, so the steps read and tick in place. */

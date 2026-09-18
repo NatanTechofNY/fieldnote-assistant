@@ -990,6 +990,15 @@ export function getMemory(db: Db, memoryId: string): MemoryRow | undefined {
  */
 export const GROUP_NAME_SQL = "COALESCE(la.name,t.display_name)";
 
+/**
+ * The rows of `alias` that are the owner's own rather than a group chat's: an
+ * unclassified record, or one filed under an area no group thread owns. This
+ * is the "My items" view of the board and the memories page, applied in SQL so
+ * the row limit is spent on what the caller asked for.
+ */
+export const OWN_AREA_CLAUSE = (alias: string): string =>
+  `(${alias}.life_area_id IS NULL OR ${alias}.life_area_id NOT IN (SELECT id FROM life_areas WHERE thread_id IS NOT NULL))`;
+
 export function getChannelMessage(db: Db, messageId: string): ChannelMessageRow | undefined {
   return db.prepare(`
     SELECT m.*,t.user_id,t.channel,t.address,${GROUP_NAME_SQL} group_name

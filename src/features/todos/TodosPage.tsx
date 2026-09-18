@@ -1,14 +1,16 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type DragEndEvent, DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
-import { Archive, BellRing, CalendarDays, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus, Repeat } from "lucide-react";
+import { Archive, BellRing, CalendarDays, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus, Repeat, Search } from "lucide-react";
 import { api } from "../../api";
 import type {
-  Todo, TodoStatus,
+  LifeArea, Todo, TodoStatus,
 } from "../../types";
 import { PageHead } from "../../components/layout/PageHead";
 import { AttachButton, ErrorState, Loading } from "../../components/ui";
 import { LifeAreaFilter } from "../../components/ui/LifeAreaFilter";
+import { useSearchParams } from "react-router-dom";
+import { areaFilterParams, inAreaFilter, initialAreaFilter } from "../../lib/area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck } from "./SubtaskCheck";
@@ -31,18 +33,30 @@ export function TodosPage() {
   // to make again every morning.
   const [showDone, setShowDone] = usePreference("todos:show-done", true, BOOLEAN);
   const [view, setView] = usePreference<TodoView>("todos:view", "table", TODO_VIEWS);
-  const [lifeAreaId, setLifeAreaId] = useState("");
+  // The board opens on the owner's own work. A group chat's tasks are shared
+  // with the people in it, and a busy chat or two would otherwise be most of
+  // what the first screen shows. A link to a specific task opens wide instead.
+  const [searchParams] = useSearchParams();
+  const [lifeAreaId, setLifeAreaId] = useState(() => initialAreaFilter(searchParams));
+  const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<Todo | "new" | null>(null);
   // A task captured from the calendar opens on the slot that was clicked.
   const [capturedAt, setCapturedAt] = useState("");
   const { data: lifeAreas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
-  const { data: todos = [], isLoading, error } = useQuery({
-    queryKey: ["todos", showDone, lifeAreaId],
-    queryFn: () => api.todos(showDone, lifeAreaId || undefined),
+  const areaParams = areaFilterParams(lifeAreaId);
+  const { data: fetched = [], isLoading, error } = useQuery({
+    queryKey: ["todos", showDone, areaParams.life_area_id ?? "", areaParams.scope ?? ""],
+    queryFn: () => api.todos(showDone, areaParams.life_area_id, areaParams.scope),
+    // Switching areas keeps the page up and narrows what is already here;
+    // `inAreaFilter` below makes the held-over rows correct for the new pick.
+    placeholderData: previous => previous,
   });
+  const todos = useMemo(() => narrowTodos(fetched, lifeAreas, lifeAreaId, query), [fetched, lifeAreas, lifeAreaId, query]);
   // `?open=` is how search results land on a specific card. Deriving the editor
-  // from the URL keeps the deep link working on a refresh.
-  const deepLink = useDeepLinkTarget(todos);
+  // from the URL keeps the deep link working on a refresh, and it is resolved
+  // against everything fetched so a link to a group's task opens whatever the
+  // filter is showing.
+  const deepLink = useDeepLinkTarget(fetched);
   const editing = editor ?? deepLink.target ?? null;
   const closeEditor = () => { setEditor(null); setCapturedAt(""); deepLink.clear(); };
   const invalidate = () => {
@@ -58,11 +72,11 @@ export function TodosPage() {
     onSuccess: invalidate,
   });
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 7 } }));
-  const children = useMemo(() => {
-    const map = new Map<string, Todo[]>();
-    todos.forEach(t => { if (t.parent_id) map.set(t.parent_id, [...(map.get(t.parent_id) || []), t]); });
-    return map;
-  }, [todos]);
+  // Two maps of steps under their parent: what is drawn follows the search,
+  // what is owed does not. A search that hides a step must not hide it from
+  // the question asked when its parent is finished.
+  const children = useMemo(() => stepsByParent(todos), [todos]);
+  const allChildren = useMemo(() => stepsByParent(fetched), [fetched]);
   const top = todos.filter(t => !t.parent_id);
   /*
    * Whichever way a task is finished — the row's menu, a drag to Done, the
@@ -70,10 +84,10 @@ export function TodosPage() {
    * through here so the question cannot be skipped by taking another one.
    */
   const [finishing, setFinishing] = useState<Todo | null>(null);
-  const openSubtasks = (todo: Todo) => (children.get(todo.id) || [])
+  const openSubtasks = (todo: Todo) => (allChildren.get(todo.id) || [])
     .filter(subtask => subtask.status !== "done" && subtask.status !== "cancelled");
   const setStatus = (id: string, status: TodoStatus) => {
-    const todo = todos.find(candidate => candidate.id === id);
+    const todo = fetched.find(candidate => candidate.id === id);
     if (status === "done" && todo && openSubtasks(todo).length) setFinishing(todo);
     else mutation.mutate({ id, status });
   };
@@ -85,10 +99,10 @@ export function TodosPage() {
   if (error) return <ErrorState error={error} />;
   return <div className="page">
     <PageHead eyebrow="Plan · move · finish" title="The board." description="Work stays visible. Change a task's state from the row, drag a card on the board, or ask the agent to do it for you." />
-    {/* The page's own controls sit on the filter row: the top right corner
-        belongs to the launcher now. */}
+    {/* The page's own controls sit on the toolbar: the top right corner
+        belongs to the launcher now. Search narrows whatever view is open. */}
     <div className="toolbar">
-      <LifeAreaFilter areas={lifeAreas} value={lifeAreaId} onChange={setLifeAreaId}/>
+      <div className="search"><Search size={16} aria-hidden="true"/><input className="input" aria-label="Search tasks" placeholder="Search tasks by title, notes, or area…" value={query} onChange={e => setQuery(e.target.value)} /></div>
       <div className="toolbar-actions">
         <div className="view-toggle" role="group" aria-label="Task view">
           <button type="button" className={view === "table" ? "active" : ""} aria-pressed={view === "table"} onClick={() => setView("table")}><List size={13}/>List</button>
@@ -99,10 +113,22 @@ export function TodosPage() {
         <button className="button primary" onClick={() => setEditor("new")}><Plus size={15}/>New task</button>
       </div>
     </div>
+    <LifeAreaFilter areas={lifeAreas} value={lifeAreaId} onChange={setLifeAreaId}/>
     {view === "table" && <TodoTable todos={top} children={children} onOpen={setEditor} onStatus={setStatus}/>}
+    {/* Hiding done work hides the cards, never the column: finishing a task
+        is a drag to Done, and the target has to be there to drag to. */}
     {view === "board" && <DndContext sensors={sensors} onDragEnd={onDragEnd}>
+      {query.trim() && !top.length && <div className="table-empty">No tasks match this view.</div>}
       <div className="board">
-        {boardStatuses.filter(s => showDone || s !== "done").map(status => <TodoColumn key={status} status={status} todos={top.filter(t => t.status === status)} children={children} onOpen={setEditor} onStatus={setStatus} />)}
+        {boardStatuses.map(status => <TodoColumn
+          key={status}
+          status={status}
+          todos={top.filter(t => t.status === status)}
+          children={children}
+          hiddenNote={status === "done" && !showDone ? "Done tasks are hidden" : undefined}
+          onOpen={setEditor}
+          onStatus={setStatus}
+        />)}
       </div>
     </DndContext>}
     {/* The calendar is given every task rather than only the top-level ones:
@@ -116,8 +142,8 @@ export function TodosPage() {
     {editing && <TodoModal
       todo={editing === "new" ? undefined : editing}
       defaultDueAt={editing === "new" ? capturedAt : undefined}
-      subtasks={editing === "new" ? [] : children.get(editing.id) || []}
-      allTodos={top}
+      subtasks={editing === "new" ? [] : allChildren.get(editing.id) || []}
+      allTodos={fetched.filter(t => !t.parent_id)}
       lifeAreas={lifeAreas}
       onClose={closeEditor}
     />}
@@ -132,6 +158,32 @@ export function TodosPage() {
       }}
     />}
   </div>;
+}
+
+/** Steps grouped under the id of the task they belong to. */
+function stepsByParent(todos: Todo[]): Map<string, Todo[]> {
+  const map = new Map<string, Todo[]>();
+  todos.forEach(t => { if (t.parent_id) map.set(t.parent_id, [...(map.get(t.parent_id) || []), t]); });
+  return map;
+}
+
+/**
+ * What the page shows of what it fetched: the area filter's two aggregate
+ * views are applied here, and so is the search. A match anywhere in a task's
+ * family keeps the whole family — the task and every step, whichever of them
+ * matched — so the board never shows a step with nowhere to hang, and a
+ * task's "2/5 subtasks" means what it says while a search is on.
+ */
+function narrowTodos(todos: Todo[], areas: LifeArea[], areaFilter: string, query: string): Todo[] {
+  const inArea = todos.filter(todo => inAreaFilter(areaFilter, areas, todo.life_area_id));
+  const needle = query.trim().toLowerCase();
+  if (!needle) return inArea;
+  const matches = (todo: Todo) =>
+    [todo.title, todo.notes, todo.category_name, todo.life_area_name]
+      .some(field => field?.toLowerCase().includes(needle));
+  const rootOf = (todo: Todo) => todo.parent_id ?? todo.id;
+  const families = new Set(inArea.filter(matches).map(rootOf));
+  return inArea.filter(todo => families.has(rootOf(todo)));
 }
 
 /** Board order, so switching views does not reshuffle the same work. */
@@ -316,13 +368,23 @@ function StatusPicker({ todo, onStatus }: { todo: Todo; onStatus: (id: string, s
   </div>;
 }
 
-function TodoColumn({ status, todos, children, onOpen, onStatus }: { status: TodoStatus; todos: Todo[]; children: Map<string, Todo[]>; onOpen: (todo: Todo) => void; onStatus: (id: string, status: TodoStatus) => void }) {
+function TodoColumn({ status, todos, children, hiddenNote, onOpen, onStatus }: {
+  status: TodoStatus;
+  todos: Todo[];
+  children: Map<string, Todo[]>;
+  /** Set when the column's cards are hidden by choice, so the empty column says why and still takes a drop. */
+  hiddenNote?: string;
+  onOpen: (todo: Todo) => void;
+  onStatus: (id: string, status: TodoStatus) => void;
+}) {
   const { setNodeRef, isOver } = useDroppable({ id: status });
   const meta = statusMeta[status];
   return <section ref={setNodeRef} className="column" style={{ outline: isOver ? `1px solid ${meta.color}` : undefined }}>
-    <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong><span className="badge">{todos.length}</span></div>
+    {/* A finished task still holding open steps stays on the board whatever
+        the setting, so the badge counts whenever there is something to count. */}
+    <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong>{hiddenNote && !todos.length ? <span className="badge" title={hiddenNote}>hidden</span> : <span className="badge">{todos.length}</span>}</div>
     <div className="column-body">{todos.map(todo => <DraggableTodo key={todo.id} todo={todo} subtasks={children.get(todo.id) || []} onOpen={onOpen} onStatus={onStatus} />)}
-      {!todos.length && <div className="empty"><span className="eyebrow">Drop here</span></div>}
+      {!todos.length && <div className="empty"><span className="eyebrow">{hiddenNote ?? "Drop here"}</span>{hiddenNote && <span className="eyebrow">Drop here to finish</span>}</div>}
     </div>
   </section>;
 }
