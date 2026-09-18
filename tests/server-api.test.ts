@@ -9,7 +9,7 @@ import { recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgen
 import { AlgoliaSync, configuredIndexNames } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
-import { getTodo, loadStoreCatalog, openDatabase, queueIndexJob, readStoreCatalog, USER_ID } from "../server/db.ts";
+import { ensureGroupLifeArea, getTodo, loadStoreCatalog, openDatabase, queueIndexJob, readStoreCatalog, USER_ID } from "../server/db.ts";
 import { currentFiscalQuarter, fiscalQuarterRange } from "../server/fiscal-quarter.ts";
 import { reflectionPeriod } from "../server/reflection-period.ts";
 import {
@@ -578,6 +578,40 @@ describe("frontend API contract", () => {
     assert.equal(memory.life_area_slug, "work");
     assert.equal((await api.get("/api/memories?life_area_id=area_work&review_worthy=true").expect(200)).body.data.memories.length, 1);
     assert.equal((await api.get("/api/todos?life_area_id=area_work").expect(200)).body.data.length, 1);
+  });
+
+  /*
+   * "My items" is decided in SQL: a group chat's records are left out before
+   * the row limit, so a busy chat cannot crowd the owner's own rows out of
+   * the window and then be dropped on the client anyway.
+   */
+  it("lists the owner's own todos and memories with scope=mine, leaving every group's out", async () => {
+    const { api, db } = fixture();
+    const timestamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_home',?,'sms','group:home','cnv_home',?,?)
+    `).run(USER_ID, timestamp, timestamp);
+    const home = ensureGroupLifeArea(db, "thread_home", "Home");
+    await api.post("/api/todos").send({ title: "Buy cat litter", life_area_id: home.id }).expect(201);
+    await api.post("/api/todos").send({ title: "Prepare launch review", life_area_id: "area_work" }).expect(201);
+    await api.post("/api/todos").send({ title: "Unfiled errand" }).expect(201);
+    await api.post("/api/memories").send({ title: "Litter brand", content: "Fresh Step", kind: "fact", life_area_id: home.id }).expect(201);
+    await api.post("/api/memories").send({ title: "Launch result", content: "Improved activation.", kind: "note", life_area_id: "area_work" }).expect(201);
+
+    const mine = (await api.get("/api/todos?scope=mine").expect(200)).body.data as Array<{ title: string }>;
+    assert.deepEqual(mine.map(todo => todo.title).sort(), ["Prepare launch review", "Unfiled errand"], "unfiled counts as the owner's");
+    assert.equal((await api.get("/api/todos").expect(200)).body.data.length, 3, "the plain list still has everything");
+    assert.deepEqual(
+      ((await api.get("/api/memories?scope=mine").expect(200)).body.data.memories as Array<{ title: string }>).map(memory => memory.title),
+      ["Launch result"],
+    );
+    assert.deepEqual(
+      ((await api.get("/api/memories?scope=mine&query=Fresh").expect(200)).body.data.memories as unknown[]),
+      [],
+      "the scope holds on the search path too",
+    );
+    await api.get("/api/todos?scope=everything").expect(400);
   });
 
   it("manages custom life areas without allowing default deletion", async () => {

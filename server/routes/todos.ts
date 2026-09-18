@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { USER_ID, getReminders, getTodo, id, now, queueIndexJob, syncTodoReminders, userTimezone } from "../db.ts";
+import { OWN_AREA_CLAUSE, USER_ID, getReminders, getTodo, id, now, queueIndexJob, syncTodoReminders, userTimezone } from "../db.ts";
 import { failure, success } from "../http.ts";
 import {
   DERIVED_SCHEDULE, REPEATING_PARENT, REPEATING_SUBTASK, planRecurrenceWrite,
@@ -24,10 +24,15 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
       due_from: iso.optional(),
       due_to: iso.optional(),
       recurring: z.enum(["true", "false"]).optional(),
+      /** `mine`: the owner's own tasks, leaving out every group chat's area. */
+      scope: z.enum(["mine"]).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(500),
     }).parse(req.query);
     const clauses = ["t.user_id=@user_id"];
     const params: Record<string, string | number> = { user_id: USER_ID, limit: query.limit };
+    // Applied here rather than after the fetch so the row limit is spent on the
+    // rows the caller asked for, not on a busy chat's tasks that are then dropped.
+    if (query.scope === "mine") clauses.push(OWN_AREA_CLAUSE("t"));
     /*
      * A finished parent still holding open steps stays in the list. Only
      * top-level rows are drawn, so dropping it would take its unfinished

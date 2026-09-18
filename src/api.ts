@@ -44,9 +44,10 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs?: number):
 export const api = {
   overview: () => request<Overview>("/overview"),
   health: () => request<Health>("/health"),
-  todos: (includeDone = true, lifeAreaId?: string) => {
+  todos: (includeDone = true, lifeAreaId?: string, scope?: "mine") => {
     const query = new URLSearchParams({ includeDone: String(includeDone) });
     if (lifeAreaId) query.set("life_area_id", lifeAreaId);
+    if (scope) query.set("scope", scope);
     return request<Todo[]>(`/todos?${query}`);
   },
   todo: (id: string) => request<{ todo: Todo; subtasks: Todo[]; reminders: Reminder[] }>(`/todos/${id}`),
@@ -59,11 +60,12 @@ export const api = {
   setTodoStatus: (id: string, status: TodoStatus) =>
     request<Todo>(`/todos/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
   deleteTodo: (id: string) => request<{ id: string }>(`/todos/${id}`, { method: "DELETE" }),
-  memories: (params?: { kind?: string; query?: string; life_area_id?: string; review_worthy?: boolean }) => {
+  memories: (params?: { kind?: string; query?: string; life_area_id?: string; scope?: "mine"; review_worthy?: boolean }) => {
     const query = new URLSearchParams();
     if (params?.kind && params.kind !== "all") query.set("kind", params.kind);
     if (params?.query) query.set("query", params.query);
     if (params?.life_area_id) query.set("life_area_id", params.life_area_id);
+    if (params?.scope) query.set("scope", params.scope);
     if (params?.review_worthy !== undefined) query.set("review_worthy", String(params.review_worthy));
     return request<MemoryListResult>(`/memories?${query}`);
   },

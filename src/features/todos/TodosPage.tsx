@@ -9,7 +9,8 @@ import type {
 import { PageHead } from "../../components/layout/PageHead";
 import { AttachButton, ErrorState, Loading } from "../../components/ui";
 import { LifeAreaFilter } from "../../components/ui/LifeAreaFilter";
-import { areaFilterParam, inAreaFilter, MY_ITEMS } from "../../lib/area-filter";
+import { useSearchParams } from "react-router-dom";
+import { areaFilterParams, inAreaFilter, initialAreaFilter } from "../../lib/area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck } from "./SubtaskCheck";
@@ -34,17 +35,18 @@ export function TodosPage() {
   const [view, setView] = usePreference<TodoView>("todos:view", "table", TODO_VIEWS);
   // The board opens on the owner's own work. A group chat's tasks are shared
   // with the people in it, and a busy chat or two would otherwise be most of
-  // what the first screen shows.
-  const [lifeAreaId, setLifeAreaId] = useState(MY_ITEMS);
+  // what the first screen shows. A link to a specific task opens wide instead.
+  const [searchParams] = useSearchParams();
+  const [lifeAreaId, setLifeAreaId] = useState(() => initialAreaFilter(searchParams));
   const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<Todo | "new" | null>(null);
   // A task captured from the calendar opens on the slot that was clicked.
   const [capturedAt, setCapturedAt] = useState("");
   const { data: lifeAreas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
-  const areaParam = areaFilterParam(lifeAreaId);
+  const areaParams = areaFilterParams(lifeAreaId);
   const { data: fetched = [], isLoading, error } = useQuery({
-    queryKey: ["todos", showDone, areaParam ?? ""],
-    queryFn: () => api.todos(showDone, areaParam),
+    queryKey: ["todos", showDone, areaParams.life_area_id ?? "", areaParams.scope ?? ""],
+    queryFn: () => api.todos(showDone, areaParams.life_area_id, areaParams.scope),
   });
   const todos = useMemo(() => narrowTodos(fetched, lifeAreas, lifeAreaId, query), [fetched, lifeAreas, lifeAreaId, query]);
   // `?open=` is how search results land on a specific card. Deriving the editor
@@ -67,11 +69,11 @@ export function TodosPage() {
     onSuccess: invalidate,
   });
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 7 } }));
-  const children = useMemo(() => {
-    const map = new Map<string, Todo[]>();
-    todos.forEach(t => { if (t.parent_id) map.set(t.parent_id, [...(map.get(t.parent_id) || []), t]); });
-    return map;
-  }, [todos]);
+  // Two maps of steps under their parent: what is drawn follows the search,
+  // what is owed does not. A search that hides a step must not hide it from
+  // the question asked when its parent is finished.
+  const children = useMemo(() => stepsByParent(todos), [todos]);
+  const allChildren = useMemo(() => stepsByParent(fetched), [fetched]);
   const top = todos.filter(t => !t.parent_id);
   /*
    * Whichever way a task is finished — the row's menu, a drag to Done, the
@@ -79,10 +81,10 @@ export function TodosPage() {
    * through here so the question cannot be skipped by taking another one.
    */
   const [finishing, setFinishing] = useState<Todo | null>(null);
-  const openSubtasks = (todo: Todo) => (children.get(todo.id) || [])
+  const openSubtasks = (todo: Todo) => (allChildren.get(todo.id) || [])
     .filter(subtask => subtask.status !== "done" && subtask.status !== "cancelled");
   const setStatus = (id: string, status: TodoStatus) => {
-    const todo = todos.find(candidate => candidate.id === id);
+    const todo = fetched.find(candidate => candidate.id === id);
     if (status === "done" && todo && openSubtasks(todo).length) setFinishing(todo);
     else mutation.mutate({ id, status });
   };
@@ -136,7 +138,7 @@ export function TodosPage() {
     {editing && <TodoModal
       todo={editing === "new" ? undefined : editing}
       defaultDueAt={editing === "new" ? capturedAt : undefined}
-      subtasks={editing === "new" ? [] : fetched.filter(t => t.parent_id === editing.id)}
+      subtasks={editing === "new" ? [] : allChildren.get(editing.id) || []}
       allTodos={fetched.filter(t => !t.parent_id)}
       lifeAreas={lifeAreas}
       onClose={closeEditor}
@@ -152,6 +154,13 @@ export function TodosPage() {
       }}
     />}
   </div>;
+}
+
+/** Steps grouped under the id of the task they belong to. */
+function stepsByParent(todos: Todo[]): Map<string, Todo[]> {
+  const map = new Map<string, Todo[]>();
+  todos.forEach(t => { if (t.parent_id) map.set(t.parent_id, [...(map.get(t.parent_id) || []), t]); });
+  return map;
 }
 
 /**

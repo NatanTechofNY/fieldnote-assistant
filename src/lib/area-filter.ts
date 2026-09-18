@@ -10,6 +10,15 @@ import type {
  */
 export const MY_ITEMS = "mine";
 
+/**
+ * Where a page's area filter starts. My items, unless the page was opened by a
+ * link to a specific record (`?open=<id>`): the link is to that record, which
+ * may be a group's, and a filter that hid it would defeat the link.
+ */
+export function initialAreaFilter(searchParams: URLSearchParams): string {
+  return searchParams.has("open") ? "" : MY_ITEMS;
+}
+
 /** Whether a record filed under `lifeAreaId` (null for none) is shown by `value`. */
 export function inAreaFilter(value: string, areas: LifeArea[], lifeAreaId: string | null | undefined): boolean {
   if (!value) return true;
@@ -19,7 +28,14 @@ export function inAreaFilter(value: string, areas: LifeArea[], lifeAreaId: strin
   return lifeAreaId === value;
 }
 
-/** The area id to ask the server for; the two aggregate views are narrowed on the client. */
-export function areaFilterParam(value: string): string | undefined {
-  return value && value !== MY_ITEMS ? value : undefined;
+/**
+ * What to ask the server for. A specific area is a `life_area_id`; "My items"
+ * is `scope: "mine"`, applied in SQL so the row limit is spent on the owner's
+ * own records rather than on a busy chat's that would then be dropped here.
+ * `inAreaFilter()` is still applied to what comes back, so a stale cache entry
+ * fetched under another filter never shows the wrong rows.
+ */
+export function areaFilterParams(value: string): { life_area_id?: string; scope?: "mine" } {
+  if (value === MY_ITEMS) return { scope: "mine" };
+  return value ? { life_area_id: value } : {};
 }

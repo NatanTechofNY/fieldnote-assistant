@@ -1722,6 +1722,8 @@ it("opens on my items and searches the tasks that are showing", async () => {
   expect(areaTab("My items")).toHaveClass("active");
   expect(screen.getByText("Prepare the DevCon demo")).toBeInTheDocument();
   expect(screen.queryByText("Buy cat litter")).not.toBeInTheDocument();
+  // Asked of the server, so the row limit is spent on the owner's own tasks.
+  expect(requestedUrls.some(url => url.includes("/api/todos?") && url.includes("scope=mine"))).toBe(true);
 
   await userEvent.click(areaTab("All areas"));
   expect(await screen.findByText("Buy cat litter")).toBeInTheDocument();
@@ -1744,6 +1746,14 @@ it("opens on my items and searches the tasks that are showing", async () => {
   await userEvent.clear(screen.getByLabelText("Search tasks"));
   await userEvent.type(screen.getByLabelText("Search tasks"), "nothing like this");
   expect(screen.getByText("No tasks match this view.")).toBeInTheDocument();
+});
+
+/** A link is to a record, which may be a group's; a filter that hid it would defeat the link. */
+it("opens wide when a link asks for a specific task", async () => {
+  renderAt("/todos?open=todo_group");
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByLabelText("Task")).toHaveValue("Buy cat litter");
+  expect(within(screen.getByLabelText("Life area filter")).getByRole("button", { name: "All areas" })).toHaveClass("active");
 });
 
 /**
@@ -1819,6 +1829,18 @@ it("asks what to do with the open steps before finishing their task", async () =
     "/api/todos/todo_open_sub/status",
     "/api/todos/todo_open_parent/status",
   ]);
+
+  // A search that shows the task but not its step changes what is drawn, not
+  // what is owed: the step still stands between the task and Done.
+  await userEvent.type(screen.getByLabelText("Search tasks"), "sprint");
+  expect(screen.queryByText("Prepare the DevCon demo")).not.toBeInTheDocument();
+  const narrowed = taskRow("Wrap the sprint");
+  await userEvent.click(within(narrowed).getByRole("button", { name: "Status: To do" }));
+  await userEvent.click(within(within(narrowed).getByRole("menu")).getByRole("menuitemradio", { name: "Done" }));
+  const askedAgain = await screen.findByRole("dialog");
+  expect(askedAgain).toHaveTextContent("Wrap the sprint still has 1 subtask to go");
+  expect(within(askedAgain).getByText("Send the recap")).toBeInTheDocument();
+  await userEvent.click(within(askedAgain).getByRole("button", { name: "Cancel" }));
 });
 
 it("groups the same tasks into columns on the board", async () => {
