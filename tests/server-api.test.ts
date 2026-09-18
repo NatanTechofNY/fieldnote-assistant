@@ -5017,6 +5017,8 @@ describe("Sendblue provider", () => {
     const { db, api } = connectedFixture();
     agentStudioEnv();
     withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    // The room has heard from the assistant before; the first turn is never quiet.
+    await runSmsAgent(db, fakeSearch(db), `group:${GROUP}`, "hi, this is Sarah", "SB_intro", groupTurnOptions(agentCallingMany([], "Hi Sarah!").fetcher, RECIPIENT, "the owner"));
     const payload = groupMessage(WIFE, "Maybe they have a black plastic? Or just a plastic sheet would be nice");
     const handle = payload.message_handle as string;
     await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(payload).expect(200);
@@ -5060,19 +5062,23 @@ describe("Sendblue provider", () => {
       SELECT m.role,m.content,m.metadata_json FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
       WHERE t.address=? ORDER BY m.rowid
     `).all(address) as Array<{ role: string; content: string; metadata_json: string }>;
-    assert.deepEqual(rows.map(row => [row.role, row.content]), [
+    assert.deepEqual(rows.slice(2).map(row => [row.role, row.content]), [
       ["user", payload.content],
       ["tool", "list_todos"],
       ["tool", "stay_quiet"],
     ], "the decision is in the archive; no assistant bubble is");
-    assert.equal(JSON.parse(rows[2].metadata_json).output.data.reason, "Sarah answering Tom about the plastic sheet");
+    assert.deepEqual(
+      JSON.parse(rows[4].metadata_json).output.data,
+      { quiet: true, reason: "Sarah answering Tom about the plastic sheet", speaker_is_owner: false },
+      "with whose message was passed over",
+    );
 
     // The next text is read against a thread where that message simply went
     // unanswered, which is what happened.
     const next = agentCallingMany([], "Sure, I'll remind you both.");
     await runSmsAgent(db, fakeSearch(db), address, "remind us to buy the sheet Saturday", "SB_sheet", groupTurnOptions(next.fetcher));
     const window = next.requests[0].messages as Array<{ role: string }>;
-    assert.deepEqual(window.map(message => message.role), ["user", "user"]);
+    assert.deepEqual(window.map(message => message.role), ["user", "assistant", "user", "user"]);
   });
 
   /*
@@ -5080,12 +5086,19 @@ describe("Sendblue provider", () => {
    * answer given after it stands, receipt included; and it is never a way to
    * leave a write unconfirmed.
    */
-  it("lets an answer given after stay_quiet stand, and refuses stay_quiet after a write", async () => {
+  it("lets an answer given after stay_quiet stand, and refuses it on the first turn and after a write", async () => {
     const { db } = connectedFixture();
     agentStudioEnv();
     withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
     const address = `group:${GROUP}`;
     const search = fakeSearch(db);
+
+    // The owner just brought the assistant in, on a message that was for Tom.
+    // The room is still owed an introduction, so quiet is refused.
+    const first = agentCallingMany([{ tool: "stay_quiet", input: { reason: "Sarah and Tom talking" } }], "Hi both, I'm Fieldnote.");
+    const intro = await runSmsAgent(db, search, address, "Tom, did you feed the cats?", "SB_first_bystander", groupTurnOptions(first.fetcher));
+    assert.equal(intro.text, "Hi both, I'm Fieldnote.");
+    assert.match(toolOutputs(db, address).stay_quiet.error ?? "", /Nobody here has heard from you yet/);
 
     // Changed its mind: quiet, then a lookup, then an answer.
     let round = 0;
