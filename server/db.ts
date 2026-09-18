@@ -912,27 +912,39 @@ export function insertOutboundChannelMessage(
  *
  * A handle with no row is not an error: reactions are addressed by provider
  * handle, and an inbound message the app never stored has nothing to carry one.
+ *
+ * `reactions` is everything on the message, which is what the history page
+ * draws. `runtimeReactions` is the subset the runtime placed — the progress
+ * mark and the closing receipt — so the code that lifts a mark can tell one
+ * from a tapback the agent chose that happens to be the same emoji.
  */
 export function recordMessageReaction(
   db: Db,
   threadId: string,
   providerMessageId: string,
   reaction: string,
+  placedBy: "agent" | "runtime" = "agent",
 ): void {
   const row = db.prepare(`
     SELECT id,metadata_json FROM channel_messages WHERE thread_id=? AND provider_message_id=?
   `).get(threadId, providerMessageId) as { id: string; metadata_json: string | null } | undefined;
   if (!row) return;
   const metadata = JSON.parse(row.metadata_json || "{}") as Record<string, unknown>;
-  const current = (Array.isArray(metadata.reactions) ? metadata.reactions : [])
-    .filter((value): value is string => typeof value === "string");
+  const strings = (list: unknown): string[] =>
+    (Array.isArray(list) ? list : []).filter((value): value is string => typeof value === "string");
+  const current = strings(metadata.reactions);
+  const runtime = strings(metadata.runtimeReactions);
   const removing = reaction.startsWith("-");
   const value = removing ? reaction.slice(1) : reaction;
   const reactions = removing
     ? current.filter(entry => entry !== value)
     : current.includes(value) ? current : [...current, value];
+  // A removal takes the value off whoever placed it: it is gone from the device.
+  const runtimeReactions = removing
+    ? runtime.filter(entry => entry !== value)
+    : placedBy === "runtime" && !runtime.includes(value) ? [...runtime, value] : runtime;
   db.prepare("UPDATE channel_messages SET metadata_json=?,updated_at=? WHERE id=?")
-    .run(JSON.stringify({ ...metadata, reactions }), now(), row.id);
+    .run(JSON.stringify({ ...metadata, reactions, runtimeReactions }), now(), row.id);
 }
 
 /**

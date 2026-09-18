@@ -5459,6 +5459,61 @@ describe("Sendblue provider", () => {
   });
 
   /*
+   * The agent may pick an emoji the runtime also uses as a progress mark. The
+   * archive says who placed it, so giving up on the turn later does not take
+   * the agent's tapback down as though it were the runtime's.
+   */
+  it("leaves the agent's tapback alone when giving up, even when it looks like a progress mark", async () => {
+    const { db, api } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const payload = groupMessage(WIFE, "dinner Friday?");
+    const handle = payload.message_handle as string;
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(payload).expect(200);
+
+    // Attempt one: the agent reacts 📅, then the completion dies.
+    let round = 0;
+    const reactsThenDies: typeof fetch = async () => {
+      round += 1;
+      if (round === 1) {
+        return new Response(JSON.stringify({
+          role: "assistant",
+          parts: [{ type: "tool-react_to_message", tool_call_id: "call_cal", state: "input-available", input: { reaction: "📅" } }],
+        }), { status: 200 });
+      }
+      throw new Error("Agent exceeded its time budget of 4 minutes");
+    };
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }), "/api/send-group-message": () => accepted("SB_gaveup") });
+    try {
+      const worker = {
+        runSmsAgent: (...args: Parameters<typeof runSmsAgent>) =>
+          runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher: reactsThenDies }),
+        pollGranola: async () => ({ fetched: 0, queued: 0 }),
+        startTypingIndicator: () => () => {},
+      };
+      await runWorkerOnce(db, fakeSearch(db), worker);
+      const inbound = () => JSON.parse((db.prepare("SELECT metadata_json FROM channel_messages WHERE provider_message_id=?").get(handle) as { metadata_json: string }).metadata_json) as { reactions: string[]; runtimeReactions: string[] };
+      assert.deepEqual(inbound().reactions, ["📅"]);
+      assert.deepEqual(inbound().runtimeReactions, [], "the archive knows the agent placed it");
+
+      // The second attempt fails the same way, and the turn is given up.
+      db.prepare("UPDATE external_events SET available_at=? WHERE status='failed'").run(new Date(Date.now() - 1000).toISOString());
+      stub.calls.length = 0;
+      await runWorkerOnce(db, fakeSearch(db), worker);
+      assert.equal(
+        (db.prepare("SELECT status FROM external_events WHERE external_id=?").get(handle) as { status: string }).status,
+        "ignored",
+      );
+      assert.deepEqual(inbound().reactions, ["📅"], "the agent's tapback stays");
+      assert.deepEqual(
+        stub.calls.map(call => call.url.pathname),
+        ["/api/send-group-message"],
+        "no reaction is taken back; only the give-up line goes out",
+      );
+    } finally { stub.restore(); }
+  });
+
+  /*
    * A retry that was overtaken answers an earlier text, and the turn context —
    * speakerIsOwner above all — has to sit on that text, not on whatever a later
    * speaker said.
