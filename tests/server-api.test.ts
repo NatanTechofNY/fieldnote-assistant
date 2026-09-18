@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
+import { liftProgressMark, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
@@ -5456,6 +5456,97 @@ describe("Sendblue provider", () => {
       true,
       "so the edited note is still recognised",
     );
+  });
+
+  /*
+   * The agent may pick an emoji the runtime also uses as a progress mark. The
+   * archive says who placed it, so giving up on the turn later does not take
+   * the agent's tapback down as though it were the runtime's.
+   */
+  it("leaves the agent's tapback alone when giving up, even when it looks like a progress mark", async () => {
+    const { db, api } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const payload = groupMessage(WIFE, "dinner Friday?");
+    const handle = payload.message_handle as string;
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(payload).expect(200);
+
+    // Attempt one: the agent reacts 📅, then the completion dies.
+    let round = 0;
+    const reactsThenDies: typeof fetch = async () => {
+      round += 1;
+      if (round === 1) {
+        return new Response(JSON.stringify({
+          role: "assistant",
+          parts: [{ type: "tool-react_to_message", tool_call_id: "call_cal", state: "input-available", input: { reaction: "📅" } }],
+        }), { status: 200 });
+      }
+      throw new Error("Agent exceeded its time budget of 4 minutes");
+    };
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }), "/api/send-group-message": () => accepted("SB_gaveup") });
+    try {
+      const worker = {
+        runSmsAgent: (...args: Parameters<typeof runSmsAgent>) =>
+          runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher: reactsThenDies }),
+        pollGranola: async () => ({ fetched: 0, queued: 0 }),
+        startTypingIndicator: () => () => {},
+      };
+      await runWorkerOnce(db, fakeSearch(db), worker);
+      const inbound = () => JSON.parse((db.prepare("SELECT metadata_json FROM channel_messages WHERE provider_message_id=?").get(handle) as { metadata_json: string }).metadata_json) as { reactions: string[]; runtimeReactions: string[] };
+      assert.deepEqual(inbound().reactions, ["📅"]);
+      assert.deepEqual(inbound().runtimeReactions, [], "the archive knows the agent placed it");
+
+      // The second attempt fails the same way, and the turn is given up.
+      db.prepare("UPDATE external_events SET available_at=? WHERE status='failed'").run(new Date(Date.now() - 1000).toISOString());
+      stub.calls.length = 0;
+      await runWorkerOnce(db, fakeSearch(db), worker);
+      assert.equal(
+        (db.prepare("SELECT status FROM external_events WHERE external_id=?").get(handle) as { status: string }).status,
+        "ignored",
+      );
+      assert.deepEqual(inbound().reactions, ["📅"], "the agent's tapback stays");
+      assert.deepEqual(
+        stub.calls.map(call => call.url.pathname),
+        ["/api/send-group-message"],
+        "no reaction is taken back; only the give-up line goes out",
+      );
+    } finally { stub.restore(); }
+  });
+
+  /*
+   * A row written before the archive said who placed what has only
+   * `reactions`. A progress-mark emoji on it is read as the runtime's, unless
+   * the agent is on record choosing that emoji for this message.
+   */
+  it("reads an old row's tapbacks by what the agent is on record choosing", async () => {
+    const { db } = connectedFixture();
+    const timestamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_old',?,'sms','group:old','cnv_old',?,?)
+    `).run(USER_ID, timestamp, timestamp);
+    const row = (handle: string, reactions: string[]) => db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+      VALUES(?, 'thread_old','inbound','user','dinner Friday?',?,'received',?,?,?)
+    `).run(`cm_${handle}`, handle, JSON.stringify({ reactions }), timestamp, timestamp);
+    const agentReacted = (reaction: string) => db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES(?, 'thread_old','outbound','tool','react_to_message','delivered',?,?,?)
+    `).run(`cm_tool_${Math.random()}`, JSON.stringify({ input: { reaction }, output: { success: true, data: { reacted: true, reaction } }, toolCallId: `call_${Math.random()}`, state: "output-available" }), timestamp, timestamp);
+
+    // The agent chose 📅 on this one; the tool row says so.
+    row("SB_agent_cal", ["📅"]);
+    agentReacted("📅");
+    // The runtime's 📅 on this one; no agent reaction on record.
+    row("SB_runtime_cal", ["📅"]);
+
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      await liftProgressMark(db, "group:old", "SB_agent_cal");
+      assert.equal(stub.calls.length, 0, "the agent's calendar tapback is left alone");
+      await liftProgressMark(db, "group:old", "SB_runtime_cal");
+      assert.deepEqual(stub.calls.map(call => [call.body.message_handle, call.body.reaction]), [["SB_runtime_cal", "-📅"]], "the runtime's comes down");
+    } finally { stub.restore(); }
   });
 
   /*

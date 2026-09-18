@@ -194,6 +194,8 @@ const PROGRESS_MARKS = new Set([...Object.values(PROGRESS_REACTIONS), GENERAL_PR
  * already asks it to react to what the user shares.
  */
 const CLOSING_REACTIONS = { changed: "✅", answered: "like" } as const;
+/** Every tapback the runtime places, progress or closing: what a retry may find already on the message. */
+const RUNTIME_MARKS = new Set<string>([...PROGRESS_MARKS, ...Object.values(CLOSING_REACTIONS)]);
 
 /**
  * The writes a ✅ confirms: the ones that change a record. Gestures sit in
@@ -431,28 +433,55 @@ export async function liftProgressMark(db: Db, address: string, providerMessageI
     SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address=?
   `).get(USER_ID, address) as { id: string } | undefined;
   if (!thread) return;
-  const mark = reactionsOn(db, thread.id, providerMessageId).find(reaction => PROGRESS_MARKS.has(reaction));
+  const mark = reactionsOn(db, thread.id, providerMessageId).runtime.find(reaction => PROGRESS_MARKS.has(reaction));
   if (!mark) return;
   try {
     await sendSendblueReaction(db, providerMessageId, `-${mark}`);
-    recordMessageReaction(db, thread.id, providerMessageId, `-${mark}`);
+    recordMessageReaction(db, thread.id, providerMessageId, `-${mark}`, "runtime");
   } catch (error) {
     console.warn("Could not lift the progress tapback:", error instanceof Error ? error.message : error);
   }
 }
 
-/** The tapbacks we have put on the inbound message and not taken back, per the archive. */
-function reactionsOn(db: Db, threadId: string, providerMessageId: string): string[] {
+/**
+ * The tapbacks on the inbound message and not taken back, per the archive:
+ * all of them, and the ones the runtime placed. A row written before the
+ * archive told the two apart has no `runtimeReactions`; for it, a progress
+ * mark's emoji is taken to be the runtime's, which is what it always was then.
+ */
+function reactionsOn(db: Db, threadId: string, providerMessageId: string): { all: string[]; runtime: string[] } {
   const row = db.prepare(`
-    SELECT metadata_json FROM channel_messages WHERE thread_id=? AND provider_message_id=?
-  `).get(threadId, providerMessageId) as { metadata_json: string | null } | undefined;
-  if (!row) return [];
+    SELECT rowid,metadata_json FROM channel_messages WHERE thread_id=? AND provider_message_id=?
+  `).get(threadId, providerMessageId) as { rowid: number; metadata_json: string | null } | undefined;
+  if (!row) return { all: [], runtime: [] };
   try {
-    const reactions = (JSON.parse(row.metadata_json || "{}") as { reactions?: unknown }).reactions;
-    return Array.isArray(reactions) ? reactions.filter((value): value is string => typeof value === "string") : [];
+    const metadata = JSON.parse(row.metadata_json || "{}") as { reactions?: unknown; runtimeReactions?: unknown };
+    const strings = (list: unknown): string[] =>
+      (Array.isArray(list) ? list : []).filter((value): value is string => typeof value === "string");
+    const all = strings(metadata.reactions);
+    if (Array.isArray(metadata.runtimeReactions)) return { all, runtime: strings(metadata.runtimeReactions) };
+    /*
+     * A row from before the archive said who placed what. A progress-mark
+     * emoji on it is the runtime's unless the agent is on record choosing that
+     * very emoji for this message: `react_to_message` leaves a tool row after
+     * the inbound with the reaction in its input, so the record is there to ask.
+     */
+    const chosen = new Set(agentReactionsAfter(db, threadId, row.rowid));
+    return { all, runtime: all.filter(reaction => PROGRESS_MARKS.has(reaction) && !chosen.has(reaction)) };
   } catch {
-    return [];
+    return { all: [], runtime: [] };
   }
+}
+
+/** The reactions the agent's own `react_to_message` calls placed on the turn that starts at `inboundRowid`. */
+function agentReactionsAfter(db: Db, threadId: string, inboundRowid: number): string[] {
+  const rows = db.prepare(`
+    SELECT json_extract(metadata_json,'$.input.reaction') reaction FROM channel_messages
+    WHERE thread_id=? AND role='tool' AND content='react_to_message' AND rowid>?
+      AND rowid<COALESCE((SELECT min(rowid) FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>?),9223372036854775807)
+      AND json_extract(metadata_json,'$.output.success')=1
+  `).all(threadId, inboundRowid, threadId, inboundRowid) as Array<{ reaction: unknown }>;
+  return rows.map(row => row.reaction).filter((value): value is string => typeof value === "string" && !value.startsWith("-"));
 }
 
 function saveChannelMessage(
@@ -509,7 +538,9 @@ function saveInboundMessage(
       return existing.id;
     }
   }
-  return saveChannelMessage(db, threadId, "inbound", "user", body, providerMessageId, metadata);
+  // Born knowing who placed what: only a row from before the list existed is
+  // ever read by inference.
+  return saveChannelMessage(db, threadId, "inbound", "user", body, providerMessageId, { ...metadata, runtimeReactions: [] });
 }
 
 export function recordOutboundChannelMessage(
@@ -808,17 +839,25 @@ export async function runChannelAgent(
   const markHandle = channel === "sms" && options.inbound?.provider === "sendblue"
     ? context.inboundMessageHandle
     : undefined;
-  const alreadyOn = markHandle ? reactionsOn(db, thread.id, markHandle) : [];
-  /** The runtime's mark currently on the message, per the archive; `undefined` when there is none. */
-  let markShown: string | undefined = alreadyOn.find(reaction => PROGRESS_MARKS.has(reaction));
+  const alreadyOn = markHandle ? reactionsOn(db, thread.id, markHandle) : { all: [], runtime: [] };
+  /**
+   * The runtime's mark currently on the message, per the archive; `undefined`
+   * when there is none. A closing receipt from an attempt whose reply then
+   * failed to send counts: the retry's first mark replaces it on the device,
+   * and the archive has to be told so.
+   */
+  let markShown: string | undefined = alreadyOn.runtime.find(reaction => RUNTIME_MARKS.has(reaction));
   /*
    * iMessage keeps one tapback per sender per message, so the mark does not sit
    * beside the agent's own reaction: it replaces it, and lifting it afterwards
    * leaves the message bare. A heart in the first round followed by a lookup in
    * the second ended with no tapback at all. Once the agent has reacted — this
    * attempt or, per the archive, an earlier one — the runtime places nothing.
+   * The archive says who placed what, so an agent that chose 📅 for "dinner
+   * Friday?" is not mistaken for a progress mark.
    */
-  const agentReacted = (): boolean => context.reacted || alreadyOn.some(reaction => !PROGRESS_MARKS.has(reaction));
+  const agentReacted = (): boolean =>
+    context.reacted || alreadyOn.all.some(reaction => !alreadyOn.runtime.includes(reaction));
   /**
    * Puts `reaction` up, or takes the current mark down when it is `undefined`.
    * Switching marks is one send: the new tapback replaces the old one on the
@@ -830,11 +869,11 @@ export async function runChannelAgent(
     try {
       if (reaction) {
         await sendSendblueReaction(db, markHandle, reaction);
-        if (markShown) recordMessageReaction(db, thread.id, markHandle, `-${markShown}`);
-        recordMessageReaction(db, thread.id, markHandle, reaction);
+        if (markShown) recordMessageReaction(db, thread.id, markHandle, `-${markShown}`, "runtime");
+        recordMessageReaction(db, thread.id, markHandle, reaction, "runtime");
       } else if (markShown) {
         await sendSendblueReaction(db, markHandle, `-${markShown}`);
-        recordMessageReaction(db, thread.id, markHandle, `-${markShown}`);
+        recordMessageReaction(db, thread.id, markHandle, `-${markShown}`, "runtime");
       }
       markShown = reaction;
     } catch (error) {
