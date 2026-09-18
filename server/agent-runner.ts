@@ -767,6 +767,7 @@ export async function runChannelAgent(
     groupId: options.inbound?.groupId,
     ...(group ? { scope: { ...group.scope, lifeAreaIsNew: group.areaIsNew }, speakerIsOwner: speaker?.speakerIsOwner === true } : {}),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
+    inboundText: options.internal ? undefined : body,
     sendSms: options.sendSms,
   };
   search.flushSoon();

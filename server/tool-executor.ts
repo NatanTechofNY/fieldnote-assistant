@@ -13,7 +13,7 @@ import {
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
-import { speakerNameOf } from "./group-thread.ts";
+import { addressesAssistant, ASSISTANT_NAME, speakerNameOf } from "./group-thread.ts";
 import type { SmsProvider } from "./integrations.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
@@ -247,6 +247,8 @@ export type ToolTurnContext = {
   stayedQuiet?: boolean;
   /** Set by the runner once a write to a record has landed this turn: something now needs saying. */
   changedRecord?: boolean;
+  /** The text being answered, for the one judgment the server makes itself: a message that names the assistant is for it. */
+  inboundText?: string;
   /**
    * Set once a tapback has landed on the inbound message. A turn that reacted
    * and then had nothing to add has answered, so the caller sends no text
@@ -482,6 +484,13 @@ export async function executeAgentTool(
     // A record changed in this turn is a side effect the room has not been
     // told about; silence after it would be an unconfirmed write.
     if (context.changedRecord) throw new Error("You changed a record this turn; say what changed instead of staying quiet");
+    // The one judgment the server makes for itself. Everything else about
+    // whether a message is for the assistant is the model's call, but a
+    // message that says its name is not a close call, and no one in the chat
+    // should be able to talk it into ignoring one.
+    if (context.inboundText && addressesAssistant(context.inboundText)) {
+      throw new Error(`This message names ${ASSISTANT_NAME}; it is for you, whoever wrote it`);
+    }
     context.stayedQuiet = true;
     // Who was passed over is kept beside why, so a suppressed request from the
     // owner can be found in the archive.

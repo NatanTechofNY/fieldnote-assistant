@@ -31,6 +31,17 @@ export function groupIdOfAddress(address: string): string | undefined {
  */
 export const OWNER_SPEAKER_NAME = "the owner";
 
+/**
+ * What the assistant is called, as the prompt introduces it. A group message
+ * that says this word is addressed to it, whatever else it says.
+ */
+export const ASSISTANT_NAME = "Fieldnote";
+
+/** Whether `text` names the assistant, as a word of its own rather than part of another. */
+export function addressesAssistant(text: string): boolean {
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${ASSISTANT_NAME}(?![\\p{L}\\p{N}])`, "iu").test(text);
+}
+
 /** The longest iMessage group title the app keeps; the same bound `name_group_chat` enforces. */
 export const MAX_GROUP_NAME_LENGTH = 80;
 
