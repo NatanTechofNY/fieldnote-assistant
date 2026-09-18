@@ -286,6 +286,34 @@ function orphanedWritesMessageId(userRowId: string): string {
   return `alg_msg_writes_${userRowId.replaceAll("-", "_")}`;
 }
 
+/** The id a stored row travels under in the window; Agent Studio wants its own prefix and no dashes. */
+function historyMessageId(rowId: string): string {
+  return rowId.startsWith("alg_msg_") ? rowId : `alg_msg_${rowId.replaceAll("-", "_")}`;
+}
+
+type UserRow = { id: string; content: string; metadata_json: string };
+
+/**
+ * A stored user row as the model reads it. A 1:1 thread has one voice and
+ * needs no label; a shared one has several, and without it every request in
+ * the window reads as the owner's. The label is a name, or a redacted number
+ * when there is none: no full phone number leaves the server for the model.
+ * The quote and the speaker are assembled here rather than stored, so the row
+ * and its Algolia projection keep the text the user actually sent.
+ */
+function userMessage(db: Db, threadId: string, row: UserRow): AgentMessage {
+  const quote = quotedParent(db, threadId, row.metadata_json);
+  const speaker = speakerLabel(row.metadata_json);
+  return {
+    id: historyMessageId(row.id),
+    role: "user",
+    parts: [{
+      type: "text",
+      text: `${speaker ? `[${speaker}] ` : ""}${quote ? `[replying to "${quote}"] ` : ""}${row.content}`,
+    }],
+  };
+}
+
 function threadHistory(db: Db, threadId: string): AgentMessage[] {
   const cutoff = new Date(Date.now() - CONTEXT_WINDOW_MS).toISOString();
   const rows = db.prepare(`
@@ -303,24 +331,9 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
     rowid: number;
   }>;
   return rows.flatMap((row, index) => {
-    const quote = row.role === "user" ? quotedParent(db, threadId, row.metadata_json) : null;
-    // A 1:1 thread has one voice and needs no label; a shared one has several,
-    // and without it every request in the window reads as the owner's. The
-    // label is a name, or a redacted number when there is none: no full phone
-    // number leaves the server for the model.
-    const speaker = row.role === "user" ? speakerLabel(row.metadata_json) : null;
-    const message: AgentMessage = {
-      id: row.id.startsWith("alg_msg_") ? row.id : `alg_msg_${row.id.replaceAll("-", "_")}`,
-      role: row.role,
-      parts: row.role === "assistant"
-        ? assistantParts(row.content, row.metadata_json)
-        // The quote and the speaker are assembled here rather than stored, so
-        // the row and its Algolia projection keep the text the user actually sent.
-        : [{
-          type: "text",
-          text: `${speaker ? `[${speaker}] ` : ""}${quote ? `[replying to "${quote}"] ` : ""}${row.content}`,
-        }],
-    };
+    const message: AgentMessage = row.role === "assistant"
+      ? { id: historyMessageId(row.id), role: "assistant", parts: assistantParts(row.content, row.metadata_json) }
+      : userMessage(db, threadId, row);
     if (row.role === "assistant") return [message];
     /*
      * A user turn with no reply after it is one nobody answered: the attempt
@@ -403,6 +416,29 @@ function orphanedWrites(db: Db, threadId: string, afterRowid: number, beforeRowi
       output: trace.output,
     }];
   });
+}
+
+/**
+ * Takes the runtime's progress mark off a message whose turn is being given up.
+ *
+ * A failed turn leaves its mark up on purpose, because the retry is still
+ * coming; once the worker stops retrying, nothing else would ever take it down,
+ * and a 🔍 that never resolves is a promise the app did not keep. The agent's
+ * own reaction, if it made one, is not touched. Best effort, like every tapback.
+ */
+export async function liftProgressMark(db: Db, address: string, providerMessageId: string): Promise<void> {
+  const thread = db.prepare(`
+    SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address=?
+  `).get(USER_ID, address) as { id: string } | undefined;
+  if (!thread) return;
+  const mark = reactionsOn(db, thread.id, providerMessageId).find(reaction => PROGRESS_MARKS.has(reaction));
+  if (!mark) return;
+  try {
+    await sendSendblueReaction(db, providerMessageId, `-${mark}`);
+    recordMessageReaction(db, thread.id, providerMessageId, `-${mark}`);
+  } catch (error) {
+    console.warn("Could not lift the progress tapback:", error instanceof Error ? error.message : error);
+  }
 }
 
 /** The tapbacks we have put on the inbound message and not taken back, per the archive. */
@@ -705,38 +741,49 @@ export async function runChannelAgent(
   search.flushSoon();
   const messages = threadHistory(db, thread.id);
   const preferences = getNotificationPreferences(db);
-  const latestUserMessage = [...messages].reverse().find(message => message.role === "user");
-  if (latestUserMessage) {
-    latestUserMessage.metadata = {
-      turnContext: {
-        localUserId: USER_ID,
-        channel,
-        timezone: preferences.timezone,
-        currentDateTime: new Date().toISOString(),
-        // The same moment as the user's wall clock with its offset: the shape
-        // every date-time sent to a tool should take, so "5:30 PM" is written
-        // as 17:30 with this offset rather than converted to UTC and then
-        // given the offset as well.
-        currentLocalDateTime: localIsoWithOffset(new Date(), preferences.timezone),
-        ...(options.inbound?.groupId && group
-          ? {
-            groupId: options.inbound.groupId,
-            groupLifeAreaId: group.area.id,
-            groupLifeAreaName: group.area.name,
-            ...(group.areaIsNew ? { groupLifeAreaIsNew: true } : {}),
-            ...(group.firstMessage ? { firstMessageInGroup: true } : {}),
-            // The speaker's number never reaches the model; a redacted form is
-            // enough to tell two unnamed voices apart.
-            ...(speaker?.speaker ? { speaker: redactedNumber(speaker.speaker) } : {}),
-            ...(speaker?.speakerName ? { speakerName: speaker.speakerName } : {}),
-            // Stated either way, so "not the owner" is a fact the model was
-            // told rather than a field it did not see.
-            speakerIsOwner: speaker?.speakerIsOwner === true,
-          }
-          : {}),
-      },
-    };
+  /*
+   * The turn context belongs on the message being answered. That is usually
+   * the last one in the window, but a retry that was overtaken is answering an
+   * earlier text, and stapling the owner's speakerIsOwner onto whatever a later
+   * speaker said would lend that speaker the owner's standing. An inbound that
+   * has aged out of the window altogether — a retry after a long outage — is
+   * put back at the end, so the model reads the text it is answering.
+   */
+  let latestUserMessage = messages.find(message => message.id === historyMessageId(inboundId));
+  if (!latestUserMessage) {
+    const row = db.prepare("SELECT id,content,metadata_json FROM channel_messages WHERE id=?").get(inboundId) as UserRow;
+    latestUserMessage = userMessage(db, thread.id, row);
+    messages.push(latestUserMessage);
   }
+  latestUserMessage.metadata = {
+    turnContext: {
+      localUserId: USER_ID,
+      channel,
+      timezone: preferences.timezone,
+      currentDateTime: new Date().toISOString(),
+      // The same moment as the user's wall clock with its offset: the shape
+      // every date-time sent to a tool should take, so "5:30 PM" is written
+      // as 17:30 with this offset rather than converted to UTC and then
+      // given the offset as well.
+      currentLocalDateTime: localIsoWithOffset(new Date(), preferences.timezone),
+      ...(options.inbound?.groupId && group
+        ? {
+          groupId: options.inbound.groupId,
+          groupLifeAreaId: group.area.id,
+          groupLifeAreaName: group.area.name,
+          ...(group.areaIsNew ? { groupLifeAreaIsNew: true } : {}),
+          ...(group.firstMessage ? { firstMessageInGroup: true } : {}),
+          // The speaker's number never reaches the model; a redacted form is
+          // enough to tell two unnamed voices apart.
+          ...(speaker?.speaker ? { speaker: redactedNumber(speaker.speaker) } : {}),
+          ...(speaker?.speakerName ? { speakerName: speaker.speakerName } : {}),
+          // Stated either way, so "not the owner" is a fact the model was
+          // told rather than a field it did not see.
+          speakerIsOwner: speaker?.speakerIsOwner === true,
+        }
+        : {}),
+    },
+  };
   // A retry resumes the turn rather than restarting it. `threadHistory()` has
   // already placed the earlier attempt's writes after the inbound row when that
   // row is inside the window; this covers the inbound that fell outside it.

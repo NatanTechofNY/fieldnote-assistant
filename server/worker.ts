@@ -3,12 +3,12 @@ import { getNotificationPreferences, type SmsProvider } from "./integrations.ts"
 import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
-import { recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "./agent-runner.ts";
+import { liftProgressMark, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "./agent-runner.ts";
 import { composeDigestTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
 import {
   claimExternalEvents, completeExternalEvent, deferExternalEvent, nextExternalEventAvailableAt, pollGranola,
-  STALE_CLAIM_MS, unsettledExternalEventsBefore,
+  pruneSettledExternalEvents, STALE_CLAIM_MS, unsettledExternalEventsBefore,
 } from "./event-ingestion.ts";
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
@@ -170,6 +170,39 @@ function threadBlocker(
     return { availableAt: dueAt > behindClaim ? dueAt : behindClaim };
   }
   return null;
+}
+
+/** What the thread hears when a text has been tried `MAX_EVENT_ATTEMPTS` times and is being let go. */
+export const GAVE_UP_TEXT = "Sorry, I couldn't get through that one. Could you send it again?";
+
+/**
+ * The last word on a text the agent never managed to answer. Silence is the
+ * worst outcome: the sender saw a progress tapback go up and nothing follow.
+ * One plain line into the same thread says so; it is best effort, since the
+ * same outage that failed the turn may refuse this too.
+ */
+async function giveUpOnTurn(
+  db: Db, source: SmsProvider, message: InboundMessage, send: typeof sendSms,
+): Promise<void> {
+  const address = inboundAddress(message);
+  // The progress tapback was left up for a retry that is no longer coming.
+  if (source === "sendblue" && message.messageId) await liftProgressMark(db, address, message.messageId);
+  let sent: Awaited<ReturnType<typeof sendSms>>;
+  try {
+    // Threaded under the text it is about: by now the texts behind it have
+    // been answered, and "that one" would otherwise point at nothing.
+    sent = await send(db, address, GAVE_UP_TEXT, {
+      ...(source === "sendblue" && message.messageId ? { replyTo: message.messageId } : {}),
+      ...(message.groupId ? { groupId: message.groupId } : {}),
+    });
+  } catch (error) {
+    console.warn("Could not tell the thread the turn was given up:", error instanceof Error ? error.message : error);
+    return;
+  }
+  recordOutboundChannelMessage(db, "sms", address, GAVE_UP_TEXT, sent.sid, sent.status, {
+    kind: "gave_up",
+    ...(sent.replyTo ? { replyTo: sent.replyTo } : {}),
+  });
 }
 
 function inQuietHours(time: string, start: string | null, end: string | null): boolean {
@@ -525,6 +558,7 @@ async function runMaintenance(db: Db, search: SearchWriter): Promise<void> {
   const cutoff = new Date(Date.now() - COMPLETED_JOB_TTL_MS).toISOString();
   db.prepare("DELETE FROM index_jobs WHERE status='done' AND updated_at<?").run(cutoff);
   db.prepare("DELETE FROM scheduled_dispatches WHERE status='sent' AND updated_at<?").run(cutoff);
+  pruneSettledExternalEvents(db, INBOUND_SOURCES.map(entry => entry.source), cutoff);
   const pending = db.prepare(`
     SELECT count(*) count FROM index_jobs WHERE status IN ('pending','failed')
   `).get() as { count: number };
@@ -543,8 +577,10 @@ export async function runWorkerOnce(
   for (const { source, read } of INBOUND_SOURCES) {
     for (const event of claimExternalEvents(db, source, 20)) {
       let stopTyping: StopTypingIndicator | null = null;
+      // Read outside the try so a turn that is given up can still be told where to say so.
+      let message: InboundMessage | undefined;
       try {
-        const message = read(JSON.parse(event.payload_json) as Record<string, unknown>);
+        message = read(JSON.parse(event.payload_json) as Record<string, unknown>);
         if (!message.from || !message.body) throw new Error("Inbound SMS event is missing a sender or body");
         /*
          * A group chat is one thread shared by everyone in it, so it is keyed on
@@ -587,11 +623,21 @@ export async function runWorkerOnce(
         completeExternalEvent(db, event.id, "processed");
       } catch (error) {
         stopTyping?.();
-        const message = error instanceof Error ? error.message : "Inbound SMS processing failed";
+        const reason = error instanceof Error ? error.message : "Inbound SMS processing failed";
         // The row's last_error is overwritten by the attempt that succeeds, so
         // without this line a turn that took three tries leaves no trace of why.
-        console.warn(`Inbound ${source} turn failed on attempt ${event.attempts}, will retry: ${message}`);
-        completeExternalEvent(db, event.id, "failed", message);
+        console.warn(`Inbound ${source} turn failed on attempt ${event.attempts}: ${reason}`);
+        // An outage earns the full run of retries; a turn that failed on its own
+        // terms will fail the same way, and gets one more try to rule out a fluke.
+        const settled = completeExternalEvent(db, event.id, "failed", reason, { transient: isTransientFailure(error) });
+        if (settled === "ignored" && message?.from) {
+          // Nothing here may take the rest of the batch down with it.
+          try {
+            await giveUpOnTurn(db, source, message, send);
+          } catch (giveUpError) {
+            console.warn("Giving up on the turn failed:", giveUpError instanceof Error ? giveUpError.message : giveUpError);
+          }
+        }
       }
     }
   }
