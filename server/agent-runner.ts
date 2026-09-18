@@ -449,21 +449,37 @@ export async function liftProgressMark(db: Db, address: string, providerMessageI
  */
 function reactionsOn(db: Db, threadId: string, providerMessageId: string): { all: string[]; runtime: string[] } {
   const row = db.prepare(`
-    SELECT metadata_json FROM channel_messages WHERE thread_id=? AND provider_message_id=?
-  `).get(threadId, providerMessageId) as { metadata_json: string | null } | undefined;
+    SELECT rowid,metadata_json FROM channel_messages WHERE thread_id=? AND provider_message_id=?
+  `).get(threadId, providerMessageId) as { rowid: number; metadata_json: string | null } | undefined;
   if (!row) return { all: [], runtime: [] };
   try {
     const metadata = JSON.parse(row.metadata_json || "{}") as { reactions?: unknown; runtimeReactions?: unknown };
     const strings = (list: unknown): string[] =>
       (Array.isArray(list) ? list : []).filter((value): value is string => typeof value === "string");
     const all = strings(metadata.reactions);
-    const runtime = Array.isArray(metadata.runtimeReactions)
-      ? strings(metadata.runtimeReactions)
-      : all.filter(reaction => PROGRESS_MARKS.has(reaction));
-    return { all, runtime };
+    if (Array.isArray(metadata.runtimeReactions)) return { all, runtime: strings(metadata.runtimeReactions) };
+    /*
+     * A row from before the archive said who placed what. A progress-mark
+     * emoji on it is the runtime's unless the agent is on record choosing that
+     * very emoji for this message: `react_to_message` leaves a tool row after
+     * the inbound with the reaction in its input, so the record is there to ask.
+     */
+    const chosen = new Set(agentReactionsAfter(db, threadId, row.rowid));
+    return { all, runtime: all.filter(reaction => PROGRESS_MARKS.has(reaction) && !chosen.has(reaction)) };
   } catch {
     return { all: [], runtime: [] };
   }
+}
+
+/** The reactions the agent's own `react_to_message` calls placed on the turn that starts at `inboundRowid`. */
+function agentReactionsAfter(db: Db, threadId: string, inboundRowid: number): string[] {
+  const rows = db.prepare(`
+    SELECT json_extract(metadata_json,'$.input.reaction') reaction FROM channel_messages
+    WHERE thread_id=? AND role='tool' AND content='react_to_message' AND rowid>?
+      AND rowid<COALESCE((SELECT min(rowid) FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>?),9223372036854775807)
+      AND json_extract(metadata_json,'$.output.success')=1
+  `).all(threadId, inboundRowid, threadId, inboundRowid) as Array<{ reaction: unknown }>;
+  return rows.map(row => row.reaction).filter((value): value is string => typeof value === "string" && !value.startsWith("-"));
 }
 
 function saveChannelMessage(

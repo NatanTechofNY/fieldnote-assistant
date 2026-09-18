@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
+import { liftProgressMark, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
@@ -5510,6 +5510,42 @@ describe("Sendblue provider", () => {
         ["/api/send-group-message"],
         "no reaction is taken back; only the give-up line goes out",
       );
+    } finally { stub.restore(); }
+  });
+
+  /*
+   * A row written before the archive said who placed what has only
+   * `reactions`. A progress-mark emoji on it is read as the runtime's, unless
+   * the agent is on record choosing that emoji for this message.
+   */
+  it("reads an old row's tapbacks by what the agent is on record choosing", async () => {
+    const { db } = connectedFixture();
+    const timestamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_old',?,'sms','group:old','cnv_old',?,?)
+    `).run(USER_ID, timestamp, timestamp);
+    const row = (handle: string, reactions: string[]) => db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+      VALUES(?, 'thread_old','inbound','user','dinner Friday?',?,'received',?,?,?)
+    `).run(`cm_${handle}`, handle, JSON.stringify({ reactions }), timestamp, timestamp);
+    const agentReacted = (reaction: string) => db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES(?, 'thread_old','outbound','tool','react_to_message','delivered',?,?,?)
+    `).run(`cm_tool_${Math.random()}`, JSON.stringify({ input: { reaction }, output: { success: true, data: { reacted: true, reaction } }, toolCallId: `call_${Math.random()}`, state: "output-available" }), timestamp, timestamp);
+
+    // The agent chose 📅 on this one; the tool row says so.
+    row("SB_agent_cal", ["📅"]);
+    agentReacted("📅");
+    // The runtime's 📅 on this one; no agent reaction on record.
+    row("SB_runtime_cal", ["📅"]);
+
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      await liftProgressMark(db, "group:old", "SB_agent_cal");
+      assert.equal(stub.calls.length, 0, "the agent's calendar tapback is left alone");
+      await liftProgressMark(db, "group:old", "SB_runtime_cal");
+      assert.deepEqual(stub.calls.map(call => [call.body.message_handle, call.body.reaction]), [["SB_runtime_cal", "-📅"]], "the runtime's comes down");
     } finally { stub.restore(); }
   });
 
