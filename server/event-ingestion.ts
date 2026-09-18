@@ -109,19 +109,45 @@ export function deferExternalEvent(db: Db, eventId: string, availableAt: string)
   `).run(availableAt, now(), eventId);
 }
 
+/**
+ * How many times an event may be attempted before it is given up. The backoff
+ * doubles from two seconds, so eight attempts span about eight and a half
+ * minutes: long enough to ride out a provider blip, short enough that a text
+ * the agent will never manage does not come back every hour for good, hold
+ * its thread's ordering, and sit in every blocker query as a `failed` row.
+ */
+export const MAX_EVENT_ATTEMPTS = 8;
+
+/**
+ * Settles an event. A `failed` event is scheduled for another attempt behind
+ * an exponential backoff until it has used `MAX_EVENT_ATTEMPTS`, when it is
+ * filed as `ignored` — the same terminal status a dropped echo gets — with the
+ * last error kept so the give-up can be read later. Returns the status written.
+ */
 export function completeExternalEvent(
   db: Db,
   eventId: string,
   status: "processed" | "ignored" | "failed",
   error?: string,
-): void {
+): "processed" | "ignored" | "failed" {
   const attempts = (db.prepare("SELECT attempts FROM external_events WHERE id=?").get(eventId) as { attempts: number } | undefined)?.attempts ?? 1;
-  const retryAt = status === "failed"
+  const gaveUp = status === "failed" && attempts >= MAX_EVENT_ATTEMPTS;
+  const written = gaveUp ? "ignored" : status;
+  const retryAt = written === "failed"
     ? new Date(Date.now() + Math.min(3600, 2 ** Math.min(attempts, 10)) * 1000).toISOString()
     : now();
+  const note = gaveUp ? `Gave up after ${attempts} attempts: ${error ?? "unknown error"}` : error;
   db.prepare(`
     UPDATE external_events SET status=?,last_error=?,available_at=?,updated_at=? WHERE id=?
-  `).run(status, error?.slice(0, 1000) ?? null, retryAt, now(), eventId);
+  `).run(written, note?.slice(0, 1000) ?? null, retryAt, now(), eventId);
+  return written;
+}
+
+/** Drops settled events once they are older than `cutoff`; the unsettled ones stay whatever their age. */
+export function pruneSettledExternalEvents(db: Db, cutoff: string): number {
+  return db.prepare(`
+    DELETE FROM external_events WHERE user_id=? AND status IN ('processed','ignored') AND updated_at<?
+  `).run(USER_ID, cutoff).changes;
 }
 
 type GranolaListResponse = {

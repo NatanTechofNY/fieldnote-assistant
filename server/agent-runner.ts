@@ -405,6 +405,29 @@ function orphanedWrites(db: Db, threadId: string, afterRowid: number, beforeRowi
   });
 }
 
+/**
+ * Takes the runtime's progress mark off a message whose turn is being given up.
+ *
+ * A failed turn leaves its mark up on purpose, because the retry is still
+ * coming; once the worker stops retrying, nothing else would ever take it down,
+ * and a 🔍 that never resolves is a promise the app did not keep. The agent's
+ * own reaction, if it made one, is not touched. Best effort, like every tapback.
+ */
+export async function liftProgressMark(db: Db, address: string, providerMessageId: string): Promise<void> {
+  const thread = db.prepare(`
+    SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address=?
+  `).get(USER_ID, address) as { id: string } | undefined;
+  if (!thread) return;
+  const mark = reactionsOn(db, thread.id, providerMessageId).find(reaction => PROGRESS_MARKS.has(reaction));
+  if (!mark) return;
+  try {
+    await sendSendblueReaction(db, providerMessageId, `-${mark}`);
+    recordMessageReaction(db, thread.id, providerMessageId, `-${mark}`);
+  } catch (error) {
+    console.warn("Could not lift the progress tapback:", error instanceof Error ? error.message : error);
+  }
+}
+
 /** The tapbacks we have put on the inbound message and not taken back, per the archive. */
 function reactionsOn(db: Db, threadId: string, providerMessageId: string): string[] {
   const row = db.prepare(`
@@ -705,7 +728,15 @@ export async function runChannelAgent(
   search.flushSoon();
   const messages = threadHistory(db, thread.id);
   const preferences = getNotificationPreferences(db);
-  const latestUserMessage = [...messages].reverse().find(message => message.role === "user");
+  /*
+   * The turn context belongs on the message being answered. That is usually
+   * the last one in the window, but a retry that was overtaken is answering an
+   * earlier text, and stapling the owner's speakerIsOwner onto whatever a later
+   * speaker said would lend that speaker the owner's standing.
+   */
+  const inboundMessageId = `alg_msg_${inboundId.replaceAll("-", "_")}`;
+  const latestUserMessage = messages.find(message => message.id === inboundMessageId)
+    ?? [...messages].reverse().find(message => message.role === "user");
   if (latestUserMessage) {
     latestUserMessage.metadata = {
       turnContext: {

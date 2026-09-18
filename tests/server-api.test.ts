@@ -24,14 +24,14 @@ import {
   saveTwilioConfig,
   setSmsProvider,
 } from "../server/integrations.ts";
-import { enqueueExternalEvent } from "../server/event-ingestion.ts";
+import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS } from "../server/event-ingestion.ts";
 import { cleanGroupName, redactedNumber } from "../server/group-thread.ts";
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { executeAgentTool, type ToolTurnContext } from "../server/tool-executor.ts";
 import { sendTwilioSms } from "../server/twilio-service.ts";
-import { rollRecurringTodos, runWorkerOnce, startWorker } from "../server/worker.ts";
+import { GAVE_UP_TEXT, rollRecurringTodos, runWorkerOnce, startWorker } from "../server/worker.ts";
 import type { Db } from "../server/types.ts";
 
 process.env.SETTINGS_ENCRYPTION_KEY = "test-only-encryption-key";
@@ -5335,6 +5335,103 @@ describe("Sendblue provider", () => {
     db.prepare("UPDATE external_events SET status='failed',attempts=4,available_at=? WHERE id=?").run(new Date(Date.now() + 3600_000).toISOString(), stuck);
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.deepEqual(turns, ["hello?"], "ordering is worth a few short retries, not an hour of silence");
+  });
+
+  /*
+   * A text the agent will never manage used to come back every hour for good,
+   * hold its thread's ordering, and appear in every blocker query. It now gets
+   * a fixed number of tries, then one honest line into the thread.
+   */
+  it("gives up on a text after its attempts run out, says so once, and prunes it later", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, "break")).expect(200);
+    const sends: Array<{ to: string; body: string; groupId?: string }> = [];
+    const worker = {
+      sendSms: async (_db: Db, to: string, body: string, options?: { groupId?: string }) => {
+        sends.push({ to, body, ...(options?.groupId ? { groupId: options.groupId } : {}) });
+        return { sid: `SB_${sends.length}`, status: "queued" as const };
+      },
+      runSmsAgent: async () => { throw new Error("Agent exceeded its time budget of 4 minutes"); },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    };
+    const event = () => db.prepare("SELECT status,attempts,last_error FROM external_events WHERE json_extract(payload_json,'$.content')='break'")
+      .get() as { status: string; attempts: number; last_error: string };
+    const dueNow = () => db.prepare("UPDATE external_events SET available_at=? WHERE status='failed'").run(new Date(Date.now() - 1000).toISOString());
+
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      for (let attempt = 1; attempt < MAX_EVENT_ATTEMPTS; attempt += 1) {
+        await runWorkerOnce(db, fakeSearch(db), worker);
+        assert.equal(event().status, "failed", `attempt ${attempt} is retried`);
+        assert.equal(event().attempts, attempt);
+        dueNow();
+      }
+      assert.deepEqual(sends, [], "nothing is said while retries remain");
+      await runWorkerOnce(db, fakeSearch(db), worker);
+    } finally { stub.restore(); }
+    assert.equal(event().status, "ignored", "the last attempt settles it for good");
+    assert.equal(event().attempts, MAX_EVENT_ATTEMPTS);
+    assert.match(event().last_error, /^Gave up after 8 attempts: Agent exceeded its time budget/);
+    assert.deepEqual(sends, [{ to: `group:${GROUP}`, body: GAVE_UP_TEXT, groupId: GROUP }], "one line into the same thread");
+    const row = db.prepare(`
+      SELECT m.role,m.metadata_json FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      WHERE t.address=? AND m.content=?
+    `).get(`group:${GROUP}`, GAVE_UP_TEXT) as { role: string; metadata_json: string };
+    assert.equal(row.role, "assistant");
+    assert.equal(JSON.parse(row.metadata_json).kind, "gave_up", "filed so the archive shows why the thread went quiet");
+
+    // It stops holding the thread: a later text runs at once.
+    const turns: string[] = [];
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, "you there?")).expect(200);
+    await runWorkerOnce(db, fakeSearch(db), {
+      ...worker,
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, body: string) => { turns.push(body); return { text: "yes", threadId: "t" }; },
+    });
+    assert.deepEqual(turns, ["you there?"]);
+
+    // And once it is a week old, maintenance lets it go; unsettled rows stay.
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
+    db.prepare("UPDATE external_events SET updated_at=?").run(old);
+    enqueueExternalEvent(db, "sendblue", "SB_waiting", "sendblue.message.received", { from_number: WIFE, content: "later" });
+    db.prepare("UPDATE external_events SET updated_at=?,available_at=? WHERE external_id='SB_waiting'").run(old, new Date(Date.now() + 3600_000).toISOString());
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(
+      (db.prepare("SELECT status FROM external_events ORDER BY created_at").all() as Array<{ status: string }>).map(row => row.status),
+      ["pending"],
+      "the ignored and processed rows are gone; the one still waiting is not",
+    );
+  });
+
+  /*
+   * A retry that was overtaken answers an earlier text, and the turn context —
+   * speakerIsOwner above all — has to sit on that text, not on whatever a later
+   * speaker said.
+   */
+  it("puts the turn context on the text being answered, not the last one in the window", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const search = fakeSearch(db);
+    const failing: typeof fetch = async () => new Response("upstream busy", { status: 503 });
+    await assert.rejects(
+      runSmsAgent(db, search, address, "rename this to Family", "SB_owner_ask", groupTurnOptions(failing, RECIPIENT, "the owner")),
+      /503/,
+    );
+    await runSmsAgent(db, search, address, "actually call it Sarah's list", "SB_sarah_ask", groupTurnOptions(agentCallingMany([], "The owner can rename it.").fetcher));
+
+    type Message = { id: string; role: string; parts: Array<{ text?: string }>; metadata?: { turnContext?: Record<string, unknown> } };
+    const retry = agentCallingMany([], "Done.");
+    await runSmsAgent(db, search, address, "rename this to Family", "SB_owner_ask", groupTurnOptions(retry.fetcher, RECIPIENT, "the owner"));
+    const window = retry.requests[0].messages as Message[];
+    const withContext = window.filter(message => message.metadata?.turnContext);
+    assert.equal(withContext.length, 1, "one message carries the turn context");
+    assert.equal(withContext[0].parts[0].text, "[the owner] rename this to Family", "and it is the owner's text being retried");
+    assert.equal(withContext[0].metadata?.turnContext?.speakerIsOwner, true);
+    const sarah = window.find(message => message.parts[0]?.text?.includes("Sarah's list"));
+    assert.equal(sarah?.metadata, undefined, "Sarah's later text is not lent the owner's standing");
   });
 
   it("keeps the owner's records out of a group chat", async () => {
