@@ -110,18 +110,26 @@ export function deferExternalEvent(db: Db, eventId: string, availableAt: string)
 }
 
 /**
- * How many times an event may be attempted before it is given up. The backoff
- * doubles from two seconds, so eight attempts span about eight and a half
- * minutes: long enough to ride out a provider blip, short enough that a text
- * the agent will never manage does not come back every hour for good, hold
- * its thread's ordering, and sit in every blocker query as a `failed` row.
+ * How many times an event may be attempted before it is given up, by the kind
+ * of failure. A dropped connection or a provider asking us to come back later
+ * says nothing about the text, so it gets eight tries behind a doubling
+ * backoff — about four minutes of waiting between them, long enough to ride
+ * out a blip. Any other failure is the turn itself: a request the agent will
+ * refuse the same way every time, or a turn that ran out of rounds or minutes
+ * and will again. One more try covers a fluke; a third would cost everyone
+ * behind it another four minutes for the same answer. Either way the text does
+ * not come back every hour for good, hold its thread's ordering, or sit in
+ * every blocker query as a `failed` row.
  */
 export const MAX_EVENT_ATTEMPTS = 8;
+export const MAX_EVENT_ATTEMPTS_FINAL = 2;
 
 /**
  * Settles an event. A `failed` event is scheduled for another attempt behind
- * an exponential backoff until it has used `MAX_EVENT_ATTEMPTS`, when it is
- * filed as `ignored` — the same terminal status a dropped echo gets — with the
+ * an exponential backoff until it has used its attempts — `MAX_EVENT_ATTEMPTS`
+ * for a transient failure, `MAX_EVENT_ATTEMPTS_FINAL` otherwise — when it is
+ * filed as `ignored`, the same terminal status a Granola note the owner chose
+ * not to keep gets, with the
  * last error kept so the give-up can be read later. Returns the status written.
  */
 export function completeExternalEvent(
@@ -129,9 +137,11 @@ export function completeExternalEvent(
   eventId: string,
   status: "processed" | "ignored" | "failed",
   error?: string,
+  options: { transient?: boolean } = {},
 ): "processed" | "ignored" | "failed" {
   const attempts = (db.prepare("SELECT attempts FROM external_events WHERE id=?").get(eventId) as { attempts: number } | undefined)?.attempts ?? 1;
-  const gaveUp = status === "failed" && attempts >= MAX_EVENT_ATTEMPTS;
+  const allowed = options.transient === false ? MAX_EVENT_ATTEMPTS_FINAL : MAX_EVENT_ATTEMPTS;
+  const gaveUp = status === "failed" && attempts >= allowed;
   const written = gaveUp ? "ignored" : status;
   const retryAt = written === "failed"
     ? new Date(Date.now() + Math.min(3600, 2 ** Math.min(attempts, 10)) * 1000).toISOString()
@@ -143,11 +153,24 @@ export function completeExternalEvent(
   return written;
 }
 
-/** Drops settled events once they are older than `cutoff`; the unsettled ones stay whatever their age. */
-export function pruneSettledExternalEvents(db: Db, cutoff: string): number {
+/**
+ * Drops settled events from `sources` once they are older than `cutoff`; the
+ * unsettled ones stay whatever their age.
+ *
+ * Only the inbound text sources are offered. A settled row is also the
+ * `(source, external_id)` record that makes `enqueueExternalEvent()` ignore a
+ * second copy, and for a text that only matters for the minutes a provider
+ * keeps redelivering. A Granola note is different: the owner's decision to
+ * ignore it or turn it into a memory lives in that row, and the note can come
+ * back from the poll whenever it is edited, so its row has to outlive a week.
+ */
+export function pruneSettledExternalEvents(db: Db, sources: string[], cutoff: string): number {
+  if (!sources.length) return 0;
   return db.prepare(`
-    DELETE FROM external_events WHERE user_id=? AND status IN ('processed','ignored') AND updated_at<?
-  `).run(USER_ID, cutoff).changes;
+    DELETE FROM external_events
+    WHERE user_id=? AND status IN ('processed','ignored') AND updated_at<?
+      AND source IN (${sources.map(() => "?").join(",")})
+  `).run(USER_ID, cutoff, ...sources).changes;
 }
 
 type GranolaListResponse = {

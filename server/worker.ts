@@ -187,12 +187,22 @@ async function giveUpOnTurn(
   const address = inboundAddress(message);
   // The progress tapback was left up for a retry that is no longer coming.
   if (source === "sendblue" && message.messageId) await liftProgressMark(db, address, message.messageId);
+  let sent: Awaited<ReturnType<typeof sendSms>>;
   try {
-    const sent = await send(db, address, GAVE_UP_TEXT, message.groupId ? { groupId: message.groupId } : {});
-    recordOutboundChannelMessage(db, "sms", address, GAVE_UP_TEXT, sent.sid, sent.status, { kind: "gave_up" });
+    // Threaded under the text it is about: by now the texts behind it have
+    // been answered, and "that one" would otherwise point at nothing.
+    sent = await send(db, address, GAVE_UP_TEXT, {
+      ...(source === "sendblue" && message.messageId ? { replyTo: message.messageId } : {}),
+      ...(message.groupId ? { groupId: message.groupId } : {}),
+    });
   } catch (error) {
     console.warn("Could not tell the thread the turn was given up:", error instanceof Error ? error.message : error);
+    return;
   }
+  recordOutboundChannelMessage(db, "sms", address, GAVE_UP_TEXT, sent.sid, sent.status, {
+    kind: "gave_up",
+    ...(sent.replyTo ? { replyTo: sent.replyTo } : {}),
+  });
 }
 
 function inQuietHours(time: string, start: string | null, end: string | null): boolean {
@@ -548,7 +558,7 @@ async function runMaintenance(db: Db, search: SearchWriter): Promise<void> {
   const cutoff = new Date(Date.now() - COMPLETED_JOB_TTL_MS).toISOString();
   db.prepare("DELETE FROM index_jobs WHERE status='done' AND updated_at<?").run(cutoff);
   db.prepare("DELETE FROM scheduled_dispatches WHERE status='sent' AND updated_at<?").run(cutoff);
-  pruneSettledExternalEvents(db, cutoff);
+  pruneSettledExternalEvents(db, INBOUND_SOURCES.map(entry => entry.source), cutoff);
   const pending = db.prepare(`
     SELECT count(*) count FROM index_jobs WHERE status IN ('pending','failed')
   `).get() as { count: number };
@@ -617,9 +627,16 @@ export async function runWorkerOnce(
         // The row's last_error is overwritten by the attempt that succeeds, so
         // without this line a turn that took three tries leaves no trace of why.
         console.warn(`Inbound ${source} turn failed on attempt ${event.attempts}: ${reason}`);
-        const settled = completeExternalEvent(db, event.id, "failed", reason);
+        // An outage earns the full run of retries; a turn that failed on its own
+        // terms will fail the same way, and gets one more try to rule out a fluke.
+        const settled = completeExternalEvent(db, event.id, "failed", reason, { transient: isTransientFailure(error) });
         if (settled === "ignored" && message?.from) {
-          await giveUpOnTurn(db, source, message, send);
+          // Nothing here may take the rest of the batch down with it.
+          try {
+            await giveUpOnTurn(db, source, message, send);
+          } catch (giveUpError) {
+            console.warn("Giving up on the turn failed:", giveUpError instanceof Error ? giveUpError.message : giveUpError);
+          }
         }
       }
     }
