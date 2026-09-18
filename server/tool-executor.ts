@@ -240,6 +240,12 @@ export type ToolTurnContext = {
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
   replyToMessageHandle?: string;
   /**
+   * Set by `stay_quiet`: the agent judged the message was the people in the
+   * group talking to each other, so a turn that ends without text is silence
+   * on purpose rather than a model that forgot to answer.
+   */
+  stayedQuiet?: boolean;
+  /**
    * Set once a tapback has landed on the inbound message. A turn that reacted
    * and then had nothing to add has answered, so the caller sends no text
    * rather than a filler sentence.
@@ -459,6 +465,14 @@ export async function executeAgentTool(
     const turn = imessageTurn(context);
     turn.replyToMessageHandle = turn.inboundMessageHandle;
     return { threaded: true };
+  }
+  if (name === "stay_quiet") {
+    // People talk to each other in a group, and not every message is for the
+    // assistant. The reason lands in the archive as this tool's row; the turn
+    // itself sends nothing. A 1:1 text is always for the assistant.
+    if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat; a text sent to you is for you");
+    context.stayedQuiet = true;
+    return { quiet: true, reason: input.reason as string };
   }
 
   /*

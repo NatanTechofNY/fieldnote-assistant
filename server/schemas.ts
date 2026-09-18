@@ -500,6 +500,7 @@ export const toolInput = {
   reply_in_thread: z.object({}),
   send_message: z.object({ text: z.string().trim().min(1).max(1500) }).strict(),
   name_group_chat: z.object({ name: z.string().trim().min(1).max(80) }).strict(),
+  stay_quiet: z.object({ reason: z.string().trim().min(1).max(200) }).strict(),
   search_store_products: z.object({
     query: z.string().trim().min(1).max(200),
     category: z.enum(PRODUCT_CATEGORIES).nullable().optional(),

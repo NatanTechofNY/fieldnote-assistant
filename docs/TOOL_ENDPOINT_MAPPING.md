@@ -50,6 +50,7 @@ The fixed local identity is `USER_ID` (`process.env.DEMO_USER_ID || "devcon-demo
 | `reply_in_thread` | turn state | — |
 | `send_message` | **write** (SMS) | — |
 | `name_group_chat` | **write** | `PATCH /api/life-areas/:id` |
+| `stay_quiet` | turn state | — |
 | `search_store_products` | read (catalog) | — |
 | `send_product_cards` | **write** (SMS media) | — |
 | `personal_data_search` | read | hosted by Algolia |
@@ -169,6 +170,7 @@ Two more tools use the same turn context, on any SMS conversation rather than iM
 
 - `send_message({ text })` texts one bubble now, ahead of the turn's reply, through the turn's `sendSms` (into the group when the turn came from one), files it on the thread as an `assistant` row with `metadata_json.kind = "message"`, and sets `sentText` on the context, so a turn that returns no text afterwards is delivered as its bubbles alone. On the web channel it refuses with `This is not a text conversation; …`. It is in `WRITE_TOOLS`, so a retried turn does not send it twice, and in `GESTURE_TOOLS`, so it does not raise the progress tapback.
 - `name_group_chat({ name })` renames the group's own life area through `renameLifeArea()` in [`server/db.ts`](../server/db.ts) — the same code path as `PATCH /api/life-areas/:id` — which retitles the thread and queues a rewrite of every indexed record carrying the area's name. It refuses outside a group turn. Asked for the name the area already has, it writes nothing and answers `{ life_area_id, name, unchanged: true }` whoever asked — that is not a rename, and refusing it read as a failed one to a model that had only restated the current name on a non-owner's message; the owner-only check applies to a name that actually differs.
+- `stay_quiet({ reason })` is the agent's judgment that a group message was the people in it talking to each other and asked nothing of it. It sends nothing and writes nothing but its own tool row, which carries the reason so the archive says why the message went unanswered; it sets `stayedQuiet` on the turn context, and a turn that then ends with no text is delivered as nothing — no fallback sentence, and no closing tapback either, whatever the turn read on the way to deciding (a progress mark that went up is lifted). It refuses outside a group turn: a text sent to the assistant on its own line is for it. It is in `GESTURE_TOOLS`, so it raises no progress mark of its own.
 
 Inbound texts carry `reply_to` and `thread_originator` when the user replied inside a thread. The worker reads both onto the turn, they are stored in the inbound row's `metadata_json`, and `threadHistory()` prefixes that turn with a quote of the parent so `"that one"` attaches to the message the user picked rather than the one above it. The stored content and its Algolia projection keep the text the user actually sent.
 

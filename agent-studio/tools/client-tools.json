@@ -1184,6 +1184,27 @@
   {
     "type": "function",
     "function": {
+      "name": "stay_quiet",
+      "description": "Says nothing this turn. For a group chat message that is the people talking to each other and asks nothing of you. Records why in the archive; sends no text and no tapback. Group chats only.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "One short line on why this message is not for you, e.g. \"Sarah answering Tom about the plastic sheet\""
+          }
+        },
+        "required": ["reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "search_store_products",
       "description": "Searches the Walgreens catalog for over-the-counter remedies and sick-day supplies. Query by symptom or product name; results carry price, image, and store link. Browsing only, no purchase.",
       "strict": true,

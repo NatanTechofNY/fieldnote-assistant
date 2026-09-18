@@ -143,7 +143,7 @@ const WRITE_TOOLS = new Set([
  * reply, and an early bubble are the answer's own gestures, and the product
  * cards are messages.
  */
-const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_product_cards", "send_message"]);
+const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_product_cards", "send_message", "stay_quiet"]);
 
 /**
  * The tapback that sits on the user's message while the turn is looking things
@@ -876,8 +876,10 @@ export async function runChannelAgent(
       if (!toolParts.length) {
         // The answer is in. The progress mark gives way to the closing one, or
         // comes down when there is nothing to confirm; the agent's own reaction,
-        // if it made one, is left exactly where it is.
-        await setMark(closingMark());
+        // if it made one, is left exactly where it is. A turn that decided the
+        // message was not for it leaves no receipt at all, whatever it read on
+        // the way to deciding.
+        await setMark(context.stayedQuiet ? undefined : closingMark());
         const text = response.parts
           .filter(part => part.type === "text" && typeof part.text === "string")
           .map(part => part.text)
@@ -889,10 +891,12 @@ export async function runChannelAgent(
          * the message it landed on and as a tool row, so no assistant bubble is
          * written: an empty one would read as a turn that said nothing, and a
          * filler sentence would undo the gesture. The same holds when the turn
-         * already said its piece through send_message. Without either, silence
-         * is a model that forgot to answer, and the fallback says so.
+         * already said its piece through send_message, and when it judged the
+         * message was the group talking among themselves and said so with
+         * stay_quiet. Without any of those, silence is a model that forgot to
+         * answer, and the fallback says so.
          */
-        if (!text && (context.reacted || context.sentText)) {
+        if (!text && (context.reacted || context.sentText || context.stayedQuiet)) {
           search.flushSoon();
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle };
         }
