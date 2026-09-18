@@ -933,18 +933,27 @@ export function recordMessageReaction(
   const strings = (list: unknown): string[] =>
     (Array.isArray(list) ? list : []).filter((value): value is string => typeof value === "string");
   const current = strings(metadata.reactions);
+  const legacy = !Array.isArray(metadata.runtimeReactions);
   const runtime = strings(metadata.runtimeReactions);
   const removing = reaction.startsWith("-");
   const value = removing ? reaction.slice(1) : reaction;
   const reactions = removing
     ? current.filter(entry => entry !== value)
     : current.includes(value) ? current : [...current, value];
-  // A removal takes the value off whoever placed it: it is gone from the device.
-  const runtimeReactions = removing
+  /*
+   * A removal takes the value off whoever placed it: it is gone from the
+   * device. An agent placement takes it too — iMessage keeps one tapback per
+   * sender, so what is on the message is now the agent's, whoever had it.
+   * A row from before this list existed is left without it until the runtime
+   * itself places something, so the reader's inference for old rows keeps
+   * working rather than being replaced by an empty list that says "all agent".
+   */
+  const runtimeReactions = removing || placedBy === "agent"
     ? runtime.filter(entry => entry !== value)
-    : placedBy === "runtime" && !runtime.includes(value) ? [...runtime, value] : runtime;
+    : runtime.includes(value) ? runtime : [...runtime, value];
+  const stamp = !legacy || (placedBy === "runtime" && !removing);
   db.prepare("UPDATE channel_messages SET metadata_json=?,updated_at=? WHERE id=?")
-    .run(JSON.stringify({ ...metadata, reactions, runtimeReactions }), now(), row.id);
+    .run(JSON.stringify({ ...metadata, reactions, ...(stamp ? { runtimeReactions } : {}) }), now(), row.id);
 }
 
 /**

@@ -194,6 +194,8 @@ const PROGRESS_MARKS = new Set([...Object.values(PROGRESS_REACTIONS), GENERAL_PR
  * already asks it to react to what the user shares.
  */
 const CLOSING_REACTIONS = { changed: "✅", answered: "like" } as const;
+/** Every tapback the runtime places, progress or closing: what a retry may find already on the message. */
+const RUNTIME_MARKS = new Set<string>([...PROGRESS_MARKS, ...Object.values(CLOSING_REACTIONS)]);
 
 /**
  * The writes a ✅ confirms: the ones that change a record. Gestures sit in
@@ -536,7 +538,9 @@ function saveInboundMessage(
       return existing.id;
     }
   }
-  return saveChannelMessage(db, threadId, "inbound", "user", body, providerMessageId, metadata);
+  // Born knowing who placed what: only a row from before the list existed is
+  // ever read by inference.
+  return saveChannelMessage(db, threadId, "inbound", "user", body, providerMessageId, { ...metadata, runtimeReactions: [] });
 }
 
 export function recordOutboundChannelMessage(
@@ -836,8 +840,13 @@ export async function runChannelAgent(
     ? context.inboundMessageHandle
     : undefined;
   const alreadyOn = markHandle ? reactionsOn(db, thread.id, markHandle) : { all: [], runtime: [] };
-  /** The runtime's mark currently on the message, per the archive; `undefined` when there is none. */
-  let markShown: string | undefined = alreadyOn.runtime.find(reaction => PROGRESS_MARKS.has(reaction));
+  /**
+   * The runtime's mark currently on the message, per the archive; `undefined`
+   * when there is none. A closing receipt from an attempt whose reply then
+   * failed to send counts: the retry's first mark replaces it on the device,
+   * and the archive has to be told so.
+   */
+  let markShown: string | undefined = alreadyOn.runtime.find(reaction => RUNTIME_MARKS.has(reaction));
   /*
    * iMessage keeps one tapback per sender per message, so the mark does not sit
    * beside the agent's own reaction: it replaces it, and lifting it afterwards
