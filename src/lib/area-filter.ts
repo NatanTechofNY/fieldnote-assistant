@@ -10,6 +10,11 @@ import type {
  */
 export const MY_ITEMS = "mine";
 
+/** Whether any area belongs to a group chat; without one, "My items" and "All areas" are the same list. */
+export function hasGroupAreas(areas: LifeArea[]): boolean {
+  return areas.some(area => area.is_group);
+}
+
 /**
  * Where a page's area filter starts. My items, unless the page was opened by a
  * link to a specific record (`?open=<id>`): the link is to that record, which
