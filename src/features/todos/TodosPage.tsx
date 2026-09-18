@@ -47,6 +47,9 @@ export function TodosPage() {
   const { data: fetched = [], isLoading, error } = useQuery({
     queryKey: ["todos", showDone, areaParams.life_area_id ?? "", areaParams.scope ?? ""],
     queryFn: () => api.todos(showDone, areaParams.life_area_id, areaParams.scope),
+    // Switching areas keeps the page up and narrows what is already here;
+    // `inAreaFilter` below makes the held-over rows correct for the new pick.
+    placeholderData: previous => previous,
   });
   const todos = useMemo(() => narrowTodos(fetched, lifeAreas, lifeAreaId, query), [fetched, lifeAreas, lifeAreaId, query]);
   // `?open=` is how search results land on a specific card. Deriving the editor
@@ -115,6 +118,7 @@ export function TodosPage() {
     {/* Hiding done work hides the cards, never the column: finishing a task
         is a drag to Done, and the target has to be there to drag to. */}
     {view === "board" && <DndContext sensors={sensors} onDragEnd={onDragEnd}>
+      {query.trim() && !top.length && <div className="table-empty">No tasks match this view.</div>}
       <div className="board">
         {boardStatuses.map(status => <TodoColumn
           key={status}
@@ -166,9 +170,9 @@ function stepsByParent(todos: Todo[]): Map<string, Todo[]> {
 /**
  * What the page shows of what it fetched: the area filter's two aggregate
  * views are applied here, and so is the search. A match anywhere in a task's
- * family keeps the family together — a step whose parent matches stays under
- * it, and a parent stays for a step that matches — so the board never shows a
- * step with nowhere to hang or a parent with its matching step missing.
+ * family keeps the whole family — the task and every step, whichever of them
+ * matched — so the board never shows a step with nowhere to hang, and a
+ * task's "2/5 subtasks" means what it says while a search is on.
  */
 function narrowTodos(todos: Todo[], areas: LifeArea[], areaFilter: string, query: string): Todo[] {
   const inArea = todos.filter(todo => inAreaFilter(areaFilter, areas, todo.life_area_id));
@@ -177,13 +181,9 @@ function narrowTodos(todos: Todo[], areas: LifeArea[], areaFilter: string, query
   const matches = (todo: Todo) =>
     [todo.title, todo.notes, todo.category_name, todo.life_area_name]
       .some(field => field?.toLowerCase().includes(needle));
-  const byId = new Map(inArea.map(todo => [todo.id, todo]));
-  return inArea.filter(todo => {
-    if (matches(todo)) return true;
-    const parent = todo.parent_id ? byId.get(todo.parent_id) : undefined;
-    if (parent && matches(parent)) return true;
-    return inArea.some(step => step.parent_id === todo.id && matches(step));
-  });
+  const rootOf = (todo: Todo) => todo.parent_id ?? todo.id;
+  const families = new Set(inArea.filter(matches).map(rootOf));
+  return inArea.filter(todo => families.has(rootOf(todo)));
 }
 
 /** Board order, so switching views does not reshuffle the same work. */
@@ -380,7 +380,9 @@ function TodoColumn({ status, todos, children, hiddenNote, onOpen, onStatus }: {
   const { setNodeRef, isOver } = useDroppable({ id: status });
   const meta = statusMeta[status];
   return <section ref={setNodeRef} className="column" style={{ outline: isOver ? `1px solid ${meta.color}` : undefined }}>
-    <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong>{hiddenNote ? <span className="badge" title={hiddenNote}>hidden</span> : <span className="badge">{todos.length}</span>}</div>
+    {/* A finished task still holding open steps stays on the board whatever
+        the setting, so the badge counts whenever there is something to count. */}
+    <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong>{hiddenNote && !todos.length ? <span className="badge" title={hiddenNote}>hidden</span> : <span className="badge">{todos.length}</span>}</div>
     <div className="column-body">{todos.map(todo => <DraggableTodo key={todo.id} todo={todo} subtasks={children.get(todo.id) || []} onOpen={onOpen} onStatus={onStatus} />)}
       {!todos.length && <div className="empty"><span className="eyebrow">{hiddenNote ?? "Drop here"}</span>{hiddenNote && <span className="eyebrow">Drop here to finish</span>}</div>}
     </div>

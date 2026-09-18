@@ -1729,10 +1729,11 @@ it("opens on my items and searches the tasks that are showing", async () => {
   expect(await screen.findByText("Buy cat litter")).toBeInTheDocument();
   expect(screen.getByText("Prepare the DevCon demo")).toBeInTheDocument();
 
+  const beforeHome = requestedUrls.length;
   await userEvent.click(areaTab("Home"));
   expect(await screen.findByText("Buy cat litter")).toBeInTheDocument();
-  expect(requestedUrls.some(url => url.includes("life_area_id=area_group"))).toBe(true);
-  expect(screen.queryByText("Prepare the DevCon demo")).not.toBeInTheDocument();
+  await waitFor(() => expect(requestedUrls.slice(beforeHome).some(url => url.includes("life_area_id=area_group"))).toBe(true));
+  await waitFor(() => expect(screen.queryByText("Prepare the DevCon demo")).not.toBeInTheDocument());
 
   await userEvent.click(areaTab("My items"));
   expect(await screen.findByText("Prepare the DevCon demo")).toBeInTheDocument();
