@@ -245,6 +245,8 @@ export type ToolTurnContext = {
    * on purpose rather than a model that forgot to answer.
    */
   stayedQuiet?: boolean;
+  /** Set by the runner once a write to a record has landed this turn: something now needs saying. */
+  changedRecord?: boolean;
   /**
    * Set once a tapback has landed on the inbound message. A turn that reacted
    * and then had nothing to add has answered, so the caller sends no text
@@ -471,8 +473,13 @@ export async function executeAgentTool(
     // assistant. The reason lands in the archive as this tool's row; the turn
     // itself sends nothing. A 1:1 text is always for the assistant.
     if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat; a text sent to you is for you");
+    // A record changed in this turn is a side effect the room has not been
+    // told about; silence after it would be an unconfirmed write.
+    if (context.changedRecord) throw new Error("You changed a record this turn; say what changed instead of staying quiet");
     context.stayedQuiet = true;
-    return { quiet: true, reason: input.reason as string };
+    // Who was passed over is kept beside why, so a suppressed request from the
+    // owner can be found in the archive.
+    return { quiet: true, reason: input.reason as string, speaker_is_owner: context.speakerIsOwner === true };
   }
 
   /*

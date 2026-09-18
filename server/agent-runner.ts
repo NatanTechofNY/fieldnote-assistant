@@ -874,17 +874,19 @@ export async function runChannelAgent(
         && (part.toolCallId || part.tool_call_id),
       );
       if (!toolParts.length) {
-        // The answer is in. The progress mark gives way to the closing one, or
-        // comes down when there is nothing to confirm; the agent's own reaction,
-        // if it made one, is left exactly where it is. A turn that decided the
-        // message was not for it leaves no receipt at all, whatever it read on
-        // the way to deciding.
-        await setMark(context.stayedQuiet ? undefined : closingMark());
         const text = response.parts
           .filter(part => part.type === "text" && typeof part.text === "string")
           .map(part => part.text)
           .join("\n")
           .trim();
+        // The answer is in. The progress mark gives way to the closing one, or
+        // comes down when there is nothing to confirm; the agent's own reaction,
+        // if it made one, is left exactly where it is. A turn that decided the
+        // message was not for it, and held to that, leaves no receipt at all,
+        // whatever it read on the way to deciding; one that changed its mind
+        // and answered is answered, receipt and all.
+        const quiet = context.stayedQuiet && !text;
+        await setMark(quiet ? undefined : closingMark());
         /*
          * A tapback with nothing after it is a complete answer to "thanks" or
          * "ok", the way it is between people. The reaction is already filed on
@@ -931,7 +933,10 @@ export async function runChannelAgent(
           // nothing to show for it.
           part.output = { success: true, data: data ?? null };
           // Only a write that landed earns the ✅; a refused delete confirms nothing.
-          if (RECORD_WRITE_TOOLS.has(toolName)) changedRecord = true;
+          if (RECORD_WRITE_TOOLS.has(toolName)) {
+            changedRecord = true;
+            context.changedRecord = true;
+          }
         } catch (error) {
           part.output = { success: false, error: error instanceof Error ? error.message : "Tool failed" };
         }

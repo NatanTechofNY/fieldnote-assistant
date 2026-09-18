@@ -5076,6 +5076,59 @@ describe("Sendblue provider", () => {
   });
 
   /*
+   * Staying quiet is a decision about the message, not a lock on the turn. An
+   * answer given after it stands, receipt included; and it is never a way to
+   * leave a write unconfirmed.
+   */
+  it("lets an answer given after stay_quiet stand, and refuses stay_quiet after a write", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const search = fakeSearch(db);
+
+    // Changed its mind: quiet, then a lookup, then an answer.
+    let round = 0;
+    const quietThenAnswers: typeof fetch = async () => {
+      round += 1;
+      const parts = round === 1
+        ? [{ type: "tool-stay_quiet", tool_call_id: "call_q1", state: "input-available", input: { reason: "Sounds like Tom's question" } }]
+        : round === 2
+          ? [{ type: "tool-list_todos", tool_call_id: "call_l1", state: "input-available", input: { status: null, limit: 20 } }]
+          : [{ type: "text", text: "Actually, that one's on the list for Saturday." }];
+      return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+    };
+    let stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      const answered = await runSmsAgent(db, search, address, "did anyone order the sheet?", "SB_sheet_q", groupTurnOptions(quietThenAnswers));
+      assert.equal(answered.text, "Actually, that one's on the list for Saturday.", "the answer stands");
+      assert.deepEqual(stub.calls.map(call => call.body.reaction), ["📋", "like"], "and it closes like any lookup, quiet or not");
+    } finally { stub.restore(); }
+
+    // Wrote first, then tried to say nothing.
+    round = 0;
+    const writesThenQuiet: typeof fetch = async () => {
+      round += 1;
+      const parts = round === 1
+        ? [{ type: "tool-create_todo", tool_call_id: "call_c1", state: "input-available", input: { title: "Order the plastic sheet" } }]
+        : round === 2
+          ? [{ type: "tool-stay_quiet", tool_call_id: "call_q2", state: "input-available", input: { reason: "just chatter" } }]
+          : [{ type: "text", text: "Added the plastic sheet." }];
+      return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+    };
+    stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      const confirmed = await runSmsAgent(db, search, address, "we should get a plastic sheet", "SB_sheet_w", groupTurnOptions(writesThenQuiet));
+      assert.equal(confirmed.text, "Added the plastic sheet.");
+      assert.equal(
+        toolOutputs(db, address).stay_quiet.error,
+        "You changed a record this turn; say what changed instead of staying quiet",
+      );
+      assert.equal(stub.calls.at(-1)?.body.reaction, "✅", "the write gets its receipt");
+    } finally { stub.restore(); }
+  });
+
+  /*
    * A non-owner's message once carried no speakerIsOwner at all, and the model,
    * reading the area's name back out of the turn context, called name_group_chat
    * with that same name and was refused. Nothing was being renamed.
