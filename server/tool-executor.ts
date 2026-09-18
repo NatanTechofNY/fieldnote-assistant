@@ -289,6 +289,36 @@ function scopedMemory(db: Db, memoryId: string, scope: GroupScope | undefined): 
  * and a group turn has no way to list them, so accepting one would only make
  * the tool an oracle for their names.
  */
+/** Title comparison for the duplicate guard: case, surrounding space, and runs of space do not make a different task. */
+function normalizedTitle(title: string): string {
+  return title.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * The open todo `create_todo` would duplicate, if there is one.
+ *
+ * The prompt's duplicate preflight is an Algolia search, and a search is not
+ * the record. Thirty seconds after ten todos were written, a preflight for the
+ * same titles came back with two of them, and the eight it missed were created
+ * again. SQLite is the source of truth, so the same question is asked of it
+ * here, narrowly: the same title, in the same life area, under the same parent,
+ * and still open. Two trips can each have a "Book tickets" step, a done task
+ * can be created afresh, and a different area is a different list; anything
+ * closer than that is the same task, and the model is told which record it is
+ * so it can update it instead.
+ */
+function openTodoTitled(db: Db, title: string, lifeAreaId: string | null, parentId: string | null): TodoRow | null {
+  const rows = db.prepare(`
+    SELECT * FROM todos
+    WHERE user_id=? AND status NOT IN ('done','cancelled')
+      AND ((? IS NULL AND life_area_id IS NULL) OR life_area_id=?)
+      AND ((? IS NULL AND parent_id IS NULL) OR parent_id=?)
+    ORDER BY created_at
+  `).all(USER_ID, lifeAreaId, lifeAreaId, parentId, parentId) as TodoRow[];
+  const wanted = normalizedTitle(title);
+  return rows.find(row => normalizedTitle(row.title) === wanted) ?? null;
+}
+
 function classificationForWrite(
   scope: GroupScope | undefined,
   chosen: { life_area_id?: unknown; category_id?: unknown },
@@ -383,13 +413,21 @@ export async function executeAgentTool(
   }
   if (name === "name_group_chat") {
     if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat");
+    const groupName = input.name as string;
+    // Asking for the name the group already has changes nothing, so nobody
+    // needs permission for it. Refusing it read as a failed rename to a model
+    // that had only restated the current name on a non-owner's message.
+    const current = db.prepare("SELECT name FROM life_areas WHERE id=? AND user_id=?")
+      .get(scope.lifeAreaId, USER_ID) as { name: string } | undefined;
+    if (current && current.name.trim() === groupName.trim()) {
+      return { life_area_id: scope.lifeAreaId, name: current.name, unchanged: true };
+    }
     // The first name is the assistant's to give; after that the area is the
     // owner's record, and a rename asked for by anyone else is refused here
     // rather than left to the prompt.
     if (!scope.lifeAreaIsNew && !context.speakerIsOwner) {
       throw new Error("Only the owner can rename the group chat");
     }
-    const groupName = input.name as string;
     renameLifeArea(db, scope.lifeAreaId, groupName);
     search.flushSoon();
     return { life_area_id: scope.lifeAreaId, name: groupName };
@@ -596,6 +634,12 @@ export async function executeAgentTool(
       if (parent.recurrence_json) throw new Error(REPEATING_PARENT);
     }
     const area = classificationForWrite(scope, input);
+    const existing = openTodoTitled(db, input.title as string, area.life_area_id, (input.parent_id as string | null | undefined) ?? null);
+    if (existing) {
+      throw new Error(
+        `A todo titled "${existing.title}" already exists (${existing.id}); update it with update_todo instead of creating another`,
+      );
+    }
     const schedule = repeat.derived ?? {
       due_at: (input.due_at as string | null | undefined) ?? null,
       reminder_at: (input.reminder_at as string | null | undefined) ?? null,

@@ -24,6 +24,15 @@ const COMPLETION_TIMEOUT_MS = 45_000;
  */
 const CONTEXT_WINDOW_MS = 24 * 60 * 60_000;
 
+/**
+ * How many completions a turn may take before it is abandoned. A runaway loop
+ * needs a ceiling, but the ceiling has to clear honest work: a twelve-item
+ * checklist turned into todos one create per round ran out at eight, with ten
+ * records written and no reply, and the retry two seconds later was overtaken
+ * by the next text in the thread.
+ */
+const MAX_TOOL_ITERATIONS = 16;
+
 function newConversationId(): string {
   return `alg_cnv_${crypto.randomUUID().replaceAll("-", "")}`;
 }
@@ -263,10 +272,15 @@ function quotedParent(db: Db, threadId: string, metadataJson: string): string | 
  * live one, and a retried digest brief that read its own instruction twice — with
  * an unrelated check-in wedged between — filtered on an assignee nobody asked for.
  */
+/** The id of the synthetic assistant message that carries an unanswered turn's writes. */
+function orphanedWritesMessageId(userRowId: string): string {
+  return `alg_msg_writes_${userRowId.replaceAll("-", "_")}`;
+}
+
 function threadHistory(db: Db, threadId: string): AgentMessage[] {
   const cutoff = new Date(Date.now() - CONTEXT_WINDOW_MS).toISOString();
   const rows = db.prepare(`
-    SELECT id,role,content,metadata_json FROM (
+    SELECT id,role,content,metadata_json,rowid FROM (
       SELECT id,role,content,metadata_json,created_at,rowid FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant') AND created_at>=?
         AND status<>'failed'
@@ -277,15 +291,16 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
     role: "user" | "assistant";
     content: string;
     metadata_json: string;
+    rowid: number;
   }>;
-  return rows.map(row => {
+  return rows.flatMap((row, index) => {
     const quote = row.role === "user" ? quotedParent(db, threadId, row.metadata_json) : null;
     // A 1:1 thread has one voice and needs no label; a shared one has several,
     // and without it every request in the window reads as the owner's. The
     // label is a name, or a redacted number when there is none: no full phone
     // number leaves the server for the model.
     const speaker = row.role === "user" ? speakerLabel(row.metadata_json) : null;
-    return {
+    const message: AgentMessage = {
       id: row.id.startsWith("alg_msg_") ? row.id : `alg_msg_${row.id.replaceAll("-", "_")}`,
       role: row.role,
       parts: row.role === "assistant"
@@ -297,11 +312,25 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
           text: `${speaker ? `[${speaker}] ` : ""}${quote ? `[replying to "${quote}"] ` : ""}${row.content}`,
         }],
     };
+    if (row.role === "assistant") return [message];
+    /*
+     * A user turn with no assistant row after it is one nobody answered: the
+     * attempt died, or it is the turn being answered now. Its tool rows still
+     * say what it wrote, and without them the next turn in the thread reads
+     * the request as untouched. A "yes" that created ten todos and then hit
+     * the iteration cap was followed, two seconds later, by "all due Sunday"
+     * — a turn that saw the list unanswered and created all ten again.
+     */
+    const next = rows[index + 1];
+    if (next?.role === "assistant") return [message];
+    const writes = orphanedWrites(db, threadId, row.rowid, next?.rowid);
+    if (!writes.length) return [message];
+    return [message, { id: orphanedWritesMessageId(row.id), role: "assistant", parts: writes }];
   });
 }
 
 /**
- * The writes an earlier attempt at this same turn already made, shaped as the
+ * The writes a turn made without ever writing its assistant row, shaped as the
  * assistant message that would have carried them.
  *
  * A turn that times out after its `update_todo` has changed the record but never
@@ -313,17 +342,17 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
  * rule as `assistantParts()`, that a write result beside the request is the only
  * evidence a write happened. Reads are left out for the same reason they are
  * left out of the replay: repeating one is cheap, and a stale one is misleading.
+ *
+ * The rows are the tool rows filed after the user row and, when a later user
+ * row exists, before it: insertion order rather than the clock, because two
+ * turns can land in the same millisecond, and the earlier one's write is not
+ * this turn's.
  */
-function priorAttemptWrites(db: Db, threadId: string, inboundId: string): AgentPart[] {
-  const inbound = db.prepare("SELECT rowid FROM channel_messages WHERE id=?")
-    .get(inboundId) as { rowid: number } | undefined;
-  if (!inbound) return [];
-  // Insertion order, not the clock: two turns can land in the same millisecond,
-  // and the earlier one's write is not this turn's.
+function orphanedWrites(db: Db, threadId: string, afterRowid: number, beforeRowid?: number): AgentPart[] {
   const rows = db.prepare(`
     SELECT content,metadata_json FROM channel_messages
-    WHERE thread_id=? AND role='tool' AND rowid>? ORDER BY rowid
-  `).all(threadId, inbound.rowid) as Array<{ content: string; metadata_json: string }>;
+    WHERE thread_id=? AND role='tool' AND rowid>? AND (? IS NULL OR rowid<?) ORDER BY rowid
+  `).all(threadId, afterRowid, beforeRowid ?? null, beforeRowid ?? null) as Array<{ content: string; metadata_json: string }>;
   return rows.flatMap(row => {
     if (!WRITE_TOOLS.has(row.content)) return [];
     let trace: { input?: Record<string, unknown>; output?: unknown; toolCallId?: string };
@@ -667,20 +696,23 @@ export async function runChannelAgent(
             // enough to tell two unnamed voices apart.
             ...(speaker?.speaker ? { speaker: redactedNumber(speaker.speaker) } : {}),
             ...(speaker?.speakerName ? { speakerName: speaker.speakerName } : {}),
-            ...(speaker?.speakerIsOwner ? { speakerIsOwner: true } : {}),
+            // Stated either way, so "not the owner" is a fact the model was
+            // told rather than a field it did not see.
+            speakerIsOwner: speaker?.speakerIsOwner === true,
           }
           : {}),
       },
     };
   }
-  // A retry resumes the turn rather than restarting it.
-  const priorWrites = priorAttemptWrites(db, thread.id, inboundId);
-  if (priorWrites.length) {
-    messages.push({
-      id: `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`,
-      role: "assistant",
-      parts: priorWrites,
-    });
+  // A retry resumes the turn rather than restarting it. `threadHistory()` has
+  // already placed the earlier attempt's writes after the inbound row when that
+  // row is inside the window; this covers the inbound that fell outside it.
+  const inboundRowid = (db.prepare("SELECT rowid FROM channel_messages WHERE id=?")
+    .get(inboundId) as { rowid: number }).rowid;
+  const priorWrites = orphanedWrites(db, thread.id, inboundRowid);
+  const replayId = orphanedWritesMessageId(inboundId);
+  if (priorWrites.length && !messages.some(message => message.id === replayId)) {
+    messages.push({ id: replayId, role: "assistant", parts: priorWrites });
   }
 
   // Best effort at both ends: a runtime tapback that fails to land, or to
@@ -735,7 +767,7 @@ export async function runChannelAgent(
   };
 
   try {
-    for (let iteration = 0; iteration < 8; iteration += 1) {
+    for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
       const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch, context.scope);
       response.id ||= `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
       for (const part of response.parts.filter(part =>

@@ -59,6 +59,44 @@ export function claimExternalEvents(db: Db, source?: string, limit = 20): Extern
   })();
 }
 
+/**
+ * Every event from `source` filed before `createdAt` that has not been settled:
+ * waiting, failed and awaiting its retry, or claimed. The caller decides which
+ * of them stand in front of the event it is about to run.
+ */
+export function unsettledExternalEventsBefore(db: Db, source: string, createdAt: string): ExternalEventRow[] {
+  return db.prepare(`
+    SELECT * FROM external_events
+    WHERE user_id=? AND source=? AND status IN ('pending','failed','processing') AND created_at<?
+    ORDER BY created_at
+  `).all(USER_ID, source, createdAt) as ExternalEventRow[];
+}
+
+/**
+ * When the next event from any of `sources` becomes claimable, or null when none
+ * is waiting on the clock. This is what lets a retry or a deferred text run at
+ * its scheduled second rather than at the next interval tick.
+ */
+export function nextExternalEventAvailableAt(db: Db, sources: string[]): string | null {
+  if (!sources.length) return null;
+  const row = db.prepare(`
+    SELECT min(available_at) next FROM external_events
+    WHERE user_id=? AND status IN ('pending','failed') AND source IN (${sources.map(() => "?").join(",")})
+  `).get(USER_ID, ...sources) as { next: string | null };
+  return row.next;
+}
+
+/**
+ * Hands a claimed event back to the queue untouched, to be claimed again no
+ * earlier than `availableAt`. The claim counted as an attempt, and nothing was
+ * attempted, so the count is given back too.
+ */
+export function deferExternalEvent(db: Db, eventId: string, availableAt: string): void {
+  db.prepare(`
+    UPDATE external_events SET status='pending',attempts=max(attempts-1,0),available_at=?,updated_at=? WHERE id=?
+  `).run(availableAt, now(), eventId);
+}
+
 export function completeExternalEvent(
   db: Db,
   eventId: string,
