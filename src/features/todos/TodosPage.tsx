@@ -1,14 +1,15 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type DragEndEvent, DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
-import { Archive, BellRing, CalendarDays, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus, Repeat } from "lucide-react";
+import { Archive, BellRing, CalendarDays, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus, Repeat, Search } from "lucide-react";
 import { api } from "../../api";
 import type {
-  Todo, TodoStatus,
+  LifeArea, Todo, TodoStatus,
 } from "../../types";
 import { PageHead } from "../../components/layout/PageHead";
 import { AttachButton, ErrorState, Loading } from "../../components/ui";
 import { LifeAreaFilter } from "../../components/ui/LifeAreaFilter";
+import { areaFilterParam, inAreaFilter, MY_ITEMS } from "../../lib/area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck } from "./SubtaskCheck";
@@ -31,18 +32,26 @@ export function TodosPage() {
   // to make again every morning.
   const [showDone, setShowDone] = usePreference("todos:show-done", true, BOOLEAN);
   const [view, setView] = usePreference<TodoView>("todos:view", "table", TODO_VIEWS);
-  const [lifeAreaId, setLifeAreaId] = useState("");
+  // The board opens on the owner's own work. A group chat's tasks are shared
+  // with the people in it, and a busy chat or two would otherwise be most of
+  // what the first screen shows.
+  const [lifeAreaId, setLifeAreaId] = useState(MY_ITEMS);
+  const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<Todo | "new" | null>(null);
   // A task captured from the calendar opens on the slot that was clicked.
   const [capturedAt, setCapturedAt] = useState("");
   const { data: lifeAreas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
-  const { data: todos = [], isLoading, error } = useQuery({
-    queryKey: ["todos", showDone, lifeAreaId],
-    queryFn: () => api.todos(showDone, lifeAreaId || undefined),
+  const areaParam = areaFilterParam(lifeAreaId);
+  const { data: fetched = [], isLoading, error } = useQuery({
+    queryKey: ["todos", showDone, areaParam ?? ""],
+    queryFn: () => api.todos(showDone, areaParam),
   });
+  const todos = useMemo(() => narrowTodos(fetched, lifeAreas, lifeAreaId, query), [fetched, lifeAreas, lifeAreaId, query]);
   // `?open=` is how search results land on a specific card. Deriving the editor
-  // from the URL keeps the deep link working on a refresh.
-  const deepLink = useDeepLinkTarget(todos);
+  // from the URL keeps the deep link working on a refresh, and it is resolved
+  // against everything fetched so a link to a group's task opens whatever the
+  // filter is showing.
+  const deepLink = useDeepLinkTarget(fetched);
   const editing = editor ?? deepLink.target ?? null;
   const closeEditor = () => { setEditor(null); setCapturedAt(""); deepLink.clear(); };
   const invalidate = () => {
@@ -85,10 +94,10 @@ export function TodosPage() {
   if (error) return <ErrorState error={error} />;
   return <div className="page">
     <PageHead eyebrow="Plan · move · finish" title="The board." description="Work stays visible. Change a task's state from the row, drag a card on the board, or ask the agent to do it for you." />
-    {/* The page's own controls sit on the filter row: the top right corner
-        belongs to the launcher now. */}
+    {/* The page's own controls sit on the toolbar: the top right corner
+        belongs to the launcher now. Search narrows whatever view is open. */}
     <div className="toolbar">
-      <LifeAreaFilter areas={lifeAreas} value={lifeAreaId} onChange={setLifeAreaId}/>
+      <div className="search"><Search size={16} aria-hidden="true"/><input className="input" aria-label="Search tasks" placeholder="Search tasks by title, notes, or area…" value={query} onChange={e => setQuery(e.target.value)} /></div>
       <div className="toolbar-actions">
         <div className="view-toggle" role="group" aria-label="Task view">
           <button type="button" className={view === "table" ? "active" : ""} aria-pressed={view === "table"} onClick={() => setView("table")}><List size={13}/>List</button>
@@ -99,6 +108,7 @@ export function TodosPage() {
         <button className="button primary" onClick={() => setEditor("new")}><Plus size={15}/>New task</button>
       </div>
     </div>
+    <LifeAreaFilter areas={lifeAreas} value={lifeAreaId} onChange={setLifeAreaId}/>
     {view === "table" && <TodoTable todos={top} children={children} onOpen={setEditor} onStatus={setStatus}/>}
     {view === "board" && <DndContext sensors={sensors} onDragEnd={onDragEnd}>
       <div className="board">
@@ -116,8 +126,8 @@ export function TodosPage() {
     {editing && <TodoModal
       todo={editing === "new" ? undefined : editing}
       defaultDueAt={editing === "new" ? capturedAt : undefined}
-      subtasks={editing === "new" ? [] : children.get(editing.id) || []}
-      allTodos={top}
+      subtasks={editing === "new" ? [] : fetched.filter(t => t.parent_id === editing.id)}
+      allTodos={fetched.filter(t => !t.parent_id)}
       lifeAreas={lifeAreas}
       onClose={closeEditor}
     />}
@@ -132,6 +142,29 @@ export function TodosPage() {
       }}
     />}
   </div>;
+}
+
+/**
+ * What the page shows of what it fetched: the area filter's two aggregate
+ * views are applied here, and so is the search. A match anywhere in a task's
+ * family keeps the family together — a step whose parent matches stays under
+ * it, and a parent stays for a step that matches — so the board never shows a
+ * step with nowhere to hang or a parent with its matching step missing.
+ */
+function narrowTodos(todos: Todo[], areas: LifeArea[], areaFilter: string, query: string): Todo[] {
+  const inArea = todos.filter(todo => inAreaFilter(areaFilter, areas, todo.life_area_id));
+  const needle = query.trim().toLowerCase();
+  if (!needle) return inArea;
+  const matches = (todo: Todo) =>
+    [todo.title, todo.notes, todo.category_name, todo.life_area_name]
+      .some(field => field?.toLowerCase().includes(needle));
+  const byId = new Map(inArea.map(todo => [todo.id, todo]));
+  return inArea.filter(todo => {
+    if (matches(todo)) return true;
+    const parent = todo.parent_id ? byId.get(todo.parent_id) : undefined;
+    if (parent && matches(parent)) return true;
+    return inArea.some(step => step.parent_id === todo.id && matches(step));
+  });
 }
 
 /** Board order, so switching views does not reshuffle the same work. */

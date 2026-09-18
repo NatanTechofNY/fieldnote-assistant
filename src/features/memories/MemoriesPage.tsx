@@ -13,6 +13,7 @@ import { moodEmoji } from "../../lib/mood";
 import { useDebounced } from "../../lib/use-debounced";
 import { useDeepLinkTarget } from "../../lib/use-deep-link-target";
 import { LifeAreaFilter } from "../../components/ui/LifeAreaFilter";
+import { areaFilterParam, inAreaFilter, MY_ITEMS } from "../../lib/area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { MemoryModal } from "./MemoryModal";
 
@@ -20,16 +21,21 @@ export function MemoriesPage() {
   const queryClient = useQueryClient();
   const [kind, setKind] = useState<"all" | MemoryKind>("all");
   const [query, setQuery] = useState("");
-  const [lifeAreaId, setLifeAreaId] = useState("");
+  // Opens on the owner's own memories; a group chat's are shared with the chat.
+  const [lifeAreaId, setLifeAreaId] = useState(MY_ITEMS);
   const [editor, setEditor] = useState<Memory | "new" | null>(null);
   const debouncedQuery = useDebounced(query.trim());
   const { data: lifeAreas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
+  const areaParam = areaFilterParam(lifeAreaId);
   const { data, isLoading, error } = useQuery({
-    queryKey: ["memories", kind, debouncedQuery, lifeAreaId],
-    queryFn: () => api.memories({ kind, query: debouncedQuery, life_area_id: lifeAreaId || undefined }),
+    queryKey: ["memories", kind, debouncedQuery, areaParam ?? ""],
+    queryFn: () => api.memories({ kind, query: debouncedQuery, life_area_id: areaParam }),
     placeholderData: previous => previous,
   });
-  const memories = useMemo(() => data?.memories ?? [], [data]);
+  const memories = useMemo(
+    () => (data?.memories ?? []).filter(memory => inAreaFilter(lifeAreaId, lifeAreas, memory.life_area_id)),
+    [data, lifeAreaId, lifeAreas],
+  );
   // `?open=` is how search results land on a specific memory.
   const deepLink = useDeepLinkTarget(memories);
   const editing = editor ?? deepLink.target ?? null;

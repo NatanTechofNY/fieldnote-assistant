@@ -85,6 +85,11 @@ const todos = [
   // A task with a step still standing, so finishing it has something to ask about.
   todo({ id: "todo_open_parent", title: "Wrap the sprint", priority: null, due_at: null }),
   todo({ id: "todo_open_sub", title: "Send the recap", parent_id: "todo_open_parent", priority: null, due_at: null }),
+  // Asked for in a group chat, so filed under the group's own area.
+  todo({
+    id: "todo_group", title: "Buy cat litter", priority: null, due_at: null,
+    life_area_id: "area_group", life_area_name: "Home", life_area_slug: "home", life_area_source: "agent",
+  }),
 ];
 
 /** Stateful so a saved preference reads back the way the server would return it. */
@@ -1701,6 +1706,44 @@ it("lists tasks with status, schedule and subtask progress", async () => {
   expect(await screen.findByRole("button", { name: /Show done/ })).toBeInTheDocument();
   expect(requestedUrls.some(url => url.includes("includeDone=false"))).toBe(true);
   expect(screen.queryByText("Book the flight")).not.toBeInTheDocument();
+});
+
+/**
+ * The board opens on the owner's own work; a group chat's tasks are one tab
+ * over. Search narrows whatever is showing and keeps a family together.
+ */
+it("opens on my items and searches the tasks that are showing", async () => {
+  renderAt("/todos");
+  expect(await screen.findByText("The board.")).toBeInTheDocument();
+
+  // Picking an area the server has not been asked for yet re-renders the page
+  // around a spinner, so the filter is looked up fresh each time.
+  const areaTab = (name: string) => within(screen.getByLabelText("Life area filter")).getByRole("button", { name });
+  expect(areaTab("My items")).toHaveClass("active");
+  expect(screen.getByText("Prepare the DevCon demo")).toBeInTheDocument();
+  expect(screen.queryByText("Buy cat litter")).not.toBeInTheDocument();
+
+  await userEvent.click(areaTab("All areas"));
+  expect(await screen.findByText("Buy cat litter")).toBeInTheDocument();
+  expect(screen.getByText("Prepare the DevCon demo")).toBeInTheDocument();
+
+  await userEvent.click(areaTab("Home"));
+  expect(await screen.findByText("Buy cat litter")).toBeInTheDocument();
+  expect(requestedUrls.some(url => url.includes("life_area_id=area_group"))).toBe(true);
+  expect(screen.queryByText("Prepare the DevCon demo")).not.toBeInTheDocument();
+
+  await userEvent.click(areaTab("My items"));
+  expect(await screen.findByText("Prepare the DevCon demo")).toBeInTheDocument();
+
+  // A step's words find its parent, so the match has somewhere to hang.
+  await userEvent.type(screen.getByLabelText("Search tasks"), "outline");
+  expect(screen.getByText("Prepare the DevCon demo")).toBeInTheDocument();
+  expect(screen.queryByText("Rehearse the walkthrough")).not.toBeInTheDocument();
+  expect(screen.queryByText("Book the flight")).not.toBeInTheDocument();
+
+  await userEvent.clear(screen.getByLabelText("Search tasks"));
+  await userEvent.type(screen.getByLabelText("Search tasks"), "nothing like this");
+  expect(screen.getByText("No tasks match this view.")).toBeInTheDocument();
 });
 
 /**
