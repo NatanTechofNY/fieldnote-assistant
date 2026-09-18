@@ -240,6 +240,14 @@ export type ToolTurnContext = {
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
   replyToMessageHandle?: string;
   /**
+   * Set by `stay_quiet`: the agent judged the message was the people in the
+   * group talking to each other, so a turn that ends without text is silence
+   * on purpose rather than a model that forgot to answer.
+   */
+  stayedQuiet?: boolean;
+  /** Set by the runner once a write to a record has landed this turn: something now needs saying. */
+  changedRecord?: boolean;
+  /**
    * Set once a tapback has landed on the inbound message. A turn that reacted
    * and then had nothing to add has answered, so the caller sends no text
    * rather than a filler sentence.
@@ -459,6 +467,25 @@ export async function executeAgentTool(
     const turn = imessageTurn(context);
     turn.replyToMessageHandle = turn.inboundMessageHandle;
     return { threaded: true };
+  }
+  if (name === "stay_quiet") {
+    // People talk to each other in a group, and not every message is for the
+    // assistant. The reason lands in the archive as this tool's row; the turn
+    // itself sends nothing. A 1:1 text is always for the assistant.
+    if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat; a text sent to you is for you");
+    // Until the assistant has answered once in a group, the owner has just
+    // brought it in and the room is owed an introduction and a name for its
+    // area; a quiet first turn would consume both cues for good.
+    if (scope.lifeAreaIsNew) {
+      throw new Error("Nobody here has heard from you yet; introduce yourself in a line and name the group instead of staying quiet");
+    }
+    // A record changed in this turn is a side effect the room has not been
+    // told about; silence after it would be an unconfirmed write.
+    if (context.changedRecord) throw new Error("You changed a record this turn; say what changed instead of staying quiet");
+    context.stayedQuiet = true;
+    // Who was passed over is kept beside why, so a suppressed request from the
+    // owner can be found in the archive.
+    return { quiet: true, reason: input.reason as string, speaker_is_owner: context.speakerIsOwner === true };
   }
 
   /*

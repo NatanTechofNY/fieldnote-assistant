@@ -1431,7 +1431,7 @@ describe("Agent Studio configuration sync", () => {
       agentId: "agent",
       fetcher,
     });
-    assert.equal(result.clientTools, 33);
+    assert.equal(result.clientTools, 34);
     assert.equal(result.preservedTools, 1, "unrelated tools survive, the search tool is rebuilt not preserved");
     assert.equal(result.searchIndices, 3);
     assert.deepEqual(calls.map(call => call.method), ["GET", "PATCH", "POST"]);
@@ -1490,7 +1490,7 @@ describe("Agent Studio configuration sync", () => {
       assert.deepEqual(controls.facets.default, expected, `${index.index} exposes only safe facets`);
       assert.deepEqual(parameters.facets, expected, `${index.index} requests the same set it allows`);
     }
-    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 33);
+    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 34);
     assert.ok(!patch.tools.some(tool => tool.name === "list_memories"));
     assert.ok(patch.tools.some(tool => tool.name === "list_jira_issues" && "inputSchema" in tool));
     assert.ok(patch.tools.some(tool => tool.name === "create_memory" && "inputSchema" in tool));
@@ -2068,7 +2068,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
     const declared = Object.keys(toolInput);
-    assert.equal(declared.length, 33, "the tool contract changed; extend this test with it");
+    assert.equal(declared.length, 34, "the tool contract changed; extend this test with it");
     // The Atlassian tools read a remote system rather than SQLite, so they are
     // exercised against a stubbed site in their own block instead of here, as
     // are the shopping tools, which read the store catalog.
@@ -2188,6 +2188,8 @@ describe("agent tools over /api/agent/tools/:name", () => {
     // The browser has no bubbles to send and is nobody's group chat.
     assert.match((await call("send_message", { text: "on it" }, 400)).error, /not a text conversation/);
     assert.match((await call("name_group_chat", { name: "Family" }, 400)).error, /not a group chat/);
+    // A text sent to the assistant on its own line is for it; only a group has bystanders.
+    assert.match((await call("stay_quiet", { reason: "just chatting" }, 400)).error, /is for you/);
 
     await call("delete_memory", { id: memory.id }, 409);
     assert.equal((await call("delete_memory", { id: memory.id, confirmed: true })).data.id, memory.id);
@@ -2199,7 +2201,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
       "create_reminder", "list_reminders", "update_reminder", "delete_reminder", "create_memory",
       "get_memory", "update_memory", "get_agenda", "get_review_evidence", "get_reflection_evidence",
       "get_conversation_context", "delete_memory", "delete_todo",
-      "react_to_message", "reply_in_thread", "send_message", "name_group_chat",
+      "react_to_message", "reply_in_thread", "send_message", "name_group_chat", "stay_quiet",
       ...remote,
       ...shopping,
     ]);
@@ -5038,6 +5040,139 @@ describe("Sendblue provider", () => {
     assert.equal(fresh.name, "Us two", "seeded from the thread's title rather than the stale iMessage name");
     const turn = ((later.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
     assert.equal(turn.groupLifeAreaIsNew, true, "and the agent is asked to name it again");
+  });
+
+  /*
+   * People talk to each other in a group. A message that is theirs to each
+   * other gets nothing from the assistant — no text, no fallback sentence, and
+   * no receipt tapback for whatever it read on the way to deciding.
+   */
+  it("says nothing when the agent judges a group message is not for it", async () => {
+    const { db, api } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    // The room has heard from the assistant before; the first turn is never quiet.
+    await runSmsAgent(db, fakeSearch(db), `group:${GROUP}`, "hi, this is Sarah", "SB_intro", groupTurnOptions(agentCallingMany([], "Hi Sarah!").fetcher, RECIPIENT, "the owner"));
+    const payload = groupMessage(WIFE, "Maybe they have a black plastic? Or just a plastic sheet would be nice");
+    const handle = payload.message_handle as string;
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(payload).expect(200);
+
+    // It looks at the list first, in case the message is about a task, then
+    // decides the two of them are talking to each other.
+    let round = 0;
+    const looksThenStaysQuiet: typeof fetch = async () => {
+      round += 1;
+      const parts = round === 1
+        ? [{ type: "tool-list_todos", tool_call_id: "call_look", state: "input-available", input: { status: null, limit: 20 } }]
+        : round === 2
+          ? [{ type: "tool-stay_quiet", tool_call_id: "call_quiet", state: "input-available", input: { reason: "Sarah answering Tom about the plastic sheet" } }]
+          : [];
+      return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+    };
+    const sends: string[] = [];
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      await runWorkerOnce(db, fakeSearch(db), {
+        sendSms: async (_db: Db, _to: string, body: string) => { sends.push(body); return { sid: "SB_x", status: "queued" as const }; },
+        runSmsAgent: (...args: Parameters<typeof runSmsAgent>) =>
+          runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher: looksThenStaysQuiet }),
+        pollGranola: async () => ({ fetched: 0, queued: 0 }),
+        startTypingIndicator: () => () => {},
+      });
+    } finally { stub.restore(); }
+
+    assert.deepEqual(sends, [], "no text, and no fallback sentence either");
+    assert.deepEqual(
+      stub.calls.map(call => [call.body.message_handle, call.body.reaction]),
+      [[handle, "📋"], [handle, "-📋"]],
+      "the progress mark from the lookup comes down and nothing replaces it",
+    );
+    assert.equal(
+      (db.prepare("SELECT status FROM external_events WHERE external_id=?").get(handle) as { status: string }).status,
+      "processed",
+    );
+    const address = `group:${GROUP}`;
+    const rows = db.prepare(`
+      SELECT m.role,m.content,m.metadata_json FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      WHERE t.address=? ORDER BY m.rowid
+    `).all(address) as Array<{ role: string; content: string; metadata_json: string }>;
+    assert.deepEqual(rows.slice(2).map(row => [row.role, row.content]), [
+      ["user", payload.content],
+      ["tool", "list_todos"],
+      ["tool", "stay_quiet"],
+    ], "the decision is in the archive; no assistant bubble is");
+    assert.deepEqual(
+      JSON.parse(rows[4].metadata_json).output.data,
+      { quiet: true, reason: "Sarah answering Tom about the plastic sheet", speaker_is_owner: false },
+      "with whose message was passed over",
+    );
+
+    // The next text is read against a thread where that message simply went
+    // unanswered, which is what happened.
+    const next = agentCallingMany([], "Sure, I'll remind you both.");
+    await runSmsAgent(db, fakeSearch(db), address, "remind us to buy the sheet Saturday", "SB_sheet", groupTurnOptions(next.fetcher));
+    const window = next.requests[0].messages as Array<{ role: string }>;
+    assert.deepEqual(window.map(message => message.role), ["user", "assistant", "user", "user"]);
+  });
+
+  /*
+   * Staying quiet is a decision about the message, not a lock on the turn. An
+   * answer given after it stands, receipt included; and it is never a way to
+   * leave a write unconfirmed.
+   */
+  it("lets an answer given after stay_quiet stand, and refuses it on the first turn and after a write", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const search = fakeSearch(db);
+
+    // The owner just brought the assistant in, on a message that was for Tom.
+    // The room is still owed an introduction, so quiet is refused.
+    const first = agentCallingMany([{ tool: "stay_quiet", input: { reason: "Sarah and Tom talking" } }], "Hi both, I'm Fieldnote.");
+    const intro = await runSmsAgent(db, search, address, "Tom, did you feed the cats?", "SB_first_bystander", groupTurnOptions(first.fetcher));
+    assert.equal(intro.text, "Hi both, I'm Fieldnote.");
+    assert.match(toolOutputs(db, address).stay_quiet.error ?? "", /Nobody here has heard from you yet/);
+
+    // Changed its mind: quiet, then a lookup, then an answer.
+    let round = 0;
+    const quietThenAnswers: typeof fetch = async () => {
+      round += 1;
+      const parts = round === 1
+        ? [{ type: "tool-stay_quiet", tool_call_id: "call_q1", state: "input-available", input: { reason: "Sounds like Tom's question" } }]
+        : round === 2
+          ? [{ type: "tool-list_todos", tool_call_id: "call_l1", state: "input-available", input: { status: null, limit: 20 } }]
+          : [{ type: "text", text: "Actually, that one's on the list for Saturday." }];
+      return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+    };
+    let stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      const answered = await runSmsAgent(db, search, address, "did anyone order the sheet?", "SB_sheet_q", groupTurnOptions(quietThenAnswers));
+      assert.equal(answered.text, "Actually, that one's on the list for Saturday.", "the answer stands");
+      assert.deepEqual(stub.calls.map(call => call.body.reaction), ["📋", "like"], "and it closes like any lookup, quiet or not");
+    } finally { stub.restore(); }
+
+    // Wrote first, then tried to say nothing.
+    round = 0;
+    const writesThenQuiet: typeof fetch = async () => {
+      round += 1;
+      const parts = round === 1
+        ? [{ type: "tool-create_todo", tool_call_id: "call_c1", state: "input-available", input: { title: "Order the plastic sheet" } }]
+        : round === 2
+          ? [{ type: "tool-stay_quiet", tool_call_id: "call_q2", state: "input-available", input: { reason: "just chatter" } }]
+          : [{ type: "text", text: "Added the plastic sheet." }];
+      return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+    };
+    stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      const confirmed = await runSmsAgent(db, search, address, "we should get a plastic sheet", "SB_sheet_w", groupTurnOptions(writesThenQuiet));
+      assert.equal(confirmed.text, "Added the plastic sheet.");
+      assert.equal(
+        toolOutputs(db, address).stay_quiet.error,
+        "You changed a record this turn; say what changed instead of staying quiet",
+      );
+      assert.equal(stub.calls.at(-1)?.body.reaction, "✅", "the write gets its receipt");
+    } finally { stub.restore(); }
   });
 
   /*

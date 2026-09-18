@@ -143,7 +143,7 @@ const WRITE_TOOLS = new Set([
  * reply, and an early bubble are the answer's own gestures, and the product
  * cards are messages.
  */
-const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_product_cards", "send_message"]);
+const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_product_cards", "send_message", "stay_quiet"]);
 
 /**
  * The tapback that sits on the user's message while the turn is looking things
@@ -913,25 +913,31 @@ export async function runChannelAgent(
         && (part.toolCallId || part.tool_call_id),
       );
       if (!toolParts.length) {
-        // The answer is in. The progress mark gives way to the closing one, or
-        // comes down when there is nothing to confirm; the agent's own reaction,
-        // if it made one, is left exactly where it is.
-        await setMark(closingMark());
         const text = response.parts
           .filter(part => part.type === "text" && typeof part.text === "string")
           .map(part => part.text)
           .join("\n")
           .trim();
+        // The answer is in. The progress mark gives way to the closing one, or
+        // comes down when there is nothing to confirm; the agent's own reaction,
+        // if it made one, is left exactly where it is. A turn that decided the
+        // message was not for it, and held to that, leaves no receipt at all,
+        // whatever it read on the way to deciding; one that changed its mind
+        // and answered is answered, receipt and all.
+        const quiet = context.stayedQuiet && !text;
+        await setMark(quiet ? undefined : closingMark());
         /*
          * A tapback with nothing after it is a complete answer to "thanks" or
          * "ok", the way it is between people. The reaction is already filed on
          * the message it landed on and as a tool row, so no assistant bubble is
          * written: an empty one would read as a turn that said nothing, and a
          * filler sentence would undo the gesture. The same holds when the turn
-         * already said its piece through send_message. Without either, silence
-         * is a model that forgot to answer, and the fallback says so.
+         * already said its piece through send_message, and when it judged the
+         * message was the group talking among themselves and said so with
+         * stay_quiet. Without any of those, silence is a model that forgot to
+         * answer, and the fallback says so.
          */
-        if (!text && (context.reacted || context.sentText)) {
+        if (!text && (context.reacted || context.sentText || context.stayedQuiet)) {
           search.flushSoon();
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle };
         }
@@ -966,7 +972,10 @@ export async function runChannelAgent(
           // nothing to show for it.
           part.output = { success: true, data: data ?? null };
           // Only a write that landed earns the ✅; a refused delete confirms nothing.
-          if (RECORD_WRITE_TOOLS.has(toolName)) changedRecord = true;
+          if (RECORD_WRITE_TOOLS.has(toolName)) {
+            changedRecord = true;
+            context.changedRecord = true;
+          }
         } catch (error) {
           part.output = { success: false, error: error instanceof Error ? error.message : "Tool failed" };
         }
