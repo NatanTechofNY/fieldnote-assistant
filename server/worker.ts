@@ -8,7 +8,7 @@ import { composeDigestTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
 import {
   claimExternalEvents, completeExternalEvent, deferExternalEvent, nextExternalEventAvailableAt, pollGranola,
-  unsettledExternalEventsBefore,
+  STALE_CLAIM_MS, unsettledExternalEventsBefore,
 } from "./event-ingestion.ts";
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
@@ -126,6 +126,8 @@ function inboundAddress(message: InboundMessage): string {
 const MAX_ORDERED_ATTEMPTS = 3;
 /** How long a deferred text waits when the text in front of it is claimed rather than scheduled. */
 const DEFER_BEHIND_CLAIM_MS = 2_000;
+/** The shortest wait before a retry wake, so a drain that failed early cannot spin. */
+const RETRY_WAKE_FLOOR_MS = 250;
 
 /**
  * The earlier text in `event`'s thread that has to be answered first, if any.
@@ -146,7 +148,7 @@ function threadBlocker(
   event: ExternalEventRow,
   address: string,
 ): { availableAt: string } | null {
-  for (const earlier of unsettledExternalEventsBefore(db, source, event.created_at)) {
+  for (const earlier of unsettledExternalEventsBefore(db, source, event)) {
     if (earlier.id === event.id || earlier.attempts > MAX_ORDERED_ATTEMPTS) continue;
     let earlierAddress: string;
     try {
@@ -155,8 +157,17 @@ function threadBlocker(
       continue;
     }
     if (earlierAddress !== address) continue;
+    /*
+     * The worker is one sequential loop, so an earlier text still marked
+     * `processing` is a claim a crash left behind, not one in flight; it comes
+     * back when the claim goes stale, and the text behind it waits for that
+     * moment rather than knocking every two seconds until then.
+     */
+    const dueAt = earlier.status === "processing"
+      ? new Date(Date.parse(earlier.updated_at) + STALE_CLAIM_MS).toISOString()
+      : earlier.available_at;
     const behindClaim = new Date(Date.now() + DEFER_BEHIND_CLAIM_MS).toISOString();
-    return { availableAt: earlier.available_at > behindClaim ? earlier.available_at : behindClaim };
+    return { availableAt: dueAt > behindClaim ? dueAt : behindClaim };
   }
   return null;
 }
@@ -661,6 +672,7 @@ export function startWorker(
 ): () => void {
   let running = false;
   let woken = false;
+  let stopped = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const tick = async () => {
     if (running) return;
@@ -694,6 +706,7 @@ export function startWorker(
   const scheduleRetryWake = () => {
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
+    if (stopped) return;
     let next: string | null;
     try {
       next = nextExternalEventAvailableAt(db, INBOUND_SOURCES.map(entry => entry.source));
@@ -701,11 +714,14 @@ export function startWorker(
       return;
     }
     if (!next) return;
-    const delay = Math.min(60_000, Math.max(0, Date.parse(next) - Date.now()));
+    const delay = Date.parse(next) - Date.now();
+    // The interval already covers anything a minute or more out, and a floor
+    // keeps a drain that threw before claiming from spinning on a zero delay.
+    if (delay >= 60_000) return;
     retryTimer = setTimeout(() => {
       retryTimer = null;
       wake();
-    }, delay);
+    }, Math.max(RETRY_WAKE_FLOOR_MS, delay));
     retryTimer.unref();
   };
   wakeRunningWorker = wake;
@@ -713,6 +729,7 @@ export function startWorker(
   const timer = setInterval(() => void tick(), 60_000);
   timer.unref();
   return () => {
+    stopped = true;
     clearInterval(timer);
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;

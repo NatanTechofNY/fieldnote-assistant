@@ -305,16 +305,23 @@ function normalizedTitle(title: string): string {
  * and still open. Two trips can each have a "Book tickets" step, a done task
  * can be created afresh, and a different area is a different list; anything
  * closer than that is the same task, and the model is told which record it is
- * so it can update it instead.
+ * so it can update it instead. A repeating todo is open for as long as it
+ * repeats: done for today, it is back tomorrow, and a twin made in between
+ * would leave two of it on the list.
  */
-function openTodoTitled(db: Db, title: string, lifeAreaId: string | null, parentId: string | null): TodoRow | null {
+function openTodoTitled(
+  db: Db, title: string, lifeAreaId: string | null, parentId: string | null,
+): { id: string; title: string } | null {
+  // SQL narrows to titles that agree once case and every space are dropped;
+  // the exact comparison, with runs of space collapsed rather than removed,
+  // is made in JS on those few rows.
   const rows = db.prepare(`
-    SELECT * FROM todos
-    WHERE user_id=? AND status NOT IN ('done','cancelled')
-      AND ((? IS NULL AND life_area_id IS NULL) OR life_area_id=?)
-      AND ((? IS NULL AND parent_id IS NULL) OR parent_id=?)
+    SELECT id,title FROM todos
+    WHERE user_id=? AND life_area_id IS ? AND parent_id IS ?
+      AND status<>'cancelled' AND (status<>'done' OR recurrence_json IS NOT NULL)
+      AND replace(lower(title),' ','')=replace(lower(?),' ','')
     ORDER BY created_at
-  `).all(USER_ID, lifeAreaId, lifeAreaId, parentId, parentId) as TodoRow[];
+  `).all(USER_ID, lifeAreaId, parentId, title) as Array<{ id: string; title: string }>;
   const wanted = normalizedTitle(title);
   return rows.find(row => normalizedTitle(row.title) === wanted) ?? null;
 }

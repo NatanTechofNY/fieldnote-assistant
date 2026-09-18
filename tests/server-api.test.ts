@@ -5089,6 +5089,55 @@ describe("Sendblue provider", () => {
     db.prepare("UPDATE todos SET status='done',completed_at=? WHERE id=?").run(new Date().toISOString(), usps.id);
     await executeAgentTool(db, search, "create_todo", { title: "USPS", life_area_id: area.id }, context);
     assert.equal((db.prepare("SELECT count(*) count FROM todos WHERE title='USPS'").get() as { count: number }).count, 3);
+
+    // A repeating todo done for today is back tomorrow, so it is still the task.
+    const pills = await executeAgentTool(db, search, "create_todo", {
+      title: "Give the cat her pill", life_area_id: "area_personal", recurrence: { freq: "daily", time: "08:00" },
+    }, context) as { id: string };
+    db.prepare("UPDATE todos SET status='done',completed_at=? WHERE id=?").run(new Date().toISOString(), pills.id);
+    await assert.rejects(
+      executeAgentTool(db, search, "create_todo", { title: "give the cat her pill", life_area_id: "area_personal" }, context),
+      new RegExp(pills.id),
+    );
+  });
+
+  it("wakes for a retry at its backoff instead of the next interval, and not after it is stopped", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const turns: string[] = [];
+    let fail = true;
+    const stop = startWorker(db, fakeSearch(db), {
+      sendSms: async () => ({ sid: "SB_retry_wake", status: "queued" as const }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, body: string) => {
+        turns.push(body);
+        if (fail) throw new Error("upstream busy");
+        return { text: "ok", threadId: "thread_x" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    });
+    try {
+      await drainTicks();
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, "hello?")).expect(200);
+      await drainTicks();
+      assert.deepEqual(turns, ["hello?"], "the first attempt failed");
+      fail = false;
+      // The first backoff is two seconds; the interval is sixty.
+      await new Promise(resolve => setTimeout(resolve, 2_600));
+      assert.deepEqual(turns, ["hello?", "hello?"], "the retry ran on its own backoff, with no webhook and no interval tick");
+      assert.equal(
+        (db.prepare("SELECT status FROM external_events WHERE json_extract(payload_json,'$.content')='hello?'").get() as { status: string }).status,
+        "processed",
+      );
+
+      fail = true;
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, "still there?")).expect(200);
+      await drainTicks();
+      assert.equal(turns.length, 3, "and the next text failed once, arming another wake");
+    } finally { stop(); }
+    fail = false;
+    await new Promise(resolve => setTimeout(resolve, 2_600));
+    assert.equal(turns.length, 3, "a stopped worker does not wake for the retry it had armed");
   });
 
   /*
@@ -5137,6 +5186,58 @@ describe("Sendblue provider", () => {
     assert.equal(retryWindow.filter(message => message.id.startsWith("alg_msg_writes_")).length, 1);
     assert.equal(retryWindow[1].parts.length, 16, "and they sit right after the message they answer");
     assert.equal(new Set(retryWindow.map(message => message.id)).size, retryWindow.length);
+  });
+
+  /*
+   * An "on it 👀" bubble, a product card, and a delivered reminder are all
+   * assistant rows on the thread, and none of them is the reply. A turn that
+   * texted a bubble, wrote a todo, and then died must still show that todo to
+   * the next text.
+   */
+  it("does not mistake a mid-turn bubble or a reminder for the reply a failed turn never gave", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const search = fakeSearch(db);
+    let round = 0;
+    const bubbleThenDies: typeof fetch = async () => {
+      round += 1;
+      if (round === 1) {
+        return new Response(JSON.stringify({
+          role: "assistant",
+          parts: [
+            { type: "tool-send_message", tool_call_id: "call_bubble", state: "input-available", input: { text: "on it 👀" } },
+            { type: "tool-create_todo", tool_call_id: "call_bill", state: "input-available", input: { title: "Pay the electric bill" } },
+          ],
+        }), { status: 200 });
+      }
+      return new Response("upstream gone", { status: 502 });
+    };
+    await assert.rejects(
+      runSmsAgent(db, search, address, "add the electric bill", "SB_bill", groupTurnOptions(bubbleThenDies)),
+      /502/,
+    );
+    // A reminder for something else lands in the group before the next text.
+    const thread = db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string };
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('cm_reminder',?,'outbound','assistant','Reminder: Change cat water','sent','{"kind":"reminder"}',?,?)
+    `).run(thread.id, new Date().toISOString(), new Date().toISOString());
+
+    type Message = { id: string; role: string; parts: Array<{ type: string; text?: string }> };
+    const next = agentCallingMany([], "Sure.");
+    await runSmsAgent(db, search, address, "make it due Friday", "SB_friday", groupTurnOptions(next.fetcher));
+    const window = next.requests[0].messages as Message[];
+    const replay = window.find(message => message.id.startsWith("alg_msg_writes_"));
+    assert.ok(replay, "the bubble and the reminder did not pass for the reply");
+    assert.deepEqual(replay.parts.map(part => part.type), ["tool-send_message", "tool-create_todo"]);
+    assert.equal(window.indexOf(replay), 1, "and the writes sit right after the request they belong to");
+    assert.deepEqual(
+      window.map(message => message.role),
+      ["user", "assistant", "assistant", "assistant", "user"],
+      "the bubble and the reminder stay in the window as what they are",
+    );
   });
 
   it("answers a thread's texts in the order they were sent, even around a failed turn", async () => {

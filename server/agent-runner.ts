@@ -314,19 +314,43 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
     };
     if (row.role === "assistant") return [message];
     /*
-     * A user turn with no assistant row after it is one nobody answered: the
-     * attempt died, or it is the turn being answered now. Its tool rows still
-     * say what it wrote, and without them the next turn in the thread reads
-     * the request as untouched. A "yes" that created ten todos and then hit
-     * the iteration cap was followed, two seconds later, by "all due Sunday"
-     * — a turn that saw the list unanswered and created all ten again.
+     * A user turn with no reply after it is one nobody answered: the attempt
+     * died, or it is the turn being answered now. Its tool rows still say what
+     * it wrote, and without them the next turn in the thread reads the request
+     * as untouched. A "yes" that created ten todos and then hit the iteration
+     * cap was followed, two seconds later, by "all due Sunday" — a turn that
+     * saw the list unanswered and created all ten again.
+     *
+     * Only the runner's own reply counts as an answer. An "on it 👀" bubble
+     * sent mid-turn, a product card, and a reminder delivered into the thread
+     * are assistant rows too, and none of them says the turn finished.
      */
-    const next = rows[index + 1];
-    if (next?.role === "assistant") return [message];
-    const writes = orphanedWrites(db, threadId, row.rowid, next?.rowid);
+    let answered = false;
+    let nextUser: { rowid: number } | undefined;
+    for (const later of rows.slice(index + 1)) {
+      if (later.role === "user") {
+        nextUser = later;
+        break;
+      }
+      if (isRunnerReply(later.metadata_json)) {
+        answered = true;
+        break;
+      }
+    }
+    if (answered) return [message];
+    const writes = orphanedWrites(db, threadId, row.rowid, nextUser?.rowid);
     if (!writes.length) return [message];
     return [message, { id: orphanedWritesMessageId(row.id), role: "assistant", parts: writes }];
   });
+}
+
+/** Whether an assistant row is the reply `runChannelAgent()` wrote, which alone carries the turn's `parts`. */
+function isRunnerReply(metadataJson: string): boolean {
+  try {
+    return Array.isArray((JSON.parse(metadataJson) as { parts?: unknown }).parts);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -709,7 +733,12 @@ export async function runChannelAgent(
   // row is inside the window; this covers the inbound that fell outside it.
   const inboundRowid = (db.prepare("SELECT rowid FROM channel_messages WHERE id=?")
     .get(inboundId) as { rowid: number }).rowid;
-  const priorWrites = orphanedWrites(db, thread.id, inboundRowid);
+  // Bounded at the next text in the thread, as in the window: a turn that was
+  // overtaken does not own the writes the texts behind it made.
+  const nextInbound = db.prepare(`
+    SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>? ORDER BY rowid LIMIT 1
+  `).get(thread.id, inboundRowid) as { rowid: number } | undefined;
+  const priorWrites = orphanedWrites(db, thread.id, inboundRowid, nextInbound?.rowid);
   const replayId = orphanedWritesMessageId(inboundId);
   if (priorWrites.length && !messages.some(message => message.id === replayId)) {
     messages.push({ id: replayId, role: "assistant", parts: priorWrites });

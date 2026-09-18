@@ -202,6 +202,8 @@ export interface ExternalEventRow {
   last_error: string | null;
   created_at: string;
   updated_at: string;
+  /** Insertion order, the tiebreak for two events enqueued in the same millisecond. Present on claimed rows. */
+  rowid?: number;
 }
 
 export interface MessageRow {
