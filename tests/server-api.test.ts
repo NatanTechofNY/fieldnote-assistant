@@ -5101,6 +5101,40 @@ describe("Sendblue provider", () => {
     );
   });
 
+  /*
+   * The round cap bounds a loop; the clock is what every other thread waits
+   * on. A turn whose rounds are slow is abandoned by time, well short of the
+   * sixteen rounds it is allowed.
+   */
+  it("abandons a turn that runs past its time budget before it runs out of rounds", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const realNow = Date.now;
+    const start = realNow();
+    let elapsed = 0;
+    Date.now = () => start + elapsed;
+    let round = 0;
+    const slowRounds: typeof fetch = async () => {
+      round += 1;
+      // Each round takes ninety seconds of wall clock.
+      elapsed += 90_000;
+      return new Response(JSON.stringify({
+        role: "assistant",
+        parts: [{ type: "tool-create_todo", tool_call_id: `call_slow_${round}`, state: "input-available", input: { title: `Slow item ${round}` } }],
+      }), { status: 200 });
+    };
+    try {
+      await assert.rejects(
+        runSmsAgent(db, fakeSearch(db), address, "do all of it", "SB_slow", groupTurnOptions(slowRounds)),
+        /time budget of 4 minutes/,
+      );
+    } finally { Date.now = realNow; }
+    assert.equal(round, 3, "three ninety-second rounds cross four minutes; the fourth is never asked for");
+    assert.equal((db.prepare("SELECT count(*) count FROM todos").get() as { count: number }).count, 3, "what was written stays written for the retry to see");
+  });
+
   it("wakes for a retry at its backoff instead of the next interval, and not after it is stopped", async () => {
     const { db, api } = connectedFixture();
     withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);

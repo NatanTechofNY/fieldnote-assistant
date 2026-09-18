@@ -68,7 +68,7 @@ The hosted Agent Studio search tool `personal_data_search` reads the first three
 There are 31 `client_side` tools ([`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json)) plus the one hosted search tool. Despite the name, every `client_side` tool executes on the server, in `executeAgentTool()`. Only the transport differs:
 
 - **Browser.** The React widget ([`src/features/chat/AgentStudioChat.tsx`](../src/features/chat/AgentStudioChat.tsx)) talks to Agent Studio directly. When Agent Studio asks for a tool, the browser forwards it to `POST /api/agent/tools/:name`, which is session-authenticated and calls `executeAgentTool()`.
-- **SMS and scheduled digests.** [`server/agent-runner.ts`](../server/agent-runner.ts) calls the Agent Studio completions API itself and calls `executeAgentTool()` in-process, no HTTP and no session. The loop caps at 16 tool iterations.
+- **SMS and scheduled digests.** [`server/agent-runner.ts`](../server/agent-runner.ts) calls the Agent Studio completions API itself and calls `executeAgentTool()` in-process, no HTTP and no session. The loop caps at 16 tool iterations and four minutes per turn.
 
 Both paths run the same validation, the same SQLite access, and queue the same index jobs. That is why a reminder can send and a text can get answered with no browser open anywhere.
 

@@ -33,6 +33,15 @@ const CONTEXT_WINDOW_MS = 24 * 60 * 60_000;
  */
 const MAX_TOOL_ITERATIONS = 16;
 
+/**
+ * How long a turn may keep going before it is abandoned. The round cap bounds
+ * a loop; this bounds the clock, which is what the rest of the worker feels:
+ * inbound texts are answered one at a time and reminders wait behind them, so
+ * sixteen slow rounds would otherwise hold every other thread for a quarter
+ * of an hour. A completion already in flight still gets its own 45 seconds.
+ */
+const TURN_BUDGET_MS = 4 * 60_000;
+
 function newConversationId(): string {
   return `alg_cnv_${crypto.randomUUID().replaceAll("-", "")}`;
 }
@@ -795,8 +804,12 @@ export async function runChannelAgent(
     return undefined;
   };
 
+  const deadline = Date.now() + TURN_BUDGET_MS;
   try {
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
+      if (Date.now() >= deadline) {
+        throw new Error(`Agent exceeded its time budget of ${TURN_BUDGET_MS / 60_000} minutes`);
+      }
       const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch, context.scope);
       response.id ||= `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
       for (const part of response.parts.filter(part =>
