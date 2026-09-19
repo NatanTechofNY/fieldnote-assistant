@@ -39,6 +39,14 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
     },
     onError: (error: Error) => notify(error.message),
   });
+  // A group's check-ins are saved as they are switched or retimed; there is no
+  // form to submit, the same as the view toggles elsewhere.
+  const checkin = useMutation({
+    mutationFn: (input: { id: string; morning_checkin_time?: string | null; evening_checkin_time?: string | null }) =>
+      api.updateLifeArea(input.id, { morning_checkin_time: input.morning_checkin_time, evening_checkin_time: input.evening_checkin_time }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["life-areas"] }),
+    onError: (error: Error) => notify(error.message),
+  });
   const remove = useMutation({
     mutationFn: api.deleteLifeArea,
     onSuccess: () => {
@@ -83,6 +91,24 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
           : <div><strong>{area.name}</strong><small>{subtitle(area)}</small></div>}
         {!area.is_builtin && editing?.id !== area.id && <button className="button icon ghost" aria-label={`Rename ${area.name}`} onClick={() => setEditing({ id: area.id, name: area.name })}><Pencil size={13}/></button>}
         {!area.is_builtin && <button className="button icon ghost" aria-label={`Remove ${area.name}`} disabled={remove.isPending} onClick={() => confirm(removePrompt(area)) && remove.mutate(area.id)}><Trash2 size={13}/></button>}
+        {area.is_group ? <div className="life-area-checkins">
+          <CheckinControl
+            label="Morning check-in"
+            hint="Texts the group what is in progress or due soon"
+            area={area}
+            value={area.morning_checkin_time ?? null}
+            fallback="08:30"
+            onChange={time => checkin.mutate({ id: area.id, morning_checkin_time: time })}
+          />
+          <CheckinControl
+            label="Evening check-in"
+            hint="Asks the group how the day went; the answers become one shared journal entry"
+            area={area}
+            value={area.evening_checkin_time ?? null}
+            fallback="20:30"
+            onChange={time => checkin.mutate({ id: area.id, evening_checkin_time: time })}
+          />
+        </div> : null}
       </div>)}
     </div>
     <form className="life-area-add" onSubmit={event => { event.preventDefault(); create.mutate(); }}>
@@ -90,6 +116,43 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
       <input className="input" value={name} onChange={event => setName(event.target.value)} placeholder="New classification name" required/>
       <button className="button primary" disabled={create.isPending || !name.trim()}><Plus size={14}/>Add</button>
     </form>
-    <small className="field-hint">Work, Personal, and Side Project are stable defaults and cannot be deleted. Custom classifications can be renamed or removed here. A group chat's classification is created by the assistant when the group first writes in; rename it here or ask the assistant, and if it is removed while the chat is still active, the next message there creates a fresh one.</small>
+    <small className="field-hint">Work, Personal, and Side Project are stable defaults and cannot be deleted. Custom classifications can be renamed or removed here. A group chat's classification is created by the assistant when the group first writes in; rename it here or ask the assistant, and if it is removed while the chat is still active, the next message there creates a fresh one. A group's check-ins go out at the times set on its row, in the schedule timezone and outside quiet hours.</small>
   </div>;
+}
+
+/**
+ * One scheduled check-in for a group: a switch and, while it is on, the local
+ * time it goes out. The time is kept while the switch is off so turning it back
+ * on brings back the hour that was chosen rather than the default.
+ */
+function CheckinControl({ label, hint, area, value, fallback, onChange }: {
+  label: string;
+  hint: string;
+  area: LifeArea;
+  value: string | null;
+  fallback: string;
+  onChange: (time: string | null) => void;
+}) {
+  const [remembered, setRemembered] = useState(value ?? fallback);
+  const on = value !== null;
+  return <label className={`life-area-checkin ${on ? "on" : ""}`} title={hint}>
+    <input
+      type="checkbox"
+      checked={on}
+      aria-label={`${label} for ${area.name}`}
+      onChange={event => onChange(event.target.checked ? remembered : null)}
+    />
+    <span>{label}</span>
+    <input
+      className="input"
+      type="time"
+      value={on ? value : remembered}
+      disabled={!on}
+      aria-label={`${label} time for ${area.name}`}
+      onChange={event => {
+        setRemembered(event.target.value);
+        if (event.target.value) onChange(event.target.value);
+      }}
+    />
+  </label>;
 }

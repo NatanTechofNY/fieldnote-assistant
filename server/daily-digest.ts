@@ -1,4 +1,4 @@
-import { getReminders, USER_ID } from "./db.ts";
+import { getReminders, OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
 import { localParts } from "./local-time.ts";
 import type { Db } from "./types.ts";
 
@@ -116,6 +116,34 @@ function emptyNote(options: { includeToday: boolean; includeOverdue: boolean }):
     ? `${clearToday}, and nothing is still open from an earlier day, so say the day is clear on todos`
       + " rather than listing tasks or looking for more."
     : `${clearToday}, so say the day is clear on todos rather than listing tasks or looking for more.`;
+}
+
+/**
+ * The turn the owner's evening check-in is composed from: the question the
+ * prompt's Reflections rules assume was asked the message before. Nothing is
+ * written on this turn; the answer that follows is the entry. Group chats'
+ * work is left out — a group has its own evening question.
+ */
+export function composeEveningCheckinTurn(
+  db: Db,
+  context: { date: string; timezone: string },
+): string {
+  const localDate = (value: string) => localParts(new Date(value), context.timezone).date;
+  const rows = db.prepare(`
+    SELECT id,title,status,due_at,completed_at FROM todos
+    WHERE user_id=? AND parent_id IS NULL AND ${OWN_AREA_CLAUSE("todos")} ORDER BY title
+  `).all(USER_ID) as Array<DigestTodoRow & { completed_at: string | null }>;
+  const finished = rows.filter(todo => todo.completed_at && localDate(todo.completed_at) === context.date).map(todo => todo.title);
+  const going = rows.filter(todo => todo.status === "in_progress").map(todo => todo.title);
+  return [
+    "Ask me how today went, in one warm line, asking for a mood word and a number from 1 to 5 with it. Nothing else"
+    + " on this turn — no summary, no list, no tools, and nothing saved; my answer is the entry.",
+    "",
+    `--- Context supplied by the app, not by me. Today is ${context.date} in ${context.timezone}.`,
+    finished.length ? `Finished today: ${finished.map(title => `"${title}"`).join(", ")}.` : "Nothing was finished today.",
+    going.length ? `Still in progress: ${going.map(title => `"${title}"`).join(", ")}.` : "Nothing is marked in progress.",
+    "Mention at most one of these if it helps the question land; do not recite them.",
+  ].join("\n");
 }
 
 /**

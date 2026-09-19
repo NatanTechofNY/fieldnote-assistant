@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Newspaper, Pause, Phone, Plus, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, X, Zap } from "lucide-react";
+import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Moon, Newspaper, Pause, Phone, Plus, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, X, Zap } from "lucide-react";
 import { api } from "../../api";
 import type {
   ExternalEvent, IntegrationState, SmsProvider, TrustedContact,
@@ -65,6 +65,10 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   const [quietEnd, setQuietEnd] = useState(data.notifications.quietHoursEnd || "07:00");
   const [trustedContacts, setTrustedContacts] = useState<TrustedContact[]>(data.notifications.trustedContacts ?? []);
   const [groupAllowAll, setGroupAllowAll] = useState(data.notifications.groupAllowAll ?? false);
+  // The evening check-in is off until asked for; the time is kept while it is
+  // off so turning it back on brings back the hour that was chosen.
+  const [eveningEnabled, setEveningEnabled] = useState(Boolean(data.notifications.eveningCheckinTime));
+  const [eveningTime, setEveningTime] = useState(data.notifications.eveningCheckinTime ?? "20:30");
   const [contactName, setContactName] = useState("");
   const [contactPhone, setContactPhone] = useState("");
   const [granolaKey, setGranolaKey] = useState("");
@@ -126,6 +130,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
       quietHoursEnd: quietEnd || null,
       trustedContacts,
       groupAllowAll,
+      eveningCheckinTime: eveningEnabled ? eveningTime : null,
     }),
     onSuccess: () => { refresh(); notify("Messaging schedule saved"); },
     onError: (mutationError: Error) => notify(mutationError.message),
@@ -407,6 +412,11 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               onChange={e => setDigestOverdue(e.target.checked)}
             />
           </label>
+          <label className={`delivery-option ${eveningEnabled ? "selected" : ""}`}>
+            <span className="delivery-option-icon"><Moon size={15}/></span>
+            <span><strong>Evening check-in</strong><small>One question each evening about how the day went; your answer becomes that day&rsquo;s journal entry.</small></span>
+            <input type="checkbox" aria-label="My evening check-in" checked={eveningEnabled} onChange={e => setEveningEnabled(e.target.checked)}/>
+          </label>
         </div>
 
         <div className="form-grid delivery-destination">
@@ -497,6 +507,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
           </div>
           <div className="form-grid three schedule-controls">
             <Field label="Briefing arrives"><input className="input" type="time" value={digestTime} onChange={e => setDigestTime(e.target.value)} disabled={!digestEnabled} /></Field>
+            <Field label="Evening check-in"><input className="input" type="time" aria-label="Evening check-in time" value={eveningTime} onChange={e => setEveningTime(e.target.value)} disabled={!eveningEnabled} /></Field>
             <Field label="Quiet hours begin"><input className="input" type="time" value={quietStart} onChange={e => setQuietStart(e.target.value)} /></Field>
             <Field label="Messages resume"><input className="input" type="time" value={quietEnd} onChange={e => setQuietEnd(e.target.value)} /></Field>
           </div>

@@ -318,11 +318,20 @@ function userMessage(db: Db, threadId: string, row: UserRow): AgentMessage {
 
 function threadHistory(db: Db, threadId: string): AgentMessage[] {
   const cutoff = new Date(Date.now() - CONTEXT_WINDOW_MS).toISOString();
+  /*
+   * An app-composed instruction is not part of the conversation. It is the
+   * turn being answered when it is current — `runChannelAgent()` appends it
+   * then — and once answered it would only read back as a stranger's message:
+   * a group's morning check-in instruction, replayed the next day in the
+   * group's shared window, with no speaker and the app's wording. The reply it
+   * produced stays, since that is what the people in the thread are answering.
+   */
   const rows = db.prepare(`
     SELECT id,role,content,metadata_json,rowid FROM (
       SELECT id,role,content,metadata_json,created_at,rowid FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant') AND created_at>=?
         AND status<>'failed'
+        AND NOT (role='user' AND COALESCE(json_extract(metadata_json,'$.internal'),0)=1)
       ORDER BY created_at DESC,rowid DESC LIMIT 40
     ) ORDER BY created_at,rowid
   `).all(threadId, cutoff) as Array<{
@@ -738,6 +747,12 @@ export async function runChannelAgent(
     inbound?: InboundContext;
     /** The sender a tool that texts mid-turn uses; the worker passes its own so a test can capture both. */
     sendSms?: SmsSender;
+    /**
+     * Filed on the reply row alongside its parts. A scheduled group check-in
+     * marks its reply this way so the archive, the history page, and the
+     * prompt's reply rules can tell it from an ordinary answer.
+     */
+    assistantMetadata?: Record<string, unknown>;
   } = {},
 ): Promise<{ text: string; threadId: string; replyTo?: string }> {
   const thread = getOrCreateThread(db, channel, address);
@@ -798,6 +813,11 @@ export async function runChannelAgent(
       // as 17:30 with this offset rather than converted to UTC and then
       // given the offset as well.
       currentLocalDateTime: localIsoWithOffset(new Date(), preferences.timezone),
+      // An app-composed turn says what it is, so the prompt's rules for it key
+      // on a name rather than on the wording of the instruction.
+      ...(options.internal && typeof options.userMessageMetadata?.kind === "string"
+        ? { appTurn: options.userMessageMetadata.kind }
+        : {}),
       ...(options.inbound?.groupId && group
         ? {
           groupId: options.inbound.groupId,
@@ -944,6 +964,7 @@ export async function runChannelAgent(
         }
         const finalText = text || "I completed that request, but did not receive a text response.";
         saveChannelMessage(db, thread.id, "outbound", "assistant", finalText, undefined, {
+          ...options.assistantMetadata,
           parts: response.parts,
           agentConversationId: thread.agent_conversation_id,
           ...internalMark,
@@ -1034,6 +1055,7 @@ export async function runSmsAgent(
     userMessageMetadata?: Record<string, unknown>;
     inbound?: InboundContext;
     sendSms?: SmsSender;
+    assistantMetadata?: Record<string, unknown>;
   } = {},
 ): Promise<{ text: string; threadId: string; replyTo?: string }> {
   return runChannelAgent(db, search, "sms", fromPhone, body, providerMessageId, options);

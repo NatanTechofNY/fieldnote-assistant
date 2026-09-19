@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS life_areas (
   name TEXT NOT NULL,
   color TEXT NOT NULL,
   thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL,
+  morning_checkin_time TEXT,
+  evening_checkin_time TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, slug)
@@ -201,6 +203,7 @@ CREATE TABLE IF NOT EXISTS notification_preferences (
   opted_out_at TEXT,
   trusted_contacts_json TEXT NOT NULL DEFAULT '[]',
   group_allow_all INTEGER NOT NULL DEFAULT 0 CHECK(group_allow_all IN (0,1)),
+  evening_checkin_time TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -276,7 +279,7 @@ CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS scheduled_dispatches (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief')),
+  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin')),
   idempotency_key TEXT NOT NULL UNIQUE,
   scheduled_for TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending'
@@ -456,6 +459,15 @@ function migrateMessaging(db: Db): void {
     db.exec("ALTER TABLE life_areas ADD COLUMN thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL");
   }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS life_areas_thread ON life_areas(thread_id) WHERE thread_id IS NOT NULL");
+  // A group's area carries the local times its chat is checked in on, morning
+  // and evening; null is off. Only a group's area ever has them set.
+  const areaColumns = columns(db, "life_areas");
+  if (!areaColumns.has("morning_checkin_time")) db.exec("ALTER TABLE life_areas ADD COLUMN morning_checkin_time TEXT");
+  if (!areaColumns.has("evening_checkin_time")) db.exec("ALTER TABLE life_areas ADD COLUMN evening_checkin_time TEXT");
+  // The owner's own evening check-in, on the same footing as the daily digest.
+  if (!columns(db, "notification_preferences").has("evening_checkin_time")) {
+    db.exec("ALTER TABLE notification_preferences ADD COLUMN evening_checkin_time TEXT");
+  }
   const timestamp = now();
   db.prepare(`
     INSERT OR IGNORE INTO notification_preferences(
@@ -757,6 +769,42 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
       if (!todoColumns.has("last_completed_at")) db.exec("ALTER TABLE todos ADD COLUMN last_completed_at TEXT");
       db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(14,?)").run(now());
     })();
+  }
+  const groupCheckinDispatchApplied = db.prepare(
+    "SELECT 1 found FROM schema_migrations WHERE version=15",
+  ).get();
+  if (!groupCheckinDispatchApplied) {
+    // Group check-ins claim a dispatch row per group per local day, so the kind
+    // CHECK has to admit 'group_checkin'. Same copy and rename as v11 and v12,
+    // carrying available_at when the table being copied has it.
+    if (!dispatchKindAllows(db, "group_checkin")) {
+      const carried = columns(db, "scheduled_dispatches").has("available_at")
+        ? "id,user_id,kind,idempotency_key,scheduled_for,status,attempts,available_at,provider_message_id,last_error,created_at,updated_at"
+        : "id,user_id,kind,idempotency_key,scheduled_for,status,attempts,NULL,provider_message_id,last_error,created_at,updated_at";
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE scheduled_dispatches_v15 (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin')),
+            idempotency_key TEXT NOT NULL UNIQUE,
+            scheduled_for TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+              CHECK(status IN ('pending','processing','sent','failed')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            available_at TEXT,
+            provider_message_id TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO scheduled_dispatches_v15 SELECT ${carried} FROM scheduled_dispatches;
+          DROP TABLE scheduled_dispatches;
+          ALTER TABLE scheduled_dispatches_v15 RENAME TO scheduled_dispatches;
+        `);
+      })();
+    }
+    db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(15,?)").run(now());
   }
   // NeuralSearch is opt-in: it is a paid add-on, so an application without the
   // entitlement gets plain keyword search rather than a failed setup.

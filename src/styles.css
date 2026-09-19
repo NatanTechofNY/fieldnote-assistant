@@ -1450,6 +1450,11 @@ tr:hover .attach-button,
 .life-area-rename .input { min-width:0; height:28px; font-size:12px; }
 .life-area-setting strong { font-size:12px; font-weight:500; }
 .life-area-setting small { color:var(--text-tertiary); font-size:11px; }
+/* A group's scheduled check-ins sit on their own line under the group's row. */
+.life-area-checkins { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:8px 18px; padding:2px 0 2px 18px; }
+.life-area-checkin { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--text-tertiary); cursor:pointer; }
+.life-area-checkin.on { color:var(--text); }
+.life-area-checkin .input { height:26px; width:auto; font-size:12px; padding:0 6px; }
 .life-area-add { display:grid; grid-template-columns:34px minmax(0,320px) auto; gap:8px; align-items:center; margin-bottom:9px; }
 .life-area-add input[type="color"] { width:34px; height:30px; padding:2px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); }
 .settings-section { transition:border-color .15s ease; }

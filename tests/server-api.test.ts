@@ -25,6 +25,7 @@ import {
   setSmsProvider,
 } from "../server/integrations.ts";
 import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } from "../server/event-ingestion.ts";
+import { composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
 import { addressesAssistant, cleanGroupName, redactedNumber } from "../server/group-thread.ts";
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
@@ -4882,6 +4883,35 @@ describe("Sendblue provider", () => {
     return { fetcher, requests };
   }
 
+  /**
+   * Agent Studio answers a trailing assistant message by continuing it: the
+   * second completion hands back the same id with the tool parts, now carrying
+   * their results, and the text after them. This fake does the same, so the
+   * archived reply carries the writes the way a real one does.
+   */
+  function agentContinuing(calls: ToolCall[], text: string) {
+    const requests: Array<Record<string, unknown>> = [];
+    const messageId = `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
+    let round = 0;
+    const fetcher: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ id?: string; parts: unknown[] }> };
+      requests.push(body as unknown as Record<string, unknown>);
+      round += 1;
+      if (round === 1) {
+        return new Response(JSON.stringify({
+          id: messageId,
+          role: "assistant",
+          parts: calls.map(call => ({
+            type: `tool-${call.tool}`, tool_call_id: `call_${crypto.randomUUID()}`, state: "input-available", input: call.input,
+          })),
+        }), { status: 200 });
+      }
+      const carried = body.messages.find(message => message.id === messageId)?.parts ?? [];
+      return new Response(JSON.stringify({ id: messageId, role: "assistant", parts: [...carried, { type: "text", text }] }), { status: 200 });
+    };
+    return { fetcher, requests };
+  }
+
   function toolOutputs(db: Db, address: string): Record<string, { success: boolean; data?: unknown; error?: string }> {
     const rows = db.prepare(`
       SELECT m.content,m.metadata_json FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
@@ -5773,6 +5803,260 @@ describe("Sendblue provider", () => {
     assert.equal(lateWindow.at(-1)?.metadata?.turnContext?.speakerIsOwner, true);
     assert.equal(lateWindow.filter(message => message.metadata?.turnContext).length, 1);
     assert.equal(new Set(lateWindow.map(message => message.id)).size, lateWindow.length);
+  });
+
+  /*
+   * Group check-ins. A group's area carries the local times its chat is texted
+   * a morning note about open work and an evening question about the day. Both
+   * are app-composed turns run on the group's own thread, so the agent keeps
+   * the group's scope while writing and the message lands where the replies
+   * will; the instruction stays out of later windows, the reply does not.
+   */
+  const CHECKIN_DAY = "2030-01-15";
+
+  /** A connected Sendblue line, the group thread, its area, and an agent that answers with `text`. */
+  function checkinFixture() {
+    const context = connectedFixture();
+    withTrustedContacts(context.db, [{ phone: WIFE, name: "Sarah" }]);
+    const timestamp = new Date().toISOString();
+    context.db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_checkin',?,'sms',?,'cnv_checkin',?,?)
+    `).run(USER_ID, `group:${GROUP}`, timestamp, timestamp);
+    const area = ensureGroupLifeArea(context.db, "thread_checkin", "Home");
+    return { ...context, area };
+  }
+
+  it("names what is in progress or due soon for a group's morning note, and nothing else", async () => {
+    const { db, api, area } = checkinFixture();
+    const post = (body: Record<string, unknown>) => api.post("/api/todos").send({ life_area_id: area.id, ...body }).expect(201);
+    const laundry = (await post({ title: "Laundry - clean, fold, put away", due_at: "2030-01-19T21:00:00.000Z" })).body.data;
+    await api.patch(`/api/todos/${laundry.id}/status`).send({ status: "in_progress" }).expect(200);
+    await post({ title: "Shopping", due_at: "2030-01-19T21:00:00.000Z" });
+    await post({ title: "Clean bathrooms", due_at: "2030-01-15T18:00:00.000Z" });
+    await post({ title: "Empty trash", due_at: "2030-01-16T08:00:00.000Z" });
+    await post({ title: "Donate cat food", due_at: "2030-01-13T12:00:00.000Z" });
+    const done = (await post({ title: "Meal prep", due_at: "2030-01-15T12:00:00.000Z" })).body.data;
+    await api.patch(`/api/todos/${done.id}/status`).send({ status: "done" }).expect(200);
+    await post({ title: "Fold", parent_id: laundry.id });
+    await api.post("/api/todos").send({ title: "Owner's own thing", due_at: "2030-01-15T12:00:00.000Z", life_area_id: "area_work" }).expect(201);
+
+    const { lines, more } = groupCheckinItems(db, area.id, CHECKIN_DAY, "UTC");
+    assert.equal(more, 0);
+    assert.deepEqual(lines.map(line => line.slice(0, line.indexOf("—") - 1)), [
+      '- "Donate cat food"',
+      '- "Clean bathrooms"',
+      '- "Empty trash"',
+      '- "Laundry - clean, fold, put away"',
+    ], "overdue, today, tomorrow, then what is in progress whatever its date; not-started Sunday work, done work, steps, and other areas stay out");
+    assert.match(lines[0], /not started; overdue, Sun 12:00 PM/);
+    assert.match(lines[3], /in progress; due later, Sat 9:00 PM/);
+    assert.match(composeGroupMorningTurn(db, { id: area.id, name: "Home", groupId: GROUP }, { date: CHECKIN_DAY, timezone: "UTC" }), /^Write this morning's check-in for the group chat "Home"/);
+  });
+
+  it("texts a group its morning note once a day, on its own thread and in its own scope", async () => {
+    const { db, api, area } = checkinFixture();
+    const address = `group:${GROUP}`;
+    const laundry = (await api.post("/api/todos").send({ title: "Laundry", life_area_id: area.id, due_at: "2030-01-19T21:00:00.000Z" }).expect(201)).body.data;
+    await api.patch(`/api/todos/${laundry.id}/status`).send({ status: "in_progress" }).expect(200);
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30" }).expect(200);
+
+    const sends: Array<{ to: string; body: string; groupId?: string }> = [];
+    const requests: Array<Record<string, unknown>> = [];
+    let round = 0;
+    // Tries to stay quiet first, which a scheduled turn refuses, then writes the note.
+    const composes: typeof fetch = async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      round += 1;
+      return new Response(JSON.stringify({
+        role: "assistant",
+        parts: round === 1
+          ? [{ type: "tool-stay_quiet", tool_call_id: `call_q_${round}`, state: "input-available", input: { reason: "nobody asked" } }]
+          : [{ type: "text", text: "Morning! Laundry's still going, due Sunday night — anything to wrap up today?" }],
+      }), { status: 200 });
+    };
+    const worker = {
+      sendSms: async (_db: Db, to: string, body: string, options?: { groupId?: string }) => {
+        sends.push({ to, body, ...(options?.groupId ? { groupId: options.groupId } : {}) });
+        return { sid: `SB_${sends.length}`, status: "queued" as const };
+      },
+      runSmsAgent: (...args: Parameters<typeof runSmsAgent>) =>
+        runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher: composes }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    };
+
+    let restore = atUtcTime("08:00");
+    try { await runWorkerOnce(db, fakeSearch(db), worker); } finally { restore(); }
+    assert.deepEqual(sends, [], "the note waits for its time");
+
+    restore = atUtcTime("09:00");
+    try {
+      await runWorkerOnce(db, fakeSearch(db), worker);
+      await runWorkerOnce(db, fakeSearch(db), worker);
+    } finally { restore(); }
+    assert.deepEqual(sends, [{ to: address, body: "Morning! Laundry's still going, due Sunday night — anything to wrap up today?", groupId: GROUP }], "once, into the group");
+    const dispatch = db.prepare("SELECT kind,status,idempotency_key FROM scheduled_dispatches").get() as { kind: string; status: string; idempotency_key: string };
+    assert.deepEqual(dispatch, { kind: "group_checkin", status: "sent", idempotency_key: `group_checkin:morning:${area.id}:${CHECKIN_DAY}` });
+
+    // Composed on the group's thread with the group's scope, and told what it is.
+    const first = requests[0] as { messages: Array<{ role: string; metadata?: { turnContext?: Record<string, unknown> } }>; algolia?: { searchParameters: Record<string, unknown> } };
+    assert.ok(first.algolia?.searchParameters, "the hosted search is fenced to the group while it writes");
+    const turn = first.messages.at(-1)?.metadata?.turnContext;
+    assert.equal(turn?.appTurn, "group_morning");
+    assert.equal(turn?.groupId, GROUP);
+    assert.match(toolOutputs(db, address).stay_quiet.error ?? "", /no message to stay quiet on/);
+
+    const rows = db.prepare(`
+      SELECT m.role,m.content,m.metadata_json,m.provider_message_id FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      WHERE t.address=? AND m.role IN ('user','assistant') ORDER BY m.rowid
+    `).all(address) as Array<{ role: string; content: string; metadata_json: string; provider_message_id: string | null }>;
+    assert.equal(rows.length, 2);
+    assert.equal(JSON.parse(rows[0].metadata_json).kind, "group_morning", "the instruction is archived, marked");
+    assert.equal(JSON.parse(rows[0].metadata_json).internal, true);
+    assert.equal(JSON.parse(rows[1].metadata_json).kind, "group_morning", "and so is the note");
+    assert.equal(rows[1].provider_message_id, "SB_1", "with the provider's id pinned to it");
+
+    // The next text in the group reads the note, not the instruction behind it.
+    const reply = agentCallingMany([], "Great, marking it done.");
+    restore = atUtcTime("09:05");
+    try {
+      await runSmsAgent(db, fakeSearch(db), address, "laundry's done", "SB_done", groupTurnOptions(reply.fetcher));
+    } finally { restore(); }
+    const window = (reply.requests[0].messages as Array<{ role: string; parts: Array<{ text?: string }> }>);
+    assert.deepEqual(window.map(message => [message.role, message.parts[0]?.text?.slice(0, 8)]), [
+      ["assistant", "Morning!"],
+      ["user", "[Sarah] "],
+    ], "the app's instruction is not a message anyone sent");
+  });
+
+  it("stays silent on a morning with nothing open, and is held by the switch and quiet hours", async () => {
+    const { db, api, area } = checkinFixture();
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30" }).expect(200);
+    const sends: string[] = [];
+    let agentRuns = 0;
+    const worker = {
+      sendSms: async (_db: Db, _to: string, body: string) => { sends.push(body); return { sid: "SB_x", status: "queued" as const }; },
+      runSmsAgent: async () => { agentRuns += 1; return { text: "note", threadId: "t" }; },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    };
+    let restore = atUtcTime("09:00");
+    try {
+      await runWorkerOnce(db, fakeSearch(db), worker);
+      await runWorkerOnce(db, fakeSearch(db), worker);
+    } finally { restore(); }
+    assert.deepEqual(sends, []);
+    assert.equal(agentRuns, 0, "no agent turn for nothing to say");
+    const dispatch = db.prepare("SELECT status,last_error FROM scheduled_dispatches").get() as { status: string; last_error: string };
+    assert.deepEqual(dispatch, { status: "sent", last_error: "Nothing open to mention" }, "the slot is taken so the tick does not recompute all day");
+
+    // With something open but the switch off, nothing; inside quiet hours, nothing yet.
+    await api.post("/api/todos").send({ title: "Shopping", life_area_id: area.id, due_at: "2030-01-16T12:00:00.000Z" }).expect(201);
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: null }).expect(200);
+    db.prepare("DELETE FROM scheduled_dispatches").run();
+    restore = atUtcTime("09:00");
+    try { await runWorkerOnce(db, fakeSearch(db), worker); } finally { restore(); }
+    assert.equal(agentRuns, 0, "off is off");
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30" }).expect(200);
+    saveNotificationPreferences(db, { ...getNotificationPreferences(db), quietHoursStart: "22:00", quietHoursEnd: "10:00" });
+    restore = atUtcTime("09:00");
+    try { await runWorkerOnce(db, fakeSearch(db), worker); } finally { restore(); }
+    assert.equal(agentRuns, 0, "quiet hours hold it");
+    restore = atUtcTime("10:30");
+    try { await runWorkerOnce(db, fakeSearch(db), worker); } finally { restore(); }
+    assert.equal(agentRuns, 1, "and release it");
+  });
+
+  it("asks a group how the day went in the evening, and keeps one shared entry for the answers", async () => {
+    const { db, api, area } = checkinFixture();
+    const address = `group:${GROUP}`;
+    const restoreClock = atUtcTime("20:45");
+    try {
+      const done = (await api.post("/api/todos").send({ title: "Laundry", life_area_id: area.id }).expect(201)).body.data;
+      await api.patch(`/api/todos/${done.id}/status`).send({ status: "done" }).expect(200);
+      const going = (await api.post("/api/todos").send({ title: "Shopping", life_area_id: area.id, due_at: "2030-01-19T21:00:00.000Z" }).expect(201)).body.data;
+      await api.patch(`/api/todos/${going.id}/status`).send({ status: "in_progress" }).expect(200);
+      await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30", evening_checkin_time: "20:30" }).expect(200);
+
+      const prompts: string[] = [];
+      const sends: string[] = [];
+      const asks: typeof fetch = async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { messages: Array<{ parts: Array<{ text?: string }> }> };
+        prompts.push(body.messages.at(-1)?.parts[0]?.text ?? "");
+        return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "Evening, both! How did today go — a line each and a mood word with a 1–5?" }] }), { status: 200 });
+      };
+      await runWorkerOnce(db, fakeSearch(db), {
+        sendSms: async (_db: Db, _to: string, body: string) => { sends.push(body); return { sid: `SB_${sends.length}`, status: "queued" as const }; },
+        runSmsAgent: (...args: Parameters<typeof runSmsAgent>) =>
+          runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher: asks }),
+        pollGranola: async () => ({ fetched: 0, queued: 0 }),
+        startTypingIndicator: () => () => {},
+      });
+      assert.equal(sends.length, 2, "the morning note and the evening question are both past due at 20:45 and are two dispatches");
+      assert.deepEqual(
+        (db.prepare("SELECT idempotency_key FROM scheduled_dispatches ORDER BY idempotency_key").all() as Array<{ idempotency_key: string }>).map(row => row.idempotency_key),
+        [`group_checkin:evening:${area.id}:${CHECKIN_DAY}`, `group_checkin:morning:${area.id}:${CHECKIN_DAY}`],
+      );
+      const evening = prompts.find(prompt => prompt.startsWith("Ask the group chat"))!;
+      assert.match(evening, /Finished in this group today: "Laundry"/);
+      assert.match(evening, /Still in progress: "Shopping"/);
+      assert.match(evening, /People here the app can name: Sarah, the owner/);
+
+      // Sarah answers first: one entry is created for the day, in her words.
+      const memoryParts = (body: string) => (JSON.parse(body) as { messages: Array<{ parts: Array<{ type: string; output?: { data?: { id?: string } } }> }> })
+        .messages.flatMap(message => message.parts).filter(part => part.type === "tool-create_memory");
+      const sarah = agentContinuing([{
+        tool: "create_memory",
+        input: {
+          kind: "journal", title: "Wed Jan 15 — Home", content: "Sarah: Long day but the laundry's finally done.",
+          mood_label: "tired", mood_score: 3, occurred_at: "2030-01-15T20:50:00.000Z", review_worthy: true, tags: ["end-of-day", "group"],
+        },
+      }], "Noted, Sarah — hope you get a rest.");
+      await runSmsAgent(db, fakeSearch(db), address, "Long day but the laundry's finally done. Tired, 3.", "SB_sarah_day", groupTurnOptions(sarah.fetcher));
+      const entry = db.prepare("SELECT id,life_area_id,tags_json,mood_score FROM memories").get() as { id: string; life_area_id: string; tags_json: string; mood_score: number };
+      assert.equal(entry.life_area_id, area.id, "filed under the group whatever the agent passed");
+      assert.deepEqual(JSON.parse(entry.tags_json), ["end-of-day", "group"]);
+
+      // The owner answers: the create is in the window as a write, so the same entry is updated.
+      let updated = false;
+      const owner: typeof fetch = async (_input, init) => {
+        const seen = memoryParts(String(init?.body));
+        const id = seen[0]?.output?.data?.id;
+        if (!updated && id) {
+          updated = true;
+          return new Response(JSON.stringify({
+            role: "assistant",
+            parts: [{
+              type: "tool-update_memory", tool_call_id: "call_upd", state: "input-available",
+              input: { id, patch: { content: "Sarah: Long day but the laundry's finally done.\nthe owner: Good one, got through the backlog.", mood_label: "Sarah tired · the owner content", mood_score: 4 } },
+            }],
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "Added yours too — good night, both." }] }), { status: 200 });
+      };
+      await runSmsAgent(db, fakeSearch(db), address, "Good one, got through the backlog. Content, 4.", "SB_owner_day", groupTurnOptions(owner, RECIPIENT, "the owner"));
+      assert.equal(updated, true, "the owner's turn saw Sarah's create and updated it");
+      const after = db.prepare("SELECT id,content,mood_label,mood_score FROM memories").all() as Array<{ id: string; content: string; mood_label: string; mood_score: number }>;
+      assert.equal(after.length, 1, "one entry for the day, not one per person");
+      assert.equal(after[0].id, entry.id);
+      assert.match(after[0].content, /^Sarah: .*\nthe owner: /);
+      assert.equal(after[0].mood_label, "Sarah tired · the owner content");
+      assert.equal(after[0].mood_score, 4);
+    } finally { restoreClock(); }
+  });
+
+  it("carries a group's check-in times on its area and refuses them elsewhere", async () => {
+    const { api, area } = checkinFixture();
+    const set = (await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30", evening_checkin_time: "20:30" }).expect(200)).body.data;
+    assert.equal(set.morning_checkin_time, "08:30");
+    assert.equal(set.evening_checkin_time, "20:30");
+    const listed = ((await api.get("/api/life-areas").expect(200)).body.data as Array<{ id: string; morning_checkin_time: string | null; evening_checkin_time: string | null }>).find(item => item.id === area.id)!;
+    assert.deepEqual([listed.morning_checkin_time, listed.evening_checkin_time], ["08:30", "20:30"]);
+    const off = (await api.patch(`/api/life-areas/${area.id}`).send({ evening_checkin_time: null }).expect(200)).body.data;
+    assert.deepEqual([off.morning_checkin_time, off.evening_checkin_time], ["08:30", null], "one at a time; the other keeps its time");
+    await api.patch("/api/life-areas/area_work").send({ morning_checkin_time: "08:30" }).expect(400);
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "8:30" }).expect(400);
   });
 
   it("keeps the owner's records out of a group chat", async () => {
@@ -6705,7 +6989,7 @@ describe("digest briefs", () => {
           id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at
         ) VALUES('dispatch_old',?,'daily_digest','daily_digest:2030-01-14','2030-01-14T09:00:00.000Z','sent',1,?,?)
       `).run(USER_ID, "2030-01-14T09:00:00.000Z", "2030-01-14T09:00:00.000Z");
-      before.prepare("DELETE FROM schema_migrations WHERE version=12").run();
+      before.prepare("DELETE FROM schema_migrations WHERE version IN (12,15)").run();
       before.close();
 
       const after = openDatabase(path);
@@ -6715,10 +6999,17 @@ describe("digest briefs", () => {
             id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at
           ) VALUES('dispatch_brief',?,'digest_brief','digest_brief:brief_1:2030-01-15','2030-01-15T07:30:00.000Z','pending',0,?,?)
         `).run(USER_ID, "2030-01-15T07:30:00.000Z", "2030-01-15T07:30:00.000Z");
+        // Two widenings in one open — v12 for briefs, v15 for group check-ins —
+        // and the second keeps the retry column the first's copy left behind.
+        after.prepare(`
+          INSERT INTO scheduled_dispatches(
+            id,user_id,kind,idempotency_key,scheduled_for,status,attempts,available_at,created_at,updated_at
+          ) VALUES('dispatch_checkin',?,'group_checkin','group_checkin:morning:area_home:2030-01-15','2030-01-15T08:30:00.000Z','pending',1,'2030-01-15T08:40:00.000Z',?,?)
+        `).run(USER_ID, "2030-01-15T08:30:00.000Z", "2030-01-15T08:30:00.000Z");
         assert.deepEqual(
           (after.prepare("SELECT id FROM scheduled_dispatches ORDER BY id").all() as Array<{ id: string }>)
             .map(row => row.id),
-          ["dispatch_brief", "dispatch_old"],
+          ["dispatch_brief", "dispatch_checkin", "dispatch_old"],
           "the history the copy carried over is still there",
         );
       } finally { after.close(); }
@@ -6895,6 +7186,63 @@ describe("worker scheduling", () => {
     assert.deepEqual(recorded, [
       { role: "assistant", content: "Here is your day.", provider_message_id: "SM_1" },
     ]);
+  });
+
+  /*
+   * The prompt's end-of-day rules key on an evening question of the agent's
+   * sitting right above the reply. Until now nothing sent one.
+   */
+  it("asks the owner how the day went once an evening, on the digest's rails", async () => {
+    const { db, api } = schedulingFixture({ eveningCheckinTime: "20:30" });
+    const done = (await api.post("/api/todos").send({ title: "Ship the release", life_area_id: "area_work" }).expect(201)).body.data;
+    const prompts: string[] = [];
+    const sent: string[] = [];
+    const drafts: Array<{ address: string; internal: boolean; kind?: unknown }> = [];
+    const dependencies = {
+      sendSms: async (_db: Db, _to: string, body: string) => { sent.push(body); return { sid: `SM_${sent.length}`, status: "queued" }; },
+      runSmsAgent: async (_db: Db, _search: unknown, address: string, prompt: string, _id?: string, options?: { internal?: boolean; userMessageMetadata?: { kind?: unknown } }) => {
+        prompts.push(prompt);
+        drafts.push({ address, internal: Boolean(options?.internal), kind: options?.userMessageMetadata?.kind });
+        return { text: "How did today go? A mood word and a 1–5 would be lovely.", threadId: "thread_digest" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    };
+    let restore = atUtcTime("20:00");
+    try {
+      await api.patch(`/api/todos/${done.id}/status`).send({ status: "done" }).expect(200);
+      await runWorkerOnce(db, fakeSearch(db), dependencies as never);
+    } finally { restore(); }
+    assert.deepEqual(sent, [], "the question waits for its time");
+
+    restore = atUtcTime("21:00");
+    try {
+      await runWorkerOnce(db, fakeSearch(db), dependencies as never);
+      await runWorkerOnce(db, fakeSearch(db), dependencies as never);
+    } finally { restore(); }
+    assert.deepEqual(sent, ["How did today go? A mood word and a 1–5 would be lovely."], "once");
+    assert.deepEqual(drafts, [{ address: `digest:${RECIPIENT}`, internal: true, kind: "evening_checkin" }]);
+    assert.match(prompts[0], /^Ask me how today went/);
+    assert.match(prompts[0], /Finished today: "Ship the release"/);
+    const dispatch = db.prepare("SELECT kind,status,idempotency_key FROM scheduled_dispatches").get() as { kind: string; status: string; idempotency_key: string };
+    assert.deepEqual(dispatch, { kind: "daily_digest", status: "sent", idempotency_key: `evening_checkin:${USER_ID}:2030-01-15` });
+    // Recorded on the owner's real thread, so the reply is read with the question right above it.
+    const recorded = db.prepare(`
+      SELECT m.role,m.content,m.metadata_json FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id WHERE t.address=?
+    `).all(RECIPIENT) as Array<{ role: string; content: string; metadata_json: string }>;
+    assert.deepEqual(recorded.map(row => [row.role, JSON.parse(row.metadata_json).kind]), [["assistant", "evening_checkin"]]);
+
+    // The setting round-trips, and off is null.
+    const saved = (await api.put("/api/integrations/notifications").send({
+      smsEnabled: true, recipientPhone: RECIPIENT, timezone: "UTC", dailyDigestEnabled: false, dailyDigestTime: "09:00",
+      quietHoursStart: null, quietHoursEnd: null, eveningCheckinTime: "21:15",
+    }).expect(200)).body.data;
+    assert.equal(saved.eveningCheckinTime, "21:15");
+    assert.equal(getNotificationPreferences(db).eveningCheckinTime, "21:15");
+    const cleared = (await api.put("/api/integrations/notifications").send({
+      smsEnabled: true, recipientPhone: RECIPIENT, timezone: "UTC", dailyDigestEnabled: false, dailyDigestTime: "09:00",
+      quietHoursStart: null, quietHoursEnd: null,
+    }).expect(200)).body.data;
+    assert.equal(cleared.eveningCheckinTime, null);
   });
 
   /**

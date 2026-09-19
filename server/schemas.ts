@@ -151,6 +151,16 @@ export const lifeAreaCreate = z.object({
   color: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/, "Use a six-digit hex color"),
 }).strict();
 
+/**
+ * A patch may also set the check-in times a group chat's area carries: the
+ * local `HH:MM` the chat is texted a morning note and an evening question, or
+ * null to turn either off. The route refuses them on an area no group owns.
+ */
+export const lifeAreaPatch = lifeAreaCreate.partial().extend({
+  morning_checkin_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time").nullable().optional(),
+  evening_checkin_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time").nullable().optional(),
+}).strict().refine(value => Object.keys(value).length > 0, "No changes provided");
+
 export const reminderCreate = z.object({
   todo_id: z.string().min(1).max(100),
   reminder_at: iso,
@@ -277,6 +287,8 @@ export const notificationInput = z.object({
   quietHoursEnd: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
   trustedContacts: z.array(trustedContact).max(25).default([]),
   groupAllowAll: z.boolean().default(false),
+  /** Local time of the owner's own evening check-in; null or absent leaves it off. */
+  eveningCheckinTime: clockTime.nullable().default(null),
 }).strict().superRefine((value, context) => {
   const seen = new Set<string>();
   value.trustedContacts.forEach((contact, index) => {

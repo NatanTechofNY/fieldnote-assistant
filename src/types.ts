@@ -10,6 +10,10 @@ export interface LifeArea {
   is_builtin?: number | boolean;
   /** Set on the area a group chat files its todos and memories under. */
   is_group?: number | boolean;
+  /** Local `HH:MM` the group chat is texted a morning note about its open work; null for never. Group areas only. */
+  morning_checkin_time?: string | null;
+  /** Local `HH:MM` the group chat is asked how the day went; null for never. Group areas only. */
+  evening_checkin_time?: string | null;
 }
 
 export interface Category {
@@ -256,6 +260,8 @@ export interface IntegrationState {
     /* Who else may talk to the assistant, and only inside an iMessage group that includes the recipient. */
     trustedContacts: TrustedContact[];
     groupAllowAll: boolean;
+    /** Local `HH:MM` the owner is asked how the day went, or null for never. */
+    eveningCheckinTime: string | null;
   };
   tasks: { autoCompleteParent: boolean };
   webhookPaths: {

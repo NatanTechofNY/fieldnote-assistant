@@ -44,7 +44,7 @@ const lifeAreas = [
   { id: "area_group", slug: "home", name: "Home", color: "#2f7d6d", is_builtin: 0, is_group: 1 },
 ];
 /** What `/api/life-areas` answers; a test about a household with no group chats narrows it. */
-let servedLifeAreas = lifeAreas;
+let servedLifeAreas: Array<Record<string, unknown>> = lifeAreas;
 const lifeAreaPatches: Array<{ id: string; body: Record<string, unknown> }> = [];
 
 const todo = (over: Partial<Record<string, unknown>> = {}) => ({
@@ -97,6 +97,8 @@ const todos = [
 
 /** Stateful so a saved preference reads back the way the server would return it. */
 const taskPreferences = { autoCompleteParent: false };
+/** Every SMS schedule the settings page saved. */
+const notificationSaves: Array<Record<string, unknown>> = [];
 
 const memory = (over: Partial<Record<string, unknown>> = {}) => ({
   id: "memory_1",
@@ -246,8 +248,10 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       const id = url.split("/").pop() as string;
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       lifeAreaPatches.push({ id, body });
-      const area = lifeAreas.find(item => item.id === id)!;
-      return new Response(JSON.stringify({ success: true, data: { ...area, ...body } }));
+      // Stateful, so a saved check-in time reads back the way the server would return it.
+      servedLifeAreas = servedLifeAreas.map(item => item.id === id ? { ...item, ...body } : item);
+      const area = servedLifeAreas.find(item => item.id === id)!;
+      return new Response(JSON.stringify({ success: true, data: area }));
     }
     return new Response(JSON.stringify({ success: true, data: servedLifeAreas }));
   }
@@ -622,6 +626,11 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     Object.assign(taskPreferences, JSON.parse(String(init?.body ?? "{}")));
     return new Response(JSON.stringify({ success: true, data: taskPreferences }));
   }
+  if (url.endsWith("/api/integrations/notifications")) {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    notificationSaves.push(body);
+    return new Response(JSON.stringify({ success: true, data: { ...body, smsProvider: "twilio", optedOutAt: null } }));
+  }
   if (url.endsWith("/api/integrations")) return new Response(JSON.stringify({
     success: true,
     data: {
@@ -642,6 +651,7 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
         optedOutAt: null,
         trustedContacts: [],
         groupAllowAll: false,
+        eveningCheckinTime: null,
       },
       tasks: { ...taskPreferences },
       webhookPaths: {
@@ -1329,6 +1339,60 @@ it("badges a group chat's classification and renames it inline", async () => {
   await userEvent.type(field, "Sarah & me{Enter}");
   expect(await screen.findByText("Classification renamed")).toBeInTheDocument();
   expect(lifeAreaPatches).toEqual([{ id: "area_group", body: { name: "Sarah & me" } }]);
+});
+
+/** The owner's evening question is one switch beside the daily digest, and off is null. */
+it("saves the owner's evening check-in time with the SMS schedule", async () => {
+  window.localStorage.clear();
+  notificationSaves.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Delivery schedule"));
+  const time = screen.getByLabelText("Evening check-in time");
+  expect(time).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
+  await waitFor(() => expect(notificationSaves).toHaveLength(1));
+  expect(notificationSaves[0].eveningCheckinTime).toBe(null);
+
+  await userEvent.click(screen.getByRole("checkbox", { name: "My evening check-in" }));
+  expect(time).toBeEnabled();
+  fireEvent.change(time, { target: { value: "21:15" } });
+  await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
+  await waitFor(() => expect(notificationSaves).toHaveLength(2));
+  expect(notificationSaves[1].eveningCheckinTime).toBe("21:15");
+});
+
+/** Only a group's row carries the check-ins; a switch saves at once with the remembered time. */
+it("schedules a group's morning and evening check-ins from its classification row", async () => {
+  window.localStorage.clear();
+  lifeAreaPatches.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Classifications"));
+  expect(await screen.findByText("Group chat")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Morning check-in for Work")).not.toBeInTheDocument();
+
+  const morning = screen.getByLabelText("Morning check-in for Home");
+  expect(morning).not.toBeChecked();
+  expect(screen.getByLabelText("Morning check-in time for Home")).toBeDisabled();
+  await userEvent.click(morning);
+  await waitFor(() => expect(lifeAreaPatches).toEqual([{ id: "area_group", body: { morning_checkin_time: "08:30" } }]));
+
+  const eveningTime = screen.getByLabelText("Evening check-in time for Home");
+  await userEvent.click(screen.getByLabelText("Evening check-in for Home"));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { evening_checkin_time: "20:30" } }));
+  fireEvent.change(eveningTime, { target: { value: "21:00" } });
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { evening_checkin_time: "21:00" } }));
 });
 
 it("fills the brief form from the end-of-day template and flags a send time inside quiet hours", async () => {

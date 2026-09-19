@@ -475,6 +475,9 @@ export async function executeAgentTool(
     // assistant. The reason lands in the archive as this tool's row; the turn
     // itself sends nothing. A 1:1 text is always for the assistant.
     if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat; a text sent to you is for you");
+    // A scheduled check-in is the assistant speaking to the room, not a
+    // message to judge; there is no inbound to stay quiet on.
+    if (!context.inboundMessageHandle) throw new Error("This turn is the app asking you to write to the group; there is no message to stay quiet on");
     // Until the assistant has answered once in a group, the owner has just
     // brought it in and the room is owed an introduction and a name for its
     // area; a quiet first turn would consume both cues for good.

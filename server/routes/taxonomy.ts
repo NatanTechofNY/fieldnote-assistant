@@ -1,6 +1,6 @@
 import { USER_ID, id, lifeAreaSlug, now, queueIndexJob, renameLifeArea } from "../db.ts";
 import { failure, success } from "../http.ts";
-import { categoryCreate, lifeAreaCreate } from "../schemas.ts";
+import { categoryCreate, lifeAreaCreate, lifeAreaPatch } from "../schemas.ts";
 import type { RouteContext } from "./context.ts";
 
 export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void {
@@ -42,7 +42,8 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
     const rows = db.prepare(`
       SELECT id,slug,name,color,
         CASE WHEN slug IN ('work','personal','side-project') THEN 1 ELSE 0 END is_builtin,
-        CASE WHEN thread_id IS NOT NULL THEN 1 ELSE 0 END is_group
+        CASE WHEN thread_id IS NOT NULL THEN 1 ELSE 0 END is_group,
+        morning_checkin_time,evening_checkin_time
       FROM life_areas WHERE user_id=? ORDER BY
         CASE slug WHEN 'work' THEN 0 WHEN 'personal' THEN 1 WHEN 'side-project' THEN 2 ELSE 3 END,name
     `).all(USER_ID);
@@ -60,16 +61,30 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
     return success(res, { id: areaId, slug, ...body, is_builtin: 0, is_group: 0 }, 201);
   });
   app.patch("/api/life-areas/:id", (req, res) => {
-    const body = lifeAreaCreate.partial().refine(value => Object.keys(value).length > 0).parse(req.body);
-    const current = db.prepare("SELECT id,slug,name,color,thread_id FROM life_areas WHERE id=? AND user_id=?")
-      .get(req.params.id, USER_ID) as { id: string; slug: string; name: string; color: string; thread_id: string | null } | undefined;
+    const body = lifeAreaPatch.parse(req.body);
+    const current = db.prepare(`
+      SELECT id,slug,name,color,thread_id,morning_checkin_time,evening_checkin_time FROM life_areas WHERE id=? AND user_id=?
+    `).get(req.params.id, USER_ID) as {
+      id: string; slug: string; name: string; color: string; thread_id: string | null;
+      morning_checkin_time: string | null; evening_checkin_time: string | null;
+    } | undefined;
     if (!current) return failure(res, 404, "Life area not found");
+    // The check-ins are texted into a group chat, so only an area a group owns can carry them.
+    const checkins = body.morning_checkin_time !== undefined || body.evening_checkin_time !== undefined;
+    if (checkins && !current.thread_id) return failure(res, 400, "Only a group chat's area can have check-ins");
     // The name is on every indexed record of the area, so a rename goes through
     // the helper that queues the rewrites; the colour lives only here.
     if (body.name !== undefined && body.name !== current.name) renameLifeArea(db, current.id, body.name);
     if (body.color !== undefined) {
       db.prepare("UPDATE life_areas SET color=?,updated_at=? WHERE id=? AND user_id=?")
         .run(body.color, now(), current.id, USER_ID);
+    }
+    if (checkins) {
+      db.prepare("UPDATE life_areas SET morning_checkin_time=?,evening_checkin_time=?,updated_at=? WHERE id=? AND user_id=?").run(
+        body.morning_checkin_time === undefined ? current.morning_checkin_time : body.morning_checkin_time,
+        body.evening_checkin_time === undefined ? current.evening_checkin_time : body.evening_checkin_time,
+        now(), current.id, USER_ID,
+      );
     }
     search.flushSoon();
     return success(res, {
@@ -79,6 +94,8 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
       color: body.color ?? current.color,
       is_builtin: ["work", "personal", "side-project"].includes(current.slug) ? 1 : 0,
       is_group: current.thread_id ? 1 : 0,
+      morning_checkin_time: body.morning_checkin_time === undefined ? current.morning_checkin_time : body.morning_checkin_time,
+      evening_checkin_time: body.evening_checkin_time === undefined ? current.evening_checkin_time : body.evening_checkin_time,
     });
   });
   app.delete("/api/life-areas/:id", (req, res) => {

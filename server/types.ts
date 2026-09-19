@@ -166,6 +166,7 @@ export interface NotificationPreferencesRow {
   opted_out_at: string | null;
   trusted_contacts_json: string;
   group_allow_all: 0 | 1;
+  evening_checkin_time: string | null;
   created_at: string;
   updated_at: string;
 }

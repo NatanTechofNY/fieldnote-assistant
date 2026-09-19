@@ -41,8 +41,17 @@ function ReflectionGenerationBlock({ message }: { message: ChannelMessage }) {
  * chat bubble buries the one line the user wrote, so the machine half is
  * collapsed behind it.
  */
+/** What the app composes on a schedule, and how each kind is labelled in the archive. */
+const SCHEDULED_KINDS = new Map<string, string>([
+  ["daily_digest", "Daily digest"],
+  ["digest_brief", "Digest brief"],
+  ["evening_checkin", "Evening check-in"],
+  ["group_morning", "Group morning check-in"],
+  ["group_evening", "Group evening check-in"],
+]);
+
 function DigestBlock({ message }: { message: ChannelMessage }) {
-  const isBrief = message.metadata.kind === "digest_brief";
+  const kind = typeof message.metadata.kind === "string" ? message.metadata.kind : "";
   const name = typeof message.metadata.briefName === "string" ? message.metadata.briefName : null;
   const date = typeof message.metadata.date === "string" ? message.metadata.date : null;
   const instruction = typeof message.metadata.instruction === "string" ? message.metadata.instruction : null;
@@ -50,7 +59,7 @@ function DigestBlock({ message }: { message: ChannelMessage }) {
     <span><Mail size={16}/></span>
     <div>
       <small>
-        {isBrief ? "Digest brief" : "Daily digest"}
+        {SCHEDULED_KINDS.get(kind) ?? "Scheduled message"}
         {message.metadata.preview === true ? " · preview, not sent" : ""}
       </small>
       <strong>{name || date || "Scheduled digest"}</strong>
@@ -312,7 +321,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
             const isReflectionRequest = message.role === "user"
               && (message.metadata.kind === "reflection_generation" || selected.address.startsWith("reflection:"));
             const isDigestRequest = message.role === "user"
-              && (message.metadata.kind === "digest_brief" || message.metadata.kind === "daily_digest");
+              && typeof message.metadata.kind === "string" && SCHEDULED_KINDS.has(message.metadata.kind);
             const isJumpTarget = jump?.messageId === message.id;
             const parent = replyParent(message, byProviderId);
             const reactions = messageReactions(message);
