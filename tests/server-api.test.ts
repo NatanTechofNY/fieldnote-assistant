@@ -5859,7 +5859,7 @@ describe("Sendblue provider", () => {
     const address = `group:${GROUP}`;
     const laundry = (await api.post("/api/todos").send({ title: "Laundry", life_area_id: area.id, due_at: "2030-01-19T21:00:00.000Z" }).expect(201)).body.data;
     await api.patch(`/api/todos/${laundry.id}/status`).send({ status: "in_progress" }).expect(200);
-    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30" }).expect(200);
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30", checkin_copy_to_owner: true }).expect(200);
 
     const sends: Array<{ to: string; body: string; groupId?: string }> = [];
     const requests: Array<Record<string, unknown>> = [];
@@ -5895,9 +5895,20 @@ describe("Sendblue provider", () => {
       await runWorkerOnce(db, fakeSearch(db), worker);
       await runWorkerOnce(db, fakeSearch(db), worker);
     } finally { restore(); }
-    assert.deepEqual(sends, [{ to: address, body: "Morning! Laundry's still going, due Sunday night — anything to wrap up today?", groupId: GROUP }], "once, into the group");
+    const note = "Morning! Laundry's still going, due Sunday night — anything to wrap up today?";
+    assert.deepEqual(sends, [
+      { to: address, body: note, groupId: GROUP },
+      { to: "+17185551111", body: note },
+    ], "once into the group, and a copy to the owner's own number because the group asked for one");
     const dispatch = db.prepare("SELECT kind,status,idempotency_key FROM scheduled_dispatches").get() as { kind: string; status: string; idempotency_key: string };
     assert.deepEqual(dispatch, { kind: "group_checkin", status: "sent", idempotency_key: `group_checkin:morning:${area.id}:${CHECKIN_DAY}` });
+    const copy = db.prepare(`
+      SELECT m.metadata_json,m.provider_message_id FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      WHERE t.address='+17185551111' AND m.role='assistant'
+    `).all() as Array<{ metadata_json: string; provider_message_id: string }>;
+    assert.equal(copy.length, 1, "the copy sits on the owner's own thread");
+    assert.equal(copy[0].provider_message_id, "SB_2");
+    assert.deepEqual(JSON.parse(copy[0].metadata_json), { kind: "group_morning", date: CHECKIN_DAY, groupId: GROUP, copyOf: area.id, groupName: "Home" });
 
     // Composed on the group's thread with the group's scope, and told what it is.
     const first = requests[0] as { messages: Array<{ role: string; metadata?: { turnContext?: Record<string, unknown> } }>; algolia?: { searchParameters: Record<string, unknown> } };
@@ -6055,7 +6066,11 @@ describe("Sendblue provider", () => {
     assert.deepEqual([listed.morning_checkin_time, listed.evening_checkin_time], ["08:30", "20:30"]);
     const off = (await api.patch(`/api/life-areas/${area.id}`).send({ evening_checkin_time: null }).expect(200)).body.data;
     assert.deepEqual([off.morning_checkin_time, off.evening_checkin_time], ["08:30", null], "one at a time; the other keeps its time");
+    assert.equal(off.checkin_copy_to_owner, 0, "no copy to the owner until asked");
+    const copied = (await api.patch(`/api/life-areas/${area.id}`).send({ checkin_copy_to_owner: true }).expect(200)).body.data;
+    assert.deepEqual([copied.morning_checkin_time, copied.checkin_copy_to_owner], ["08:30", 1], "the copy switch leaves the times alone");
     await api.patch("/api/life-areas/area_work").send({ morning_checkin_time: "08:30" }).expect(400);
+    await api.patch("/api/life-areas/area_work").send({ checkin_copy_to_owner: true }).expect(400);
     await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "8:30" }).expect(400);
   });
 

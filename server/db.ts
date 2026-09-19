@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS life_areas (
   thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL,
   morning_checkin_time TEXT,
   evening_checkin_time TEXT,
+  checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, slug)
@@ -464,6 +465,10 @@ function migrateMessaging(db: Db): void {
   const areaColumns = columns(db, "life_areas");
   if (!areaColumns.has("morning_checkin_time")) db.exec("ALTER TABLE life_areas ADD COLUMN morning_checkin_time TEXT");
   if (!areaColumns.has("evening_checkin_time")) db.exec("ALTER TABLE life_areas ADD COLUMN evening_checkin_time TEXT");
+  // Whether the owner is also texted a copy of the group's check-ins on their own number.
+  if (!areaColumns.has("checkin_copy_to_owner")) {
+    db.exec("ALTER TABLE life_areas ADD COLUMN checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1))");
+  }
   // The owner's own evening check-in, on the same footing as the daily digest.
   if (!columns(db, "notification_preferences").has("evening_checkin_time")) {
     db.exec("ALTER TABLE notification_preferences ADD COLUMN evening_checkin_time TEXT");

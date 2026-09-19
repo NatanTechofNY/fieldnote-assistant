@@ -159,6 +159,8 @@ export const lifeAreaCreate = z.object({
 export const lifeAreaPatch = lifeAreaCreate.partial().extend({
   morning_checkin_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time").nullable().optional(),
   evening_checkin_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time").nullable().optional(),
+  /** Whether the owner is also texted a copy of the group's check-ins on their own number. */
+  checkin_copy_to_owner: z.boolean().optional(),
 }).strict().refine(value => Object.keys(value).length > 0, "No changes provided");
 
 export const reminderCreate = z.object({

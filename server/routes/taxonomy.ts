@@ -43,7 +43,7 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
       SELECT id,slug,name,color,
         CASE WHEN slug IN ('work','personal','side-project') THEN 1 ELSE 0 END is_builtin,
         CASE WHEN thread_id IS NOT NULL THEN 1 ELSE 0 END is_group,
-        morning_checkin_time,evening_checkin_time
+        morning_checkin_time,evening_checkin_time,checkin_copy_to_owner
       FROM life_areas WHERE user_id=? ORDER BY
         CASE slug WHEN 'work' THEN 0 WHEN 'personal' THEN 1 WHEN 'side-project' THEN 2 ELSE 3 END,name
     `).all(USER_ID);
@@ -63,14 +63,16 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
   app.patch("/api/life-areas/:id", (req, res) => {
     const body = lifeAreaPatch.parse(req.body);
     const current = db.prepare(`
-      SELECT id,slug,name,color,thread_id,morning_checkin_time,evening_checkin_time FROM life_areas WHERE id=? AND user_id=?
+      SELECT id,slug,name,color,thread_id,morning_checkin_time,evening_checkin_time,checkin_copy_to_owner
+      FROM life_areas WHERE id=? AND user_id=?
     `).get(req.params.id, USER_ID) as {
       id: string; slug: string; name: string; color: string; thread_id: string | null;
-      morning_checkin_time: string | null; evening_checkin_time: string | null;
+      morning_checkin_time: string | null; evening_checkin_time: string | null; checkin_copy_to_owner: 0 | 1;
     } | undefined;
     if (!current) return failure(res, 404, "Life area not found");
     // The check-ins are texted into a group chat, so only an area a group owns can carry them.
-    const checkins = body.morning_checkin_time !== undefined || body.evening_checkin_time !== undefined;
+    const checkins = body.morning_checkin_time !== undefined || body.evening_checkin_time !== undefined
+      || body.checkin_copy_to_owner !== undefined;
     if (checkins && !current.thread_id) return failure(res, 400, "Only a group chat's area can have check-ins");
     // The name is on every indexed record of the area, so a rename goes through
     // the helper that queues the rewrites; the colour lives only here.
@@ -79,12 +81,13 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
       db.prepare("UPDATE life_areas SET color=?,updated_at=? WHERE id=? AND user_id=?")
         .run(body.color, now(), current.id, USER_ID);
     }
+    const morning = body.morning_checkin_time === undefined ? current.morning_checkin_time : body.morning_checkin_time;
+    const evening = body.evening_checkin_time === undefined ? current.evening_checkin_time : body.evening_checkin_time;
+    const copy = body.checkin_copy_to_owner === undefined ? current.checkin_copy_to_owner : Number(body.checkin_copy_to_owner);
     if (checkins) {
-      db.prepare("UPDATE life_areas SET morning_checkin_time=?,evening_checkin_time=?,updated_at=? WHERE id=? AND user_id=?").run(
-        body.morning_checkin_time === undefined ? current.morning_checkin_time : body.morning_checkin_time,
-        body.evening_checkin_time === undefined ? current.evening_checkin_time : body.evening_checkin_time,
-        now(), current.id, USER_ID,
-      );
+      db.prepare(`
+        UPDATE life_areas SET morning_checkin_time=?,evening_checkin_time=?,checkin_copy_to_owner=?,updated_at=? WHERE id=? AND user_id=?
+      `).run(morning, evening, copy, now(), current.id, USER_ID);
     }
     search.flushSoon();
     return success(res, {
@@ -94,8 +97,9 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
       color: body.color ?? current.color,
       is_builtin: ["work", "personal", "side-project"].includes(current.slug) ? 1 : 0,
       is_group: current.thread_id ? 1 : 0,
-      morning_checkin_time: body.morning_checkin_time === undefined ? current.morning_checkin_time : body.morning_checkin_time,
-      evening_checkin_time: body.evening_checkin_time === undefined ? current.evening_checkin_time : body.evening_checkin_time,
+      morning_checkin_time: morning,
+      evening_checkin_time: evening,
+      checkin_copy_to_owner: copy,
     });
   });
   app.delete("/api/life-areas/:id", (req, res) => {

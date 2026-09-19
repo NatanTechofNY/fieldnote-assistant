@@ -593,11 +593,12 @@ type CheckinAreaRow = {
   address: string;
   morning_checkin_time: string | null;
   evening_checkin_time: string | null;
+  checkin_copy_to_owner: 0 | 1;
 };
 
 function checkinAreas(db: Db): CheckinAreaRow[] {
   return db.prepare(`
-    SELECT la.id,la.name,t.address,la.morning_checkin_time,la.evening_checkin_time
+    SELECT la.id,la.name,t.address,la.morning_checkin_time,la.evening_checkin_time,la.checkin_copy_to_owner
     FROM life_areas la JOIN channel_threads t ON t.id=la.thread_id
     WHERE la.user_id=? AND (la.morning_checkin_time IS NOT NULL OR la.evening_checkin_time IS NOT NULL)
     ORDER BY la.name
@@ -621,6 +622,7 @@ async function deliverGroupCheckin(
   search: SearchWriter,
   kind: "morning" | "evening",
   area: CheckinAreaRow,
+  recipient: string,
   local: { date: string; time: string },
   timezone: string,
   runAgent: typeof runSmsAgent,
@@ -657,6 +659,21 @@ async function deliverGroupCheckin(
     db.prepare(`
       UPDATE scheduled_dispatches SET status='sent',provider_message_id=?,updated_at=? WHERE id=?
     `).run(sent.sid, now(), dispatchId);
+    /*
+     * The owner's copy, when asked for, on their own number and their own
+     * thread. Best effort once the group has its message: the dispatch is
+     * settled, so a copy that fails is logged rather than resending the group.
+     */
+    if (area.checkin_copy_to_owner) {
+      try {
+        const copy = await send(db, recipient, response.text);
+        recordOutboundChannelMessage(db, "sms", recipient, response.text, copy.sid, copy.status, {
+          kind: metaKind, date: local.date, groupId, copyOf: area.id, groupName: area.name,
+        });
+      } catch (error) {
+        console.warn(`Could not copy the ${kind} check-in to the owner:`, error instanceof Error ? error.message : error);
+      }
+    }
   } catch (error) {
     recordDispatchFailure(db, dispatchId, error, `Group ${kind} check-in failed`);
   }
@@ -800,10 +817,10 @@ export async function runWorkerOnce(
     if (isSmsProviderConnected(db, "sendblue")) {
       for (const area of checkinAreas(db)) {
         if (area.morning_checkin_time && local.time >= area.morning_checkin_time) {
-          await deliverGroupCheckin(db, search, "morning", area, local, preferences.timezone, runAgent, send);
+          await deliverGroupCheckin(db, search, "morning", area, preferences.recipientPhone, local, preferences.timezone, runAgent, send);
         }
         if (area.evening_checkin_time && local.time >= area.evening_checkin_time) {
-          await deliverGroupCheckin(db, search, "evening", area, local, preferences.timezone, runAgent, send);
+          await deliverGroupCheckin(db, search, "evening", area, preferences.recipientPhone, local, preferences.timezone, runAgent, send);
         }
       }
     }

@@ -1367,8 +1367,11 @@ it("saves the owner's evening check-in time with the SMS schedule", async () => 
   expect(notificationSaves[1].eveningCheckinTime).toBe("21:15");
 });
 
-/** Only a group's row carries the check-ins; a switch saves at once with the remembered time. */
-it("schedules a group's morning and evening check-ins from its classification row", async () => {
+/**
+ * Everything per group lives in the Group chats section: who may talk there,
+ * and each group's check-ins. A switch saves at once with the remembered time.
+ */
+it("schedules a group's check-ins, and a copy to the owner, from the Group chats section", async () => {
   window.localStorage.clear();
   lifeAreaPatches.length = 0;
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1379,10 +1382,17 @@ it("schedules a group's morning and evening check-ins from its classification ro
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
   await userEvent.click(screen.getByText("Classifications"));
-  expect(await screen.findByText("Group chat")).toBeInTheDocument();
+  const classifications = (await screen.findByText("Group chat")).closest("details")!;
+
+  await userEvent.click(screen.getByText("Group chats"));
+  expect(await screen.findByText("Who can talk to the assistant")).toBeInTheDocument();
   expect(screen.queryByLabelText("Morning check-in for Work")).not.toBeInTheDocument();
 
   const morning = screen.getByLabelText("Morning check-in for Home");
+  const groupChats = morning.closest("details")!;
+  expect(classifications).not.toContainElement(morning);
+  expect(groupChats).toHaveTextContent("Group chats");
+  expect(groupChats).toContainElement(screen.getByRole("button", { name: /Add trusted contact/ }));
   expect(morning).not.toBeChecked();
   expect(screen.getByLabelText("Morning check-in time for Home")).toBeDisabled();
   await userEvent.click(morning);
@@ -1393,6 +1403,11 @@ it("schedules a group's morning and evening check-ins from its classification ro
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { evening_checkin_time: "20:30" } }));
   fireEvent.change(eveningTime, { target: { value: "21:00" } });
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { evening_checkin_time: "21:00" } }));
+
+  const copy = screen.getByLabelText("Also text me a copy for Home");
+  expect(copy).not.toBeChecked();
+  await userEvent.click(copy);
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { checkin_copy_to_owner: true } }));
 });
 
 it("fills the brief form from the end-of-day template and flags a send time inside quiet hours", async () => {

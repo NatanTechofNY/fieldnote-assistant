@@ -79,7 +79,10 @@ export const api = {
   lifeAreas: () => request<LifeArea[]>("/life-areas"),
   createLifeArea: (input: { name: string; color: string }) =>
     request<LifeArea>("/life-areas", { method: "POST", body: JSON.stringify(input) }),
-  updateLifeArea: (id: string, input: { name?: string; color?: string; morning_checkin_time?: string | null; evening_checkin_time?: string | null }) =>
+  updateLifeArea: (id: string, input: {
+    name?: string; color?: string;
+    morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean;
+  }) =>
     request<LifeArea>(`/life-areas/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteLifeArea: (id: string) =>
     request<{ id: string }>(`/life-areas/${id}`, { method: "DELETE" }),

@@ -14,6 +14,8 @@ export interface LifeArea {
   morning_checkin_time?: string | null;
   /** Local `HH:MM` the group chat is asked how the day went; null for never. Group areas only. */
   evening_checkin_time?: string | null;
+  /** Whether the owner is also texted a copy of the group's check-ins on their own number. */
+  checkin_copy_to_owner?: number | boolean;
 }
 
 export interface Category {
