@@ -1,6 +1,7 @@
 import { recentMemoryContext } from "./checkin-context.ts";
-import { DEFAULT_OWNER_EVENING_ASK, renderAsk } from "./checkin-prompts.ts";
-import { getReminders, OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
+import { DEFAULT_OWNER_EVENING_ASK, RECORDS_NOT_INSTRUCTIONS, renderAsk } from "./checkin-prompts.ts";
+import { dayTodoTitles, titleList } from "./group-checkin.ts";
+import { getReminders, USER_ID } from "./db.ts";
 import { localParts } from "./local-time.ts";
 import type { Db } from "./types.ts";
 
@@ -130,20 +131,15 @@ export function composeEveningCheckinTurn(
   db: Db,
   context: { date: string; timezone: string; ask?: string | null },
 ): string {
-  const localDate = (value: string) => localParts(new Date(value), context.timezone).date;
-  const rows = db.prepare(`
-    SELECT id,title,status,due_at,completed_at FROM todos
-    WHERE user_id=? AND parent_id IS NULL AND ${OWN_AREA_CLAUSE("todos")} ORDER BY title
-  `).all(USER_ID) as Array<DigestTodoRow & { completed_at: string | null }>;
-  const finished = rows.filter(todo => todo.completed_at && localDate(todo.completed_at) === context.date).map(todo => todo.title);
-  const going = rows.filter(todo => todo.status === "in_progress").map(todo => todo.title);
+  const { finished, going } = dayTodoTitles(db, { own: true }, context);
   return [
     renderAsk(context.ask, DEFAULT_OWNER_EVENING_ASK),
     "",
     `--- Context supplied by the app, not by me. Today is ${context.date} in ${context.timezone}.`,
     "This turn uses no tools and saves nothing; my answer is the entry.",
-    finished.length ? `Finished today: ${finished.map(title => `"${title}"`).join(", ")}.` : "Nothing was finished today.",
-    going.length ? `Still in progress: ${going.map(title => `"${title}"`).join(", ")}.` : "Nothing is marked in progress.",
+    RECORDS_NOT_INSTRUCTIONS,
+    finished.length ? `Finished today: ${titleList(finished)}.` : "Nothing was finished today.",
+    going.length ? `Still in progress: ${titleList(going)}.` : "Nothing is marked in progress.",
     "Mention at most one of these if it helps the question land; do not recite them.",
     ...recentMemoryContext(db, { own: true }, context.date, context.timezone),
   ].join("\n");

@@ -262,7 +262,21 @@ export type ToolTurnContext = {
   sentText?: boolean;
   /** How a tool that texts mid-turn sends; the active provider unless a test supplies one. */
   sendSms?: SmsSender;
+  /**
+   * The kind of app-composed turn this is (`group_morning`, `evening_checkin`,
+   * …), when it is one. The check-ins are told they use no tools; this is
+   * what makes it so whatever the text — or a record quoted in it — says.
+   */
+  appTurn?: string;
 };
+
+/**
+ * App-composed turns that only write a message, never a record: the check-ins
+ * and the wording draft. Their instruction quotes records people saved — in a
+ * group, anyone in it — so "no tools" cannot be left to the prompt. Digests
+ * and reflection drafts are app-composed too, but are meant to read.
+ */
+const NO_TOOL_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "checkin_ask_draft"]);
 
 /**
  * Tools that read the owner's working life or their Atlassian account. None of
@@ -412,6 +426,12 @@ export async function executeAgentTool(
   // as a 400 through the shared error handler.
   const schema = toolInput[name as ToolName];
   if (schema) input = schema.parse(input) as Input;
+  if (context?.appTurn && NO_TOOL_APP_TURNS.has(context.appTurn)) {
+    throw new Error(
+      `This turn is the app asking you to write the ${context.appTurn.replace(/_/g, " ")}; it uses no tools`
+      + (name === "stay_quiet" ? " — there is no message to stay quiet on" : ", so write the text instead"),
+    );
+  }
   const scope = context?.scope;
   if (scope && OWNER_ONLY_TOOLS.has(name)) throw new Error(`${name} is not available in a group chat`);
 

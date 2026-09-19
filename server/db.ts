@@ -283,7 +283,7 @@ CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS scheduled_dispatches (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin')),
+  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin','evening_checkin')),
   idempotency_key TEXT NOT NULL UNIQUE,
   scheduled_for TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending'
@@ -328,6 +328,39 @@ function dispatchKindAllows(db: Db, kind: string): boolean {
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='scheduled_dispatches'",
   ).get() as { sql?: string } | undefined)?.sql || "");
   return sql.includes(`'${kind}'`);
+}
+
+/**
+ * Widens the dispatch kind CHECK by copying the table and renaming it, the
+ * same way v11 and v12 did, carrying `available_at` when the table being
+ * copied already has it. SQLite cannot alter a CHECK in place.
+ */
+function rebuildScheduledDispatches(db: Db, suffix: string, kinds: string[]): void {
+  const carried = columns(db, "scheduled_dispatches").has("available_at")
+    ? "id,user_id,kind,idempotency_key,scheduled_for,status,attempts,available_at,provider_message_id,last_error,created_at,updated_at"
+    : "id,user_id,kind,idempotency_key,scheduled_for,status,attempts,NULL,provider_message_id,last_error,created_at,updated_at";
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE scheduled_dispatches_${suffix} (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN (${kinds.map(kind => `'${kind}'`).join(",")})),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        scheduled_for TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending','processing','sent','failed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT,
+        provider_message_id TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO scheduled_dispatches_${suffix} SELECT ${carried} FROM scheduled_dispatches;
+      DROP TABLE scheduled_dispatches;
+      ALTER TABLE scheduled_dispatches_${suffix} RENAME TO scheduled_dispatches;
+    `);
+  })();
 }
 
 function migrateLegacyV1(db: Db): void {
@@ -790,36 +823,21 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
   ).get();
   if (!groupCheckinDispatchApplied) {
     // Group check-ins claim a dispatch row per group per local day, so the kind
-    // CHECK has to admit 'group_checkin'. Same copy and rename as v11 and v12,
-    // carrying available_at when the table being copied has it.
-    if (!dispatchKindAllows(db, "group_checkin")) {
-      const carried = columns(db, "scheduled_dispatches").has("available_at")
-        ? "id,user_id,kind,idempotency_key,scheduled_for,status,attempts,available_at,provider_message_id,last_error,created_at,updated_at"
-        : "id,user_id,kind,idempotency_key,scheduled_for,status,attempts,NULL,provider_message_id,last_error,created_at,updated_at";
-      db.transaction(() => {
-        db.exec(`
-          CREATE TABLE scheduled_dispatches_v15 (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin')),
-            idempotency_key TEXT NOT NULL UNIQUE,
-            scheduled_for TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending'
-              CHECK(status IN ('pending','processing','sent','failed')),
-            attempts INTEGER NOT NULL DEFAULT 0,
-            available_at TEXT,
-            provider_message_id TEXT,
-            last_error TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-          );
-          INSERT INTO scheduled_dispatches_v15 SELECT ${carried} FROM scheduled_dispatches;
-          DROP TABLE scheduled_dispatches;
-          ALTER TABLE scheduled_dispatches_v15 RENAME TO scheduled_dispatches;
-        `);
-      })();
-    }
+    // CHECK has to admit 'group_checkin'.
+    if (!dispatchKindAllows(db, "group_checkin")) rebuildScheduledDispatches(db, "v15", ["daily_digest", "reminder", "digest_brief", "group_checkin"]);
     db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(15,?)").run(now());
+  }
+  const eveningCheckinDispatchApplied = db.prepare(
+    "SELECT 1 found FROM schema_migrations WHERE version=16",
+  ).get();
+  if (!eveningCheckinDispatchApplied) {
+    // The owner's evening check-in was first filed under 'daily_digest'; its
+    // own kind keeps the column meaning what it says. Existing rows are renamed.
+    if (!dispatchKindAllows(db, "evening_checkin")) {
+      rebuildScheduledDispatches(db, "v16", ["daily_digest", "reminder", "digest_brief", "group_checkin", "evening_checkin"]);
+    }
+    db.prepare("UPDATE scheduled_dispatches SET kind='evening_checkin' WHERE kind='daily_digest' AND idempotency_key LIKE 'evening_checkin:%'").run();
+    db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(16,?)").run(now());
   }
   // NeuralSearch is opt-in: it is a paid add-on, so an application without the
   // entitlement gets plain keyword search rather than a failed setup.

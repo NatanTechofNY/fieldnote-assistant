@@ -334,9 +334,15 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
                 : typeof message.metadata.speaker === "string" ? redact.phone(message.metadata.speaker)
                   : null
               : null;
+            // A copy of a group's check-in echoed to the owner says which group it came from.
+            const echoOf = message.role === "assistant" && typeof message.metadata.copyOf === "string"
+              ? `Copy of ${typeof message.metadata.groupName === "string" ? `${message.metadata.groupName}’s` : "a group’s"} ${
+                (SCHEDULED_KINDS.get(String(message.metadata.kind)) ?? "check-in").replace(/^Group /, "").toLowerCase()}`
+              : null;
             return <article key={message.id} ref={node => { if (node) messageRefs.current.set(message.id, node); else messageRefs.current.delete(message.id); }} className={`history-message ${message.direction} role-${message.role} ${isJumpTarget ? "search-hit" : ""}`}>
               <div className="history-bubble">
                 {speakerName && <div className="history-speaker">{speakerName}</div>}
+                {echoOf && <div className="history-speaker">{echoOf}</div>}
                 {parent && <div className="history-reply-quote">
                   <CornerUpLeft size={11}/>
                   <span>{parent.content}</span>

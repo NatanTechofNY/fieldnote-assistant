@@ -469,6 +469,16 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       },
       createdAt: "2026-07-20T20:00:08.000Z",
       updatedAt: "2026-07-20T20:00:08.000Z",
+    }, {
+      // A group's evening question echoed to the owner's own line, marked as the copy it is.
+      id: "message_test_copy",
+      direction: "outbound",
+      role: "assistant",
+      content: "[Home] Evening, both! How did today go?",
+      status: "sent",
+      metadata: { kind: "group_evening", date: "2026-07-20", groupId: "3fa85f64-5717-4562-b3fc-2c963f66afa6", copyOf: "area_group", groupName: "Home", internal: true },
+      createdAt: "2026-07-20T20:30:00.000Z",
+      updatedAt: "2026-07-20T20:30:00.000Z",
     }],
   }));
   if (url.includes("/api/conversations/channels/thread_reflection/messages")) return new Response(JSON.stringify({
@@ -1371,7 +1381,7 @@ it("saves the owner's evening check-in time with the SMS schedule", async () => 
   await waitFor(() => expect(notificationSaves).toHaveLength(1));
   expect(notificationSaves[0].eveningCheckinTime).toBe(null);
 
-  expect(screen.queryByLabelText("My evening check-in wording")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("My evening check-in wording")).not.toBeVisible();
   await userEvent.click(screen.getByRole("checkbox", { name: "My evening check-in" }));
   expect(time).toBeEnabled();
   fireEvent.change(time, { target: { value: "21:15" } });
@@ -1386,6 +1396,11 @@ it("saves the owner's evening check-in time with the SMS schedule", async () => 
   expect(wording.placeholder).toBe("Ask me how today went, in one warm line.");
   expect(wording.value).toBe("");
   fireEvent.change(wording, { target: { value: "  Ask me for a high and a low, then a mood 1–5.  " } });
+  // Switching the check-in off and back on keeps the typed wording: the field and what Save sends agree.
+  await userEvent.click(screen.getByRole("checkbox", { name: "My evening check-in" }));
+  expect(wording).not.toBeVisible();
+  await userEvent.click(screen.getByRole("checkbox", { name: "My evening check-in" }));
+  expect(screen.getByLabelText("My evening check-in wording")).toHaveValue("  Ask me for a high and a low, then a mood 1–5.  ");
   await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
   await waitFor(() => expect(notificationSaves).toHaveLength(3));
   expect(notificationSaves[2].eveningCheckinPrompt).toBe("Ask me for a high and a low, then a mood 1–5.");
@@ -1425,7 +1440,12 @@ it("schedules a group's check-ins, and a copy to the owner, from the Group chats
   const eveningTime = screen.getByLabelText("Evening check-in time for Home");
   await userEvent.click(screen.getByLabelText("Evening check-in for Home"));
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { evening_checkin_time: "20:30" } }));
+  // A time input fires change per segment; the time saves once the field is left.
+  const patchesBeforeTyping = lifeAreaPatches.length;
   fireEvent.change(eveningTime, { target: { value: "21:00" } });
+  expect(eveningTime).toHaveValue("21:00");
+  expect(lifeAreaPatches).toHaveLength(patchesBeforeTyping);
+  fireEvent.blur(eveningTime);
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { evening_checkin_time: "21:00" } }));
 
   const copy = screen.getByLabelText("Also text me a copy for Home");
@@ -1741,6 +1761,10 @@ it("renders complete channel conversation history", async () => {
   const threaded = [...document.querySelectorAll(".history-message")]
     .find(node => node.textContent?.includes("Saved it as today's journal entry."));
   expect(threaded?.querySelector(".history-reply-quote")).toHaveTextContent("Remember this conversation");
+  // A group's check-in echoed to the owner's own line says which group it came from.
+  const echoed = [...document.querySelectorAll(".history-message")]
+    .find(node => node.textContent?.includes("[Home] Evening, both!"));
+  expect(echoed?.querySelector(".history-speaker")).toHaveTextContent("Copy of Home’s evening check-in");
 
   // A group chat is titled by its name rather than a group id, and several
   // people write into it, so each of their bubbles says who.

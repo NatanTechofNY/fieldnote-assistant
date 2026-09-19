@@ -3,7 +3,7 @@ import { getNotificationPreferences, type SmsProvider } from "./integrations.ts"
 import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
-import { liftProgressMark, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "./agent-runner.ts";
+import { failAgentTurn, liftProgressMark, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
 import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "./group-checkin.ts";
@@ -397,7 +397,7 @@ async function deliverReminder(
  */
 function claimDispatch(
   db: Db,
-  kind: "daily_digest" | "digest_brief" | "group_checkin",
+  kind: "daily_digest" | "digest_brief" | "group_checkin" | "evening_checkin",
   key: string,
   scheduledFor: string,
 ): string | null {
@@ -565,7 +565,7 @@ async function deliverEveningCheckin(
   runAgent: typeof runSmsAgent,
   send: typeof sendSms,
 ): Promise<void> {
-  const dispatchId = claimDispatch(db, "daily_digest", `evening_checkin:${USER_ID}:${local.date}`, now());
+  const dispatchId = claimDispatch(db, "evening_checkin", `evening_checkin:${USER_ID}:${local.date}`, now());
   if (!dispatchId) return;
   try {
     const prompt = composeEveningCheckinTurn(db, { date: local.date, timezone, ask });
@@ -591,6 +591,7 @@ async function deliverEveningCheckin(
 type CheckinAreaRow = {
   id: string;
   name: string;
+  thread_id: string;
   address: string;
   morning_checkin_time: string | null;
   evening_checkin_time: string | null;
@@ -601,7 +602,7 @@ type CheckinAreaRow = {
 
 function checkinAreas(db: Db): CheckinAreaRow[] {
   return db.prepare(`
-    SELECT la.id,la.name,t.address,la.morning_checkin_time,la.evening_checkin_time,la.checkin_copy_to_owner,
+    SELECT la.id,la.name,la.thread_id,t.address,la.morning_checkin_time,la.evening_checkin_time,la.checkin_copy_to_owner,
       la.morning_checkin_prompt,la.evening_checkin_prompt
     FROM life_areas la JOIN channel_threads t ON t.id=la.thread_id
     WHERE la.user_id=? AND (la.morning_checkin_time IS NOT NULL OR la.evening_checkin_time IS NOT NULL)
@@ -616,10 +617,15 @@ function checkinAreas(db: Db): CheckinAreaRow[] {
  * carries the group's scope, so whatever the agent reads while writing stays
  * the group's, and the message lands where the replies to it will. The
  * instruction row is internal and left out of later windows by
- * `threadHistory()`; the reply row stays, tagged with the kind, so "laundry's
- * done" or a line about the day is read against the question it answers. One
- * dispatch per group per kind per local day; a morning with nothing to say
- * takes its slot without sending, so the tick does not recompute all day.
+ * `threadHistory()`; the reply row is public — it is the message the room
+ * receives — tagged with the kind, so "laundry's done" or a line about the day
+ * is read against the question it answers. Because the reply is archived
+ * before the send, a send that fails marks both rows failed: otherwise the
+ * retry would read its own undelivered note and the archive would show a
+ * message nobody received. One dispatch per group per kind per local day,
+ * keyed on the group rather than its area (an area can be removed and made
+ * again); a morning with nothing to say takes its slot without sending, so the
+ * tick does not recompute all day.
  */
 async function deliverGroupCheckin(
   db: Db,
@@ -634,7 +640,7 @@ async function deliverGroupCheckin(
 ): Promise<void> {
   const groupId = groupIdOfAddress(area.address);
   if (!groupId) return;
-  const dispatchId = claimDispatch(db, "group_checkin", `group_checkin:${kind}:${area.id}:${local.date}`, now());
+  const dispatchId = claimDispatch(db, "group_checkin", `group_checkin:${kind}:${groupId}:${local.date}`, now());
   if (!dispatchId) return;
   const metaKind = kind === "morning" ? "group_morning" : "group_evening";
   try {
@@ -645,7 +651,7 @@ async function deliverGroupCheckin(
       return;
     }
     const checkinArea = {
-      id: area.id, name: area.name, groupId,
+      id: area.id, name: area.name, groupId, threadId: area.thread_id,
       morningAsk: area.morning_checkin_prompt, eveningAsk: area.evening_checkin_prompt,
     };
     const prompt = kind === "morning"
@@ -653,15 +659,23 @@ async function deliverGroupCheckin(
       : composeGroupEveningTurn(db, checkinArea, { date: local.date, timezone });
     const response = await runAgent(db, search, area.address, prompt, undefined, {
       internal: true,
+      replyInternal: false,
       inbound: { provider: "sendblue", groupId },
       userMessageMetadata: { kind: metaKind, groupId, date: local.date },
       assistantMetadata: { kind: metaKind, date: local.date },
       sendSms: send,
     });
     if (!response.text) throw new Error(`The ${kind} check-in came back empty`);
-    const sent = await send(db, area.address, response.text, { groupId });
+    let sent: Awaited<ReturnType<typeof send>>;
+    try {
+      sent = await send(db, area.address, response.text, { groupId });
+    } catch (error) {
+      // Nobody received it: the turn leaves the conversation before the retry composes anew.
+      failAgentTurn(db, response);
+      throw error;
+    }
     // The runner already archived the reply on the group thread; this pins the provider's id to it.
-    recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status);
+    recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status, undefined, response.replyMessageId);
     search.flushSoon();
     db.prepare(`
       UPDATE scheduled_dispatches SET status='sent',provider_message_id=?,updated_at=? WHERE id=?
@@ -670,12 +684,18 @@ async function deliverGroupCheckin(
      * The owner's copy, when asked for, on their own number and their own
      * thread. Best effort once the group has its message: the dispatch is
      * settled, so a copy that fails is logged rather than resending the group.
+     * It is an echo, not a question asked of the owner: the text names the
+     * group it came from, and the row is marked a copy so `threadHistory()`
+     * leaves it out of the owner's window — a reply to it on the owner's own
+     * line would otherwise read as the answer to an evening check-in of
+     * theirs — and the index does not carry the group's message twice.
      */
     if (area.checkin_copy_to_owner) {
       try {
-        const copy = await send(db, recipient, response.text);
-        recordOutboundChannelMessage(db, "sms", recipient, response.text, copy.sid, copy.status, {
-          kind: metaKind, date: local.date, groupId, copyOf: area.id, groupName: area.name,
+        const copyText = `[${area.name}] ${response.text}`;
+        const copy = await send(db, recipient, copyText);
+        recordOutboundChannelMessage(db, "sms", recipient, copyText, copy.sid, copy.status, {
+          kind: metaKind, date: local.date, groupId, copyOf: area.id, groupName: area.name, internal: true,
         });
       } catch (error) {
         console.warn(`Could not copy the ${kind} check-in to the owner:`, error instanceof Error ? error.message : error);

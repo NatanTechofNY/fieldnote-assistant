@@ -162,10 +162,14 @@ export const askDraftInput = z.object({
   brief: z.string().trim().min(1, "Say what this check-in should be like").max(500, "Keep the brief under 500 characters"),
   life_area_id: z.string().trim().min(1).max(100).optional(),
   current: checkinPrompt.nullable().optional(),
-}).strict().refine(
-  value => value.kind === "owner_evening" || value.life_area_id !== undefined,
-  { message: "Name the group chat's classification", path: ["life_area_id"] },
-);
+}).strict().superRefine((value, context) => {
+  if (value.kind !== "owner_evening" && value.life_area_id === undefined) {
+    context.addIssue({ code: "custom", message: "Name the group chat's classification", path: ["life_area_id"] });
+  }
+  if (value.kind === "owner_evening" && value.life_area_id !== undefined) {
+    context.addIssue({ code: "custom", message: "The owner's own evening has no group", path: ["life_area_id"] });
+  }
+});
 
 /**
  * A patch may also set the check-in times a group chat's area carries: the

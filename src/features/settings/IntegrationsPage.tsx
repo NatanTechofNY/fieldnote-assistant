@@ -421,7 +421,9 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             <span><strong>Evening check-in</strong><small>One question each evening about how the day went; your answer becomes that day&rsquo;s journal entry.</small></span>
             <input type="checkbox" aria-label="My evening check-in" checked={eveningEnabled} onChange={e => setEveningEnabled(e.target.checked)}/>
           </label>
-          {eveningEnabled && <details className="checkin-wording delivery-suboption">
+          {/* Hidden rather than unmounted while the switch is off, so wording typed and then
+              toggled away is still what the field shows — and what Save sends. */}
+          <details className="checkin-wording delivery-suboption" hidden={!eveningEnabled}>
             <summary>
               <PenLine size={13} aria-hidden="true"/>
               <span>Wording</span>
@@ -443,7 +445,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               />
               <small className="field-hint">Saved with the SMS schedule below.</small>
             </div>
-          </details>}
+          </details>
         </div>
 
         <div className="form-grid delivery-destination">

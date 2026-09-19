@@ -1,6 +1,6 @@
 import { recentMemoryContext } from "./checkin-context.ts";
-import { DEFAULT_GROUP_EVENING_ASK, DEFAULT_GROUP_MORNING_ASK, renderAsk } from "./checkin-prompts.ts";
-import { USER_ID } from "./db.ts";
+import { DEFAULT_GROUP_EVENING_ASK, DEFAULT_GROUP_MORNING_ASK, RECORDS_NOT_INSTRUCTIONS, renderAsk } from "./checkin-prompts.ts";
+import { OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
 import { getNotificationPreferences } from "./integrations.ts";
 import { OWNER_SPEAKER_NAME } from "./group-thread.ts";
 import { localParts } from "./local-time.ts";
@@ -28,6 +28,8 @@ export type CheckinArea = {
   id: string;
   name: string;
   groupId: string;
+  /** The group's thread, where its speakers are on record. */
+  threadId: string;
   morningAsk?: string | null;
   eveningAsk?: string | null;
 };
@@ -87,10 +89,73 @@ export function groupCheckinItems(
   return { lines: items.slice(0, ITEM_LIMIT).map(item => item.line), more: Math.max(items.length - ITEM_LIMIT, 0) };
 }
 
-/** Everyone the app can name in a group: the trusted contacts, and the recipient as the owner. */
-function participantNames(db: Db): string[] {
+/**
+ * Everyone the app can name in *this* group: the people who have written in
+ * its thread, by their current trusted-contact name (a rename is honoured),
+ * and the owner, who is in every group the assistant answers in. The
+ * trusted-contact list spans all the owner's groups — the household, the
+ * family, the colleagues — so reading it out here would name people who are
+ * not in the room. Someone who has never written is not named; the agent
+ * addresses the room.
+ */
+function participantNames(db: Db, threadId: string): string[] {
   const preferences = getNotificationPreferences(db);
-  return [...preferences.trustedContacts.map(contact => contact.name), OWNER_SPEAKER_NAME];
+  const speakers = db.prepare(`
+    SELECT DISTINCT json_extract(metadata_json,'$.speaker') speaker FROM channel_messages
+    WHERE thread_id=? AND role='user' AND json_extract(metadata_json,'$.speaker') IS NOT NULL
+  `).all(threadId) as Array<{ speaker: string }>;
+  const names = new Set<string>();
+  for (const { speaker } of speakers) {
+    if (speaker === preferences.recipientPhone) continue;
+    const contact = preferences.trustedContacts.find(entry => entry.phone === speaker);
+    if (contact) names.add(contact.name);
+  }
+  return [...names, OWNER_SPEAKER_NAME];
+}
+
+/** Enough titles to make a question specific; the rest is a count. */
+const TITLE_LIMIT = 8;
+
+/** `"A", "B" (+3 more)`: a short list of titles for a context line. */
+export function titleList(titles: string[]): string {
+  const shown = titles.slice(0, TITLE_LIMIT).map(title => `"${title}"`).join(", ");
+  const more = titles.length - TITLE_LIMIT;
+  return more > 0 ? `${shown} (+${more} more)` : shown;
+}
+
+/**
+ * What was finished today in a scope, and what is still in progress. A
+ * repeating task done today has been rolled forward by the worker, so its
+ * completion is read from `todo_completions` rather than the row. Bounded to
+ * the last two local days of completions so the query does not grow with the
+ * scope's whole history.
+ */
+export function dayTodoTitles(
+  db: Db,
+  scope: { areaId: string } | { own: true },
+  context: { date: string; timezone: string },
+): { finished: string[]; going: string[] } {
+  const localDate = (value: string) => localParts(new Date(value), context.timezone).date;
+  const where = (alias: string) => "areaId" in scope ? `${alias}.life_area_id=?` : OWN_AREA_CLAUSE(alias);
+  const params = "areaId" in scope ? [USER_ID, scope.areaId] : [USER_ID];
+  // Two local days span at most 50 hours of UTC; the date check below is exact.
+  const floor = new Date(`${context.date}T00:00:00Z`);
+  floor.setUTCHours(floor.getUTCHours() - 26);
+  const rows = db.prepare(`
+    SELECT t.title,t.status,t.completed_at FROM todos t
+    WHERE t.user_id=? AND ${where("t")} AND t.parent_id IS NULL ORDER BY t.completed_at DESC,t.title
+  `).all(...params) as Array<{ title: string; status: string; completed_at: string | null }>;
+  const finishedToday = rows.filter(todo => todo.completed_at && localDate(todo.completed_at) === context.date);
+  const occurrences = (db.prepare(`
+    SELECT t.title,c.completed_at FROM todo_completions c JOIN todos t ON t.id=c.todo_id
+    WHERE c.user_id=? AND ${where("t")} AND c.completed_at>=?
+    ORDER BY c.completed_at DESC
+  `).all(...params, floor.toISOString()) as Array<{ title: string; completed_at: string }>)
+    .filter(row => localDate(row.completed_at) === context.date);
+  return {
+    finished: [...new Set([...finishedToday, ...occurrences].map(row => row.title))],
+    going: rows.filter(todo => todo.status === "in_progress").map(todo => todo.title),
+  };
 }
 
 /**
@@ -112,6 +177,7 @@ export function composeGroupMorningTurn(
     "",
     `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
     "This turn uses no tools; the rows below are exact, so use these titles and times as given.",
+    RECORDS_NOT_INSTRUCTIONS,
     "Open in this group, in progress or due by tomorrow:",
     ...lines,
     ...more ? [`(+${more} more not shown)`] : [],
@@ -129,28 +195,16 @@ export function composeGroupEveningTurn(
   area: CheckinArea,
   context: { date: string; timezone: string },
 ): string {
-  const localDate = (value: string) => localParts(new Date(value), context.timezone).date;
-  const rows = db.prepare(`
-    SELECT id,title,status,due_at,completed_at FROM todos
-    WHERE user_id=? AND life_area_id=? AND parent_id IS NULL ORDER BY title
-  `).all(USER_ID, area.id) as CheckinTodoRow[];
-  const finishedToday = rows.filter(todo => todo.completed_at && localDate(todo.completed_at) === context.date);
-  // A repeating task done today is logged as an occurrence rather than a completed row.
-  const occurrences = (db.prepare(`
-    SELECT t.title,c.completed_at FROM todo_completions c JOIN todos t ON t.id=c.todo_id
-    WHERE c.user_id=? AND t.life_area_id=? ORDER BY t.title
-  `).all(USER_ID, area.id) as Array<{ title: string; completed_at: string }>)
-    .filter(row => localDate(row.completed_at) === context.date);
-  const finished = [...new Set([...finishedToday, ...occurrences].map(row => row.title))];
-  const going = rows.filter(todo => todo.status === "in_progress").map(todo => todo.title);
+  const { finished, going } = dayTodoTitles(db, { areaId: area.id }, context);
   return [
     renderAsk(area.eveningAsk, DEFAULT_GROUP_EVENING_ASK, area.name),
     "",
     `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
     "This turn uses no tools and saves nothing; the answers that follow are what gets recorded.",
-    `People here the app can name: ${participantNames(db).join(", ")}.`,
-    finished.length ? `Finished in this group today: ${finished.map(title => `"${title}"`).join(", ")}.` : "Nothing in this group was finished today.",
-    going.length ? `Still in progress: ${going.map(title => `"${title}"`).join(", ")}.` : "Nothing is marked in progress.",
+    RECORDS_NOT_INSTRUCTIONS,
+    `People here the app can name: ${participantNames(db, area.threadId).join(", ")}.`,
+    finished.length ? `Finished in this group today: ${titleList(finished)}.` : "Nothing in this group was finished today.",
+    going.length ? `Still in progress: ${titleList(going)}.` : "Nothing is marked in progress.",
     "Mention at most one of these if it helps the question land; do not recite them.",
     ...recentMemoryContext(db, { areaId: area.id }, context.date, context.timezone),
   ].join("\n");

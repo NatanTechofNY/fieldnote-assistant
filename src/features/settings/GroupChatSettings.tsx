@@ -126,7 +126,10 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
 /**
  * One scheduled check-in for a group: a switch and, while it is on, the local
  * time it goes out. The time is kept while the switch is off so turning it back
- * on brings back the hour that was chosen rather than the default.
+ * on brings back the hour that was chosen rather than the default. The field
+ * shows what was typed and saves when it is left or Enter is pressed: a time
+ * input fires `change` per segment, and saving each would PATCH three times
+ * and snap the field back between them.
  */
 function CheckinControl({ icon: Icon, label, hint, area, value, fallback, onChange }: {
   icon: typeof Sun;
@@ -137,27 +140,30 @@ function CheckinControl({ icon: Icon, label, hint, area, value, fallback, onChan
   fallback: string;
   onChange: (time: string | null) => void;
 }) {
-  const [remembered, setRemembered] = useState(value ?? fallback);
+  // The typed time, kept against the saved one so a save landing elsewhere
+  // (the switch, a refetch) shows the new value without an effect.
+  const [state, setState] = useState({ base: value, typed: value ?? fallback });
+  const typed = state.base === value ? state.typed : (value ?? state.typed);
   const on = value !== null;
+  const commit = () => { if (typed && typed !== value) onChange(typed); };
   return <label className={`life-area-checkin ${on ? "on" : ""}`} title={hint}>
     <input
       type="checkbox"
       checked={on}
       aria-label={`${label} for ${area.name}`}
-      onChange={event => onChange(event.target.checked ? remembered : null)}
+      onChange={event => onChange(event.target.checked ? typed : null)}
     />
     <Icon size={12} aria-hidden="true"/>
     <span>{label}</span>
     <input
       className="input"
       type="time"
-      value={on ? value : remembered}
+      value={typed}
       disabled={!on}
       aria-label={`${label} time for ${area.name}`}
-      onChange={event => {
-        setRemembered(event.target.value);
-        if (event.target.value) onChange(event.target.value);
-      }}
+      onChange={event => setState({ base: value, typed: event.target.value })}
+      onBlur={commit}
+      onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); commit(); } }}
     />
   </label>;
 }
