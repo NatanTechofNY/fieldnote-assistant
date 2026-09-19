@@ -1,3 +1,4 @@
+import { recentMemoryContext } from "./checkin-context.ts";
 import { DEFAULT_GROUP_EVENING_ASK, DEFAULT_GROUP_MORNING_ASK, renderAsk } from "./checkin-prompts.ts";
 import { USER_ID } from "./db.ts";
 import { getNotificationPreferences } from "./integrations.ts";
@@ -114,6 +115,7 @@ export function composeGroupMorningTurn(
     "Open in this group, in progress or due by tomorrow:",
     ...lines,
     ...more ? [`(+${more} more not shown)`] : [],
+    ...recentMemoryContext(db, { areaId: area.id }, context.date, context.timezone),
   ].join("\n");
 }
 
@@ -150,5 +152,6 @@ export function composeGroupEveningTurn(
     finished.length ? `Finished in this group today: ${finished.map(title => `"${title}"`).join(", ")}.` : "Nothing in this group was finished today.",
     going.length ? `Still in progress: ${going.map(title => `"${title}"`).join(", ")}.` : "Nothing is marked in progress.",
     "Mention at most one of these if it helps the question land; do not recite them.",
+    ...recentMemoryContext(db, { areaId: area.id }, context.date, context.timezone),
   ].join("\n");
 }

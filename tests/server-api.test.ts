@@ -5992,6 +5992,15 @@ describe("Sendblue provider", () => {
       const going = (await api.post("/api/todos").send({ title: "Shopping", life_area_id: area.id, due_at: "2030-01-19T21:00:00.000Z" }).expect(201)).body.data;
       await api.patch(`/api/todos/${going.id}/status`).send({ status: "in_progress" }).expect(200);
       await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30", evening_checkin_time: "20:30" }).expect(200);
+      // What was saved lately: yesterday's shared entry and a note today in the group; the owner's own
+      // journal and an old group entry stay out of the room.
+      await api.post("/api/memories").send({
+        kind: "journal", title: "Tue Jan 14 — Home", content: "Sarah: Wiped out after the move.\nthe owner: Boxes everywhere but we're in.",
+        mood_label: "Sarah tired · the owner relieved", mood_score: 3, life_area_id: area.id, occurred_at: "2030-01-14T21:00:00.000Z", tags: ["end-of-day", "group"],
+      }).expect(201);
+      await api.post("/api/memories").send({ kind: "note", content: "Plumber can come Thursday between 2 and 4.", life_area_id: area.id, occurred_at: "2030-01-15T14:00:00.000Z" }).expect(201);
+      await api.post("/api/memories").send({ kind: "journal", content: "Private: nervous about the review.", mood_label: "anxious", mood_score: 2, life_area_id: "area_work", occurred_at: "2030-01-14T22:00:00.000Z" }).expect(201);
+      await api.post("/api/memories").send({ kind: "note", content: "Old: bought the new mop.", life_area_id: area.id, occurred_at: "2030-01-10T12:00:00.000Z" }).expect(201);
 
       const prompts: string[] = [];
       const sends: string[] = [];
@@ -6016,6 +6025,16 @@ describe("Sendblue provider", () => {
       assert.match(evening, /Finished in this group today: "Laundry"/);
       assert.match(evening, /Still in progress: "Shopping"/);
       assert.match(evening, /People here the app can name: Sarah, the owner/);
+      const saved = evening.slice(evening.indexOf("Saved in this group today or yesterday"));
+      assert.deepEqual(saved.split("\n"), [
+        "Saved in this group today or yesterday (notes and journal entries), newest first:",
+        "- today, note: Plumber can come Thursday between 2 and 4.",
+        '- yesterday, journal entry: "Tue Jan 14 — Home" — Sarah: Wiped out after the move. the owner: Boxes everywhere but we\'re in. (mood: Sarah tired · the owner relieved 3/5)',
+        "Bring one in only if it fits — yesterday's mood to ask how tonight compares, a note that bears on a task — and never recite them.",
+      ], "the group's last two days, newest first; the owner's private journal and older notes stay out");
+      const morning = prompts.find(prompt => prompt.startsWith("Write this morning's check-in"))!;
+      assert.match(morning, /Saved in this group today or yesterday[\s\S]*Plumber can come Thursday/, "the morning note sees the same two days");
+      assert.doesNotMatch(morning, /nervous about the review/);
 
       // Sarah answers first: one entry is created for the day, in her words.
       const memoryParts = (body: string) => (JSON.parse(body) as { messages: Array<{ parts: Array<{ type: string; output?: { data?: { id?: string } } }> }> })
@@ -6028,7 +6047,9 @@ describe("Sendblue provider", () => {
         },
       }], "Noted, Sarah — hope you get a rest.");
       await runSmsAgent(db, fakeSearch(db), address, "Long day but the laundry's finally done. Tired, 3.", "SB_sarah_day", groupTurnOptions(sarah.fetcher));
-      const entry = db.prepare("SELECT id,life_area_id,tags_json,mood_score FROM memories").get() as { id: string; life_area_id: string; tags_json: string; mood_score: number };
+      // Today's entries, apart from what was seeded above.
+      const todays = "FROM memories WHERE occurred_at>='2030-01-15T20:00:00.000Z'";
+      const entry = db.prepare(`SELECT id,life_area_id,tags_json,mood_score ${todays}`).get() as { id: string; life_area_id: string; tags_json: string; mood_score: number };
       assert.equal(entry.life_area_id, area.id, "filed under the group whatever the agent passed");
       assert.deepEqual(JSON.parse(entry.tags_json), ["end-of-day", "group"]);
 
@@ -6051,7 +6072,7 @@ describe("Sendblue provider", () => {
       };
       await runSmsAgent(db, fakeSearch(db), address, "Good one, got through the backlog. Content, 4.", "SB_owner_day", groupTurnOptions(owner, RECIPIENT, "the owner"));
       assert.equal(updated, true, "the owner's turn saw Sarah's create and updated it");
-      const after = db.prepare("SELECT id,content,mood_label,mood_score FROM memories").all() as Array<{ id: string; content: string; mood_label: string; mood_score: number }>;
+      const after = db.prepare(`SELECT id,content,mood_label,mood_score ${todays}`).all() as Array<{ id: string; content: string; mood_label: string; mood_score: number }>;
       assert.equal(after.length, 1, "one entry for the day, not one per person");
       assert.equal(after[0].id, entry.id);
       assert.match(after[0].content, /^Sarah: .*\nthe owner: /);
@@ -7357,6 +7378,7 @@ describe("worker scheduling", () => {
     assert.deepEqual(drafts, [{ address: `digest:${RECIPIENT}`, internal: true, kind: "evening_checkin" }]);
     assert.match(prompts[0], /^Ask me how today went/);
     assert.match(prompts[0], /Finished today: "Ship the release"/);
+    assert.match(prompts[0], /Nothing was saved in my own areas today or yesterday\./, "no entries yet, and it says so rather than leaving a gap");
     const dispatch = db.prepare("SELECT kind,status,idempotency_key FROM scheduled_dispatches").get() as { kind: string; status: string; idempotency_key: string };
     assert.deepEqual(dispatch, { kind: "daily_digest", status: "sent", idempotency_key: `evening_checkin:${USER_ID}:2030-01-15` });
     // Recorded on the owner's real thread, so the reply is read with the question right above it.
@@ -7398,6 +7420,18 @@ describe("worker scheduling", () => {
     assert.equal(saved.eveningCheckinPrompt, "Ask me for one win and one thing I'd do differently, then a mood 1–5.", "trimmed");
     assert.equal((await api.get("/api/integrations").expect(200)).body.data.checkinDefaults.ownerEvening.slice(0, 21), "Ask me how today went");
 
+    // Yesterday's own entry comes along; a group's entry from the same evening does not.
+    await api.post("/api/memories").send({
+      kind: "journal", content: "Flat day. Meetings ate it.", mood_label: "flat", mood_score: 2, life_area_id: "area_work", occurred_at: "2030-01-14T22:00:00.000Z",
+    }).expect(201);
+    const timestamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_family',?,'sms','group:fam','cnv_family',?,?)
+    `).run(USER_ID, timestamp, timestamp);
+    const family = ensureGroupLifeArea(db, "thread_family", "Family");
+    await api.post("/api/memories").send({ kind: "journal", content: "Mom: Lovely dinner.", life_area_id: family.id, occurred_at: "2030-01-14T22:30:00.000Z" }).expect(201);
+
     const prompts: string[] = [];
     const dependencies = {
       sendSms: async () => ({ sid: "SM_1", status: "queued" }),
@@ -7412,6 +7446,8 @@ describe("worker scheduling", () => {
     assert.equal(prompts.length, 1);
     assert.match(prompts[0], /^Ask me for one win and one thing I'd do differently, then a mood 1–5\.\n\n--- Context supplied by the app/);
     assert.match(prompts[0], /This turn uses no tools and saves nothing; my answer is the entry\./, "the rule is the app's, not the wording's");
+    assert.match(prompts[0], /Saved in my own areas today or yesterday.*\n- yesterday, journal entry: Flat day\. Meetings ate it\. \(mood: flat 2\/5\)/);
+    assert.doesNotMatch(prompts[0], /Lovely dinner/, "a group's entry is the group's");
   });
 
   /**

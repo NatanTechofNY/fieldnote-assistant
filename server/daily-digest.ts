@@ -1,3 +1,4 @@
+import { recentMemoryContext } from "./checkin-context.ts";
 import { DEFAULT_OWNER_EVENING_ASK, renderAsk } from "./checkin-prompts.ts";
 import { getReminders, OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
 import { localParts } from "./local-time.ts";
@@ -144,6 +145,7 @@ export function composeEveningCheckinTurn(
     finished.length ? `Finished today: ${finished.map(title => `"${title}"`).join(", ")}.` : "Nothing was finished today.",
     going.length ? `Still in progress: ${going.map(title => `"${title}"`).join(", ")}.` : "Nothing is marked in progress.",
     "Mention at most one of these if it helps the question land; do not recite them.",
+    ...recentMemoryContext(db, { own: true }, context.date, context.timezone),
   ].join("\n");
 }
 

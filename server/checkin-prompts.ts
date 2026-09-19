@@ -76,7 +76,8 @@ export function composeAskDraftTurn(input: {
     `The default reads: ${fallback}`,
     ...group ? [`Write ${GROUP_NAME_TOKEN} wherever the group's name belongs; the app fills it in. The group is currently named "${input.groupName}".`] : [],
     `Keep it under ${CHECKIN_PROMPT_MAX} characters. Do not list tasks, people, or dates yourself: the app appends`
-    + " what is open, who is in the chat, and today's date underneath the ask each time it runs.",
+    + " what is open, who is in the chat, what was saved there today or yesterday (notes and journal entries), and"
+    + " today's date underneath the ask each time it runs.",
     input.current?.trim() ? `The owner's current wording, to revise rather than start over: ${input.current.trim()}` : "There is no wording yet; the default is in use.",
     `What the owner says this should be like: ${input.brief.trim()}`,
   ].join("\n");
