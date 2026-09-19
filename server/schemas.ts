@@ -123,12 +123,25 @@ export const todoPatch = z.object({
 }).partial().strict()
   .refine((value) => Object.keys(value).length > 0, "No changes provided");
 
+/**
+ * One person's mood on a shared entry. The name may be left out by a tool, in
+ * which case it is the speaker's; `mood_label` and `mood_score` on the entry
+ * are then derived from the list rather than taken from the write.
+ */
+const personMood = z.object({
+  name: z.string().trim().min(1).max(60).nullable().optional(),
+  label: z.string().trim().min(1).max(60),
+  score: z.number().int().min(1).max(5),
+}).strict();
+const moods = z.array(personMood).max(20).nullable().optional();
+
 export const memoryCreate = z.object({
   title: z.string().trim().max(300).nullable().optional(),
   content: z.string().trim().min(1).max(50_000),
   kind: memoryKind.default("note"),
   mood_label: z.string().trim().min(1).max(100).nullable().optional(),
   mood_score: z.number().int().min(1).max(5).nullable().optional(),
+  moods,
   category_id: nullableId,
   life_area_id: nullableId,
   life_area_source: lifeAreaSource.nullable().optional(),
@@ -370,6 +383,7 @@ const memoryToolFields = {
   content: z.string().trim().min(1).max(50_000).optional(),
   mood_label: z.string().trim().min(1).max(100).nullable().optional(),
   mood_score: z.number().int().min(1).max(5).nullable().optional(),
+  moods,
   category_id: nullableId,
   life_area_id: nullableId,
   occurred_at: nullableIso,
@@ -462,7 +476,7 @@ export const toolInput = {
     patch: z.object({
       ...memoryToolFields,
       clear_fields: clearFields([
-        "title", "mood_label", "mood_score", "category_id",
+        "title", "mood_label", "mood_score", "moods", "category_id",
         "life_area_id", "occurred_at", "tags",
       ]),
     }).default({}),

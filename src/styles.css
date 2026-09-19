@@ -530,6 +530,14 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
   transition: filter .12s ease;
 }
 .mood-col:hover .mood-bar { filter: brightness(1.1); }
+/* On a shared entry each person's own score is a tick on the combined bar, at its own height. */
+.mood-bar { position: relative; }
+.mood-mark {
+  position: absolute; left: 15%; right: 15%; bottom: calc(var(--m, .2) * 62px - 1px); height: 2px;
+  background: var(--surface); box-shadow: 0 0 0 1px var(--accent); border-radius: 1px;
+}
+.card-title .mood-scope { margin: 0 auto 0 12px; }
+.mood-scope button { padding: 2px 8px; font-size: 11px; }
 .mood-day { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: 10px; }
 .mood-latest { margin: 12px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .mood-latest strong { color: var(--text); font-weight: 500; }
@@ -956,6 +964,8 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
   border-radius:var(--radius-sm); color:var(--text-secondary); background:var(--surface-raised);
   border:1px solid var(--border); font-size:11px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
+.mood-pills { display:inline-flex; flex-wrap:wrap; gap:4px; max-width:100%; }
+.mood-pill strong { font-weight:600; color:var(--text); }
 .area-filter { display:flex; gap:4px; margin:-4px 0 14px; overflow:auto; }
 .area-filter button {
   flex:none; padding:4px 9px; border:1px solid var(--border); border-radius:var(--radius-pill); color:var(--text-secondary);

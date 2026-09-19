@@ -31,6 +31,7 @@ import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { executeAgentTool, type ToolTurnContext } from "../server/tool-executor.ts";
+import { combineMoods, mergeMoods } from "../server/moods.ts";
 import { TransientFailure } from "../server/transient.ts";
 import { sendTwilioSms } from "../server/twilio-service.ts";
 import { GAVE_UP_TEXT, rollRecurringTodos, runWorkerOnce, startWorker } from "../server/worker.ts";
@@ -251,6 +252,44 @@ describe("frontend API contract", () => {
     assert.deepEqual((await api.delete(`/api/memories/${created.id}`).expect(200)).body.data, {
       id: created.id,
     });
+  });
+
+  /**
+   * A shared entry keeps one mood per person and derives the entry's label and
+   * score from them, so a 2 and a 4 stay a 2 and a 4 underneath the "3".
+   */
+  it("keeps each person's mood on a shared entry and derives the combined label and average", async () => {
+    // The arithmetic, on its own.
+    assert.deepEqual(combineMoods([]), { mood_label: null, mood_score: null });
+    assert.deepEqual(combineMoods([{ name: "Sarah", label: "drained", score: 2 }]), { mood_label: "Sarah drained", mood_score: 2 });
+    assert.deepEqual(
+      combineMoods([{ name: "Sarah", label: "drained", score: 2 }, { name: "the owner", label: "good", score: 4 }]),
+      { mood_label: "Sarah drained · the owner good", mood_score: 3 },
+    );
+    assert.equal(combineMoods([{ name: "a", label: "x", score: 2 }, { name: "b", label: "y", score: 5 }]).mood_score, 4, "3.5 rounds up");
+    assert.deepEqual(
+      mergeMoods([{ name: "Sarah", label: "drained", score: 2 }], [{ name: " sarah ", label: "better", score: 3 }, { name: "Mom", label: "calm", score: 4 }]),
+      [{ name: "Sarah", label: "better", score: 3 }, { name: "Mom", label: "calm", score: 4 }],
+      "a second answer from the same person is a correction; a new person is added",
+    );
+
+    // Over REST the writer is the owner, so an unnamed mood is theirs.
+    const { api } = fixture();
+    const created = (await api.post("/api/memories").send({
+      content: "the owner: Good day.", kind: "journal", moods: [{ label: "good", score: 4 }],
+    }).expect(201)).body.data;
+    assert.deepEqual(created.moods, [{ name: "the owner", label: "good", score: 4 }]);
+    assert.deepEqual([created.mood_label, created.mood_score], ["the owner good", 4]);
+    const merged = (await api.patch(`/api/memories/${created.id}`).send({
+      moods: [{ name: "Sarah", label: "drained", score: 2 }], mood_score: 5,
+    }).expect(200)).body.data;
+    assert.deepEqual(merged.moods, [{ name: "the owner", label: "good", score: 4 }, { name: "Sarah", label: "drained", score: 2 }]);
+    assert.deepEqual([merged.mood_label, merged.mood_score], ["the owner good · Sarah drained", 3], "with moods present the plain fields are derived, not taken");
+    const plain = (await api.patch(`/api/memories/${created.id}`).send({ moods: null, mood_label: "fine", mood_score: 3 }).expect(200)).body.data;
+    assert.deepEqual(plain.moods, [], "null clears the list");
+    assert.deepEqual([plain.mood_label, plain.mood_score], ["fine", 3], "and the plain fields are the write's own again");
+    await api.post("/api/memories").send({ content: "x", moods: [{ label: "ok", score: 6 }] }).expect(400);
+    await api.post("/api/memories").send({ content: "x", moods: [{ label: "ok", score: 3, extra: true }] }).expect(400);
   });
 
   it("returns canonical reminders without marking browser previews as delivered", async () => {
@@ -6202,15 +6241,20 @@ describe("Sendblue provider", () => {
         tool: "create_memory",
         input: {
           kind: "journal", title: "Wed Jan 15 — Home", content: "Sarah: Long day but the laundry's finally done.",
-          mood_label: "tired", mood_score: 3, occurred_at: "2030-01-15T20:50:00.000Z", review_worthy: true, tags: ["end-of-day", "group"],
+          // Her mood, unnamed: the server knows who wrote. mood_label/mood_score left to the server.
+          moods: [{ name: null, label: "tired", score: 2 }], occurred_at: "2030-01-15T20:50:00.000Z", review_worthy: true, tags: ["end-of-day", "group"],
         },
       }], "Noted, Sarah — hope you get a rest.");
-      await runSmsAgent(db, fakeSearch(db), address, "Long day but the laundry's finally done. Tired, 3.", "SB_sarah_day", groupTurnOptions(sarah.fetcher));
+      await runSmsAgent(db, fakeSearch(db), address, "Long day but the laundry's finally done. Tired, 2.", "SB_sarah_day", groupTurnOptions(sarah.fetcher));
       // Today's entries, apart from what was seeded above.
       const todays = "FROM memories WHERE occurred_at>='2030-01-15T20:00:00.000Z'";
-      const entry = db.prepare(`SELECT id,life_area_id,tags_json,mood_score ${todays}`).get() as { id: string; life_area_id: string; tags_json: string; mood_score: number };
+      const entry = db.prepare(`SELECT id,life_area_id,tags_json,mood_label,mood_score,moods_json ${todays}`).get() as {
+        id: string; life_area_id: string; tags_json: string; mood_label: string; mood_score: number; moods_json: string;
+      };
       assert.equal(entry.life_area_id, area.id, "filed under the group whatever the agent passed");
       assert.deepEqual(JSON.parse(entry.tags_json), ["end-of-day", "group"]);
+      assert.deepEqual(JSON.parse(entry.moods_json), [{ name: "Sarah", label: "tired", score: 2 }], "named for the speaker");
+      assert.deepEqual([entry.mood_label, entry.mood_score], ["Sarah tired", 2], "one person so far: her word and her number");
 
       // The owner answers: the create is in the window as a write, so the same entry is updated.
       let updated = false;
@@ -6223,7 +6267,8 @@ describe("Sendblue provider", () => {
             role: "assistant",
             parts: [{
               type: "tool-update_memory", tool_call_id: "call_upd", state: "input-available",
-              input: { id, patch: { content: "Sarah: Long day but the laundry's finally done.\nthe owner: Good one, got through the backlog.", mood_label: "Sarah tired · the owner content", mood_score: 4 } },
+              // Only the owner's own mood comes back; the model must not restate Sarah's or average anything.
+              input: { id, patch: { content: "Sarah: Long day but the laundry's finally done.\nthe owner: Good one, got through the backlog.", moods: [{ name: "the owner", label: "content", score: 4 }] } },
             }],
           }), { status: 200 });
         }
@@ -6231,12 +6276,28 @@ describe("Sendblue provider", () => {
       };
       await runSmsAgent(db, fakeSearch(db), address, "Good one, got through the backlog. Content, 4.", "SB_owner_day", groupTurnOptions(owner, RECIPIENT, "the owner"));
       assert.equal(updated, true, "the owner's turn saw Sarah's create and updated it");
-      const after = db.prepare(`SELECT id,content,mood_label,mood_score ${todays}`).all() as Array<{ id: string; content: string; mood_label: string; mood_score: number }>;
+      const after = db.prepare(`SELECT id,content,mood_label,mood_score,moods_json ${todays}`).all() as Array<{ id: string; content: string; mood_label: string; mood_score: number; moods_json: string }>;
       assert.equal(after.length, 1, "one entry for the day, not one per person");
       assert.equal(after[0].id, entry.id);
       assert.match(after[0].content, /^Sarah: .*\nthe owner: /);
-      assert.equal(after[0].mood_label, "Sarah tired · the owner content");
-      assert.equal(after[0].mood_score, 4);
+      assert.deepEqual(JSON.parse(after[0].moods_json), [
+        { name: "Sarah", label: "tired", score: 2 },
+        { name: "the owner", label: "content", score: 4 },
+      ], "each person's mood kept on its own");
+      assert.equal(after[0].mood_label, "Sarah tired · the owner content", "the words, joined by the server");
+      assert.equal(after[0].mood_score, 3, "2 and 4 average to 3, computed by the server");
+
+      // The chart keeps the two apart: the owner's own view has none of this, the shared view has it all.
+      const mine = (await api.get("/api/overview").expect(200)).body.data.mood_trend as Array<{ id: string }>;
+      assert.equal(mine.some(point => point.id === entry.id), false, "a group's evening is not the owner's mood");
+      assert.deepEqual(mine.map(point => point.id).length, 1, "the owner's private journal alone");
+      const shared = (await api.get("/api/overview/mood-trend?scope=shared").expect(200)).body.data as Array<Record<string, unknown>>;
+      assert.deepEqual(shared.map(point => [point.id, point.score, point.life_area_name]), [
+        [(db.prepare("SELECT id FROM memories WHERE title='Tue Jan 14 — Home'").get() as { id: string }).id, 3, "Home"],
+        [entry.id, 3, "Home"],
+      ], "the group's entries, oldest first, with the group named");
+      assert.deepEqual(shared[1].moods, [{ name: "Sarah", label: "tired", score: 2 }, { name: "the owner", label: "content", score: 4 }]);
+      await api.get("/api/overview/mood-trend?scope=everyone").expect(400);
     } finally { restoreClock(); }
   });
 

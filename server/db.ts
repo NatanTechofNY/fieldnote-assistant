@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS memories (
   kind TEXT NOT NULL CHECK(kind IN ('fact','note','journal')),
   mood_label TEXT,
   mood_score INTEGER CHECK(mood_score IS NULL OR mood_score BETWEEN 1 AND 5),
+  moods_json TEXT,
   category_id TEXT REFERENCES categories(id) ON DELETE SET NULL,
   life_area_id TEXT REFERENCES life_areas(id) ON DELETE SET NULL,
   life_area_source TEXT CHECK(life_area_source IS NULL OR life_area_source IN ('agent','user')),
@@ -505,6 +506,8 @@ function migrateMessaging(db: Db): void {
   if (!areaColumns.has("checkin_copy_to_owner")) {
     db.exec("ALTER TABLE life_areas ADD COLUMN checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1))");
   }
+  // Each person's mood on a shared journal entry; mood_label/mood_score are derived from it.
+  if (!columns(db, "memories").has("moods_json")) db.exec("ALTER TABLE memories ADD COLUMN moods_json TEXT");
   // The owner's wording for each ask; null uses the default in checkin-prompts.ts.
   if (!areaColumns.has("morning_checkin_prompt")) db.exec("ALTER TABLE life_areas ADD COLUMN morning_checkin_prompt TEXT");
   if (!areaColumns.has("evening_checkin_prompt")) db.exec("ALTER TABLE life_areas ADD COLUMN evening_checkin_prompt TEXT");

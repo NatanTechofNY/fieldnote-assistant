@@ -1,6 +1,6 @@
 import type {
   Category, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource,
-  ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, Overview, ReflectionEvidence,
+  ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoStatus,
   UniversalSearchResult,
 } from "./types";
@@ -43,6 +43,8 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs?: number):
 
 export const api = {
   overview: () => request<Overview>("/overview"),
+  /** The mood chart's other view; `mine` is what /overview already carries. */
+  moodTrend: (scope: MoodTrendScope) => request<MoodPoint[]>(`/overview/mood-trend?scope=${scope}`),
   health: () => request<Health>("/health"),
   todos: (includeDone = true, lifeAreaId?: string, scope?: "mine") => {
     const query = new URLSearchParams({ includeDone: String(includeDone) });

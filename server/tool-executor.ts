@@ -16,6 +16,7 @@ import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
 import { addressesAssistant, ASSISTANT_NAME, speakerNameOf } from "./group-thread.ts";
 import type { SmsProvider } from "./integrations.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
+import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
 import { toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
@@ -45,7 +46,7 @@ const todoJson = (row: TodoRow) => ({
 
 const memoryJson = (row: MemoryRow) => ({
   id: row.id, title: row.title, content: row.content, kind: row.kind,
-  mood_label: row.mood_label, mood_score: row.mood_score, category_id: row.category_id,
+  mood_label: row.mood_label, mood_score: row.mood_score, moods: parseMoods(row.moods_json), category_id: row.category_id,
   category_name: row.category_name ?? null, life_area_id: row.life_area_id,
   life_area_name: row.life_area_name ?? null, life_area_slug: row.life_area_slug ?? null,
   life_area_source: row.life_area_source, occurred_at: row.occurred_at,
@@ -235,6 +236,12 @@ export type ToolTurnContext = {
    * may drive in a group have something to check.
    */
   speakerIsOwner?: boolean;
+  /**
+   * Who wrote the message being answered, as the app names them: a trusted
+   * contact's name in a group, the owner on their own line. A mood saved
+   * without a name is this person's.
+   */
+  speakerName?: string;
   /** The message being answered, and so the only one a tapback may land on. */
   inboundMessageHandle?: string;
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
@@ -866,14 +873,21 @@ export async function executeAgentTool(
     const timestamp = now();
     const memoryId = id("memory");
     const area = classificationForWrite(scope, input);
+    const mood = resolveMoodFields({
+      existingJson: null,
+      incoming: input.moods as IncomingMood[] | null | undefined,
+      clear: false,
+      plain: { mood_label: (input.mood_label as string | null | undefined) ?? null, mood_score: (input.mood_score as number | null | undefined) ?? null },
+      speakerName: context?.speakerName,
+    });
     db.prepare(`
       INSERT INTO memories(
-        id,user_id,title,content,kind,mood_label,mood_score,category_id,life_area_id,life_area_source,
+        id,user_id,title,content,kind,mood_label,mood_score,moods_json,category_id,life_area_id,life_area_source,
         occurred_at,review_worthy,tags_json,created_at,updated_at
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       memoryId, USER_ID, input.title ?? null, input.content as string, input.kind || "note",
-      input.mood_label ?? null, input.mood_score ?? null, area.category_id,
+      mood.mood_label, mood.mood_score, mood.moods_json, area.category_id,
       area.life_area_id, area.life_area_source,
       input.occurred_at ?? null, input.review_worthy === true ? 1 : 0,
       JSON.stringify(input.tags ?? []), timestamp, timestamp,
@@ -900,14 +914,24 @@ export async function executeAgentTool(
     const lifeAreaSource = lifeAreaId === current.life_area_id
       ? current.life_area_source
       : lifeAreaId ? "agent" : null;
+    const mood = resolveMoodFields({
+      existingJson: current.moods_json,
+      incoming: patch.moods as IncomingMood[] | null | undefined,
+      clear: clear.has("moods"),
+      plain: {
+        mood_label: value("mood_label", current.mood_label) as string | null,
+        mood_score: value("mood_score", current.mood_score) as number | null,
+      },
+      speakerName: context?.speakerName,
+    });
     db.transaction(() => {
       db.prepare(`
-        UPDATE memories SET kind=?,title=?,content=?,mood_label=?,mood_score=?,category_id=?,
+        UPDATE memories SET kind=?,title=?,content=?,mood_label=?,mood_score=?,moods_json=?,category_id=?,
           life_area_id=?,life_area_source=?,occurred_at=?,review_worthy=?,tags_json=?,updated_at=?
         WHERE id=? AND user_id=?
       `).run(
         value("kind", current.kind), value("title", current.title), value("content", current.content),
-        value("mood_label", current.mood_label), value("mood_score", current.mood_score),
+        mood.mood_label, mood.mood_score, mood.moods_json,
         scope ? current.category_id : value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
         value("occurred_at", current.occurred_at),
         value("review_worthy", Boolean(current.review_worthy)) ? 1 : 0,

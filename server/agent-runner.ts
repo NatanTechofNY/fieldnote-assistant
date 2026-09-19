@@ -1,6 +1,6 @@
 import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./algolia.ts";
 import { ensureGroupLifeArea, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
-import { redactedNumber, speakerLabel } from "./group-thread.ts";
+import { OWNER_SPEAKER_NAME, redactedNumber, speakerLabel } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
@@ -811,6 +811,8 @@ export async function runChannelAgent(
     provider: options.inbound?.provider,
     groupId: options.inbound?.groupId,
     ...(group ? { scope: { ...group.scope, lifeAreaIsNew: group.areaIsNew }, speakerIsOwner: speaker?.speakerIsOwner === true } : {}),
+    // In a group the speaker is whoever wrote; on the owner's own line or the web it is the owner.
+    ...(options.internal ? {} : { speakerName: group ? speaker?.speakerName : OWNER_SPEAKER_NAME }),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
     inboundText: options.internal ? undefined : body,
     sendSms: options.sendSms,

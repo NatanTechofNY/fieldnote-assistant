@@ -76,6 +76,8 @@ export interface Memory {
   kind: MemoryKind;
   mood_label?: string | null;
   mood_score?: number | null;
+  /** Each person's mood on a shared entry; `mood_label`/`mood_score` are derived from these when present. */
+  moods?: PersonMood[];
   category_id?: string | null;
   category_name?: string | null;
   life_area_id?: string | null;
@@ -87,6 +89,13 @@ export interface Memory {
   tags: string[];
   created_at: string;
   updated_at: string;
+}
+
+/** One person's mood on a shared journal entry, in their own word and number. */
+export interface PersonMood {
+  name: string;
+  label: string;
+  score: number;
 }
 
 export interface ReviewQuarterRange {
@@ -173,7 +182,14 @@ export interface MoodPoint {
   at: string;
   score: number;
   label?: string | null;
+  /** On a shared entry, each person's mood beside the combined score. */
+  moods?: PersonMood[];
+  life_area_id?: string | null;
+  life_area_name?: string | null;
 }
+
+/** Whose moods the chart shows: the owner's own entries, or the group chats' shared ones. */
+export type MoodTrendScope = "mine" | "shared";
 
 export interface Overview {
   counts: Record<TodoStatus, number> & { active: number; memories: number };

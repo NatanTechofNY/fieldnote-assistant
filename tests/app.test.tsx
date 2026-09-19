@@ -47,6 +47,7 @@ const lifeAreas = [
 let servedLifeAreas: Array<Record<string, unknown>> = lifeAreas;
 const lifeAreaPatches: Array<{ id: string; body: Record<string, unknown> }> = [];
 const askDrafts: Array<Record<string, unknown>> = [];
+const moodTrendRequests: string[] = [];
 
 const todo = (over: Partial<Record<string, unknown>> = {}) => ({
   id: "todo_1",
@@ -131,6 +132,20 @@ const memories = [
     title: "Good run-through",
     content: "Felt ready.",
     mood_score: 4,
+  }),
+  // A group's shared evening entry: one mood per person, the combined ones derived.
+  memory({
+    id: "memory_home_day",
+    kind: "journal",
+    title: "Day wrap-up – Home",
+    content: "Sarah: Long day.\nthe owner: Good one.",
+    mood_label: "Sarah drained · the owner good",
+    mood_score: 3,
+    moods: [{ name: "Sarah", label: "drained", score: 2 }, { name: "the owner", label: "good", score: 4 }],
+    life_area_id: "area_group",
+    life_area_name: "Home",
+    life_area_slug: "home",
+    tags: ["end-of-day", "group"],
   }),
 ];
 
@@ -307,11 +322,23 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       },
     }));
   }
+  if (url.includes("/api/overview/mood-trend")) {
+    moodTrendRequests.push(url.slice(url.indexOf("scope=") + 6));
+    return new Response(JSON.stringify({
+      success: true,
+      data: [{
+        id: "memory_home_day", title: "Day wrap-up – Home", at: "2026-07-28T00:00:00.000Z", score: 3, label: "Sarah drained · the owner good",
+        moods: [{ name: "Sarah", label: "drained", score: 2 }, { name: "the owner", label: "good", score: 4 }],
+        life_area_id: "area_group", life_area_name: "Home",
+      }],
+    }));
+  }
   if (url.includes("/api/overview")) return new Response(JSON.stringify({
     success: true,
     data: {
       counts: { pending: 0, in_progress: 0, blocked: 0, done: 0, cancelled: 0, active: 0, memories: 0 },
-      in_progress: [], blocked: [], due_today: [], recent_memories: [], mood_trend: [], subtask_progress: {},
+      in_progress: [], blocked: [], due_today: [], recent_memories: [], subtask_progress: {},
+      mood_trend: [{ id: "memory_mine", title: "A quiet one", at: "2026-07-27T00:00:00.000Z", score: 4, label: "calm", moods: [] }],
       // One task, two schedule rows: its due date and the reminder it was asked for.
       upcoming_reminders: [
         {
@@ -728,6 +755,50 @@ it("renders the standalone assistant shell and overview", async () => {
   expect(within(row).getByText("Reminder")).toBeInTheDocument();
   expect(within(row).getByText("Jul 29 · 9:00 AM")).toBeInTheDocument();
   expect(within(row).getByText("Due")).toBeInTheDocument();
+});
+
+/**
+ * The mood chart is the owner's own by default. With a group chat there is a
+ * Shared view: the bar is the combined score and each person's own score is a
+ * mark on it, so a 2 and a 4 do not simply read as a 3. The choice sticks.
+ */
+it("charts my own moods by default and switches to the shared ones, each person marked", async () => {
+  moodTrendRequests.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { unmount } = render(<QueryClientProvider client={client}><MemoryRouter><App /></MemoryRouter></QueryClientProvider>);
+  const card = (await screen.findByText("How the days have felt")).closest("article") as HTMLElement;
+  expect(within(card).getByRole("button", { name: "Mine" })).toHaveAttribute("aria-pressed", "true");
+  expect(within(card).getByLabelText(/Jul 2[67]: calm, 4 of 5/)).toBeInTheDocument();
+  expect(within(card).getByText("calm")).toBeInTheDocument();
+  expect(moodTrendRequests).toEqual([]);
+  expect(card.querySelectorAll(".mood-mark")).toHaveLength(0);
+
+  await userEvent.click(within(card).getByRole("button", { name: "Shared" }));
+  expect(await within(card).findByText("Sarah drained 2 · you good 4")).toBeInTheDocument();
+  expect(moodTrendRequests).toEqual(["shared"]);
+  const column = within(card).getByLabelText(/Sarah drained 2 · you good 4, 3 of 5/);
+  const marks = column.querySelectorAll(".mood-mark");
+  expect(marks).toHaveLength(2);
+  expect(marks[0]).toHaveAttribute("title", "Sarah: drained, 2 of 5");
+  expect(marks[1]).toHaveAttribute("title", "you: good, 4 of 5");
+  expect(within(card).getByRole("button", { name: "Shared" })).toHaveAttribute("aria-pressed", "true");
+
+  // Remembered on the next visit.
+  unmount();
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter><App /></MemoryRouter></QueryClientProvider>);
+  const again = (await screen.findByText("How the days have felt")).closest("article") as HTMLElement;
+  expect(within(again).getByRole("button", { name: "Shared" })).toHaveAttribute("aria-pressed", "true");
+  expect(await within(again).findByText("Sarah drained 2 · you good 4")).toBeInTheDocument();
+});
+
+/** Without a group chat there is nothing to share, so the card has no toggle. */
+it("hides the mood toggle when there are no group chats", async () => {
+  servedLifeAreas = lifeAreas.filter(area => !area.is_group);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><MemoryRouter><App /></MemoryRouter></QueryClientProvider>);
+  const card = (await screen.findByText("How the days have felt")).closest("article") as HTMLElement;
+  await within(card).findByText("calm");
+  expect(within(card).queryByRole("button", { name: "Shared" })).not.toBeInTheDocument();
 });
 
 /**
@@ -2464,6 +2535,14 @@ it("switches memory views and searches by meaning", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Journals" }));
   expect(await screen.findByText("Good run-through", { exact: false })).toBeInTheDocument();
   expect(screen.getByText("July 18, 2026")).toBeInTheDocument();
+  // A group's shared entry is under its own area, and shows one mood chip per person rather than the blend.
+  expect(screen.queryByText("Day wrap-up – Home", { exact: false })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Home" }));
+  const shared = (await screen.findByText("Day wrap-up – Home", { exact: false })).closest("article") as HTMLElement;
+  const chips = within(shared).getAllByTitle(/of 5$/);
+  expect(chips.map(chip => chip.getAttribute("title"))).toEqual(["Sarah: drained, 2 of 5", "you: good, 4 of 5"]);
+  expect(within(shared).queryByText("Sarah drained · the owner good")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "My items" }));
 
   await userEvent.click(screen.getByRole("button", { name: "Everything" }));
   const search = await screen.findByPlaceholderText("Search by meaning, person, place, or phrase…");

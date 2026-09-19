@@ -93,6 +93,10 @@ Completing an occurrence is the ordinary status write on either path, and both c
 
 `create_memory.title` is a required non-empty string in the tool schema, even though the column, the Zod schema, and `POST /api/memories` all accept null. The narrower tool contract is deliberate: the agent writes a title from the content instead of leaving one out, and the UI keeps the freedom to save an untitled memory.
 
+`create_memory.moods` / `update_memory.patch.moods` (and the same field on the REST routes) carry one mood per person on a shared entry — `[{ name, label, score }]`, `name` nullable for the turn's speaker. The tool executor and the routes both go through `resolveMoodFields()` in [`server/moods.ts`](../server/moods.ts): incoming people are upserted by name into `memories.moods_json`, and `mood_label` / `mood_score` are **derived** (words joined, average rounded) whenever `moods` is present, so the model never averages. `clear_fields` admits `"moods"`. `memoryJson()` returns `moods` (an empty array when there is none). See [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#group-check-ins).
+
+`GET /api/overview/mood-trend?scope=mine|shared` has no tool. `mine` is the owner's own moods (`OWN_AREA_CLAUSE`), which is also what `/api/overview` carries as `mood_trend`; `shared` is the group chats' entries, each point with its `moods`, `life_area_id`, and `life_area_name`.
+
 ## Life areas and reflections
 
 - `life_area_id` is shared by todos and memories. The seeded IDs are `area_work`, `area_personal`, `area_side_project`, and **only those three are in the tool schema's enum** — the agent cannot assign a custom life area, though the UI can create them.

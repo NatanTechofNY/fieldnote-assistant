@@ -1,4 +1,5 @@
 import { id, now, USER_ID } from "./db.ts";
+import { parseMoods } from "./moods.ts";
 import { parseRecurrence, recurrenceJson } from "./recurrence.ts";
 import type { Db, MemoryRow, MessageRow, ReminderRow, TodoCompletionRow, TodoRow, TodoStatus } from "./types.ts";
 
@@ -45,6 +46,7 @@ export function memoryJson(row: MemoryRow): Record<string, unknown> {
     kind: row.kind,
     mood_label: row.mood_label,
     mood_score: row.mood_score,
+    moods: parseMoods(row.moods_json),
     category_id: row.category_id,
     category_name: row.category_name ?? null,
     life_area_id: row.life_area_id,

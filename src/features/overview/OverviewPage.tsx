@@ -74,7 +74,7 @@ export function OverviewPage() {
             ? data.recent_memories.slice(0, 4).map(memory => <div className="list-row" key={memory.id}>
               <MemoryIcon kind={memory.kind} />
               <div className="list-main"><strong>{memory.title || memory.content.slice(0, 48)}</strong><small>{memory.content}</small></div>
-              <MoodPill score={memory.mood_score} label={memory.mood_label}/>
+              <MoodPill score={memory.mood_score} label={memory.mood_label} moods={memory.moods}/>
               <span className="badge">{memory.kind}</span>
             </div>)
             : <Empty label="Tell the agent something worth keeping." />}

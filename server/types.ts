@@ -90,6 +90,8 @@ export interface MemoryRow {
   kind: MemoryKind;
   mood_label: string | null;
   mood_score: number | null;
+  /** Each person's mood on a shared entry, JSON `[{ name, label, score }]`; null when the entry has one mood. */
+  moods_json?: string | null;
   category_id: string | null;
   life_area_id: string | null;
   life_area_source: LifeAreaSource | null;
