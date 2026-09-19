@@ -815,9 +815,9 @@ export async function runWorkerOnce(
    * timed for the evening that the worker only gets to at 3 AM, because the
    * laptop was asleep, still waits; nobody chose 3 AM.
    */
-  const checkinDue = (time: string | null): time is string =>
-    Boolean(time) && local.time >= (time as string)
-    && (!quiet || inQuietHours(time as string, preferences.quietHoursStart, preferences.quietHoursEnd));
+  const checkinDue = (time: string | null): boolean =>
+    time !== null && local.time >= time
+    && (!quiet || inQuietHours(time, preferences.quietHoursStart, preferences.quietHoursEnd));
   if (recipient && !quiet) {
     for (const reminder of claimDueReminders(db)) {
       await deliverReminder(db, search, reminder, recipient, send);

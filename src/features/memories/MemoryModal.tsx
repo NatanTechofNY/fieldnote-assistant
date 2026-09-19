@@ -4,7 +4,7 @@ import { api } from "../../api";
 import type {
   LifeArea, Memory, MemoryKind,
 } from "../../types";
-import { Field, MarkdownEditor, Modal } from "../../components/ui";
+import { Field, MarkdownEditor, Modal, MoodPill } from "../../components/ui";
 import { defaultMoodLabel, moodEmoji } from "../../lib/mood";
 import { toZonedDateTimeLocal, useTimezone, zonedDateTimeLocalToIso } from "../../lib/timezone";
 import { invalidateContent } from "../../lib/invalidate";
@@ -27,6 +27,10 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
   // agent can attach one ("grateful" on the day the cats were saved), and an
   // edit to the wording must not silently strip it.
   const hasMood = kind === "journal" || memory?.mood_score != null;
+  // A shared entry's mood is each person's, recorded from what they said in the
+  // chat; the label and score are derived from those. They are shown here, not
+  // edited, and the save leaves them alone.
+  const shared = memory?.moods ?? [];
   const save = useMutation({
     mutationFn: () => {
       const input = {
@@ -34,8 +38,10 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
         title: title || null,
         content,
         tags: tags.split(",").map(t => t.trim()).filter(Boolean),
-        mood_score: hasMood ? mood : null,
-        mood_label: hasMood ? (moodLabel.trim() || defaultMoodLabel(mood)) : null,
+        ...(shared.length ? {} : {
+          mood_score: hasMood ? mood : null,
+          mood_label: hasMood ? (moodLabel.trim() || defaultMoodLabel(mood)) : null,
+        }),
         life_area_id: lifeAreaId || null,
         life_area_source: lifeAreaId ? "user" as const : null,
         occurred_at: occurredAt ? zonedDateTimeLocalToIso(occurredAt, timezone) : null,
@@ -56,7 +62,12 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
       </div>
       <label className="toggle-row"><input type="checkbox" checked={reviewWorthy} onChange={e => setReviewWorthy(e.target.checked)}/><span>Highlight this for future reflections</span></label>
       <Field label="Tags"><input className="input" value={tags} onChange={e => setTags(e.target.value)} placeholder="work, idea, family" /></Field>
-      {hasMood && <>
+      {shared.length ? <Field label="Moods, one each">
+        <div className="shared-moods" aria-label="Each person's mood">
+          <MoodPill moods={shared}/>
+          <small className="field-hint">Recorded from what each person said in the chat; the entry's mood is their average. Edit the words above if a line needs correcting.</small>
+        </div>
+      </Field> : hasMood && <>
         <Field label="Mood"><div style={{ display: "flex", justifyContent: "space-between" }}>{[1,2,3,4,5].map(score => <button type="button" key={score} aria-label={`Mood ${score} of 5, ${defaultMoodLabel(score)}`} aria-pressed={mood === score} className={`button icon ${mood === score ? "dark" : "ghost"}`} onClick={() => setMood(score)} style={{ fontSize: 20 }}>{moodEmoji(score)}</button>)}</div></Field>
         <Field label="In your own words"><input className="input" value={moodLabel} onChange={e => setMoodLabel(e.target.value)} maxLength={100} placeholder={defaultMoodLabel(mood)} /></Field>
       </>}

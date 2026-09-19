@@ -327,6 +327,10 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     return new Response(JSON.stringify({
       success: true,
       data: [{
+        id: "memory_family_day", title: "Day wrap-up – Family", at: "2026-07-27T00:00:00.000Z", score: 4, label: "Mom cheerful · the owner good",
+        moods: [{ name: "Mom", label: "cheerful", score: 4 }, { name: "the owner", label: "good", score: 4 }],
+        life_area_id: "area_family", life_area_name: "Family",
+      }, {
         id: "memory_home_day", title: "Day wrap-up – Home", at: "2026-07-28T00:00:00.000Z", score: 3, label: "Sarah drained · the owner good",
         moods: [{ name: "Sarah", label: "drained", score: 2 }, { name: "the owner", label: "good", score: 4 }],
         life_area_id: "area_group", life_area_name: "Home",
@@ -782,6 +786,9 @@ it("charts my own moods by default and switches to the shared ones, each person 
   expect(marks[0]).toHaveAttribute("title", "Sarah: drained, 2 of 5");
   expect(marks[1]).toHaveAttribute("title", "you: good, 4 of 5");
   expect(within(card).getByRole("button", { name: "Shared" })).toHaveAttribute("aria-pressed", "true");
+  // With more than one group charted, the caption says which one the latest entry is from.
+  expect(within(card).getByText(/in Home on Jul 2[78]/)).toBeInTheDocument();
+  expect(within(card).getByLabelText(/Family · Mom cheerful 4 · you good 4, 4 of 5/)).toBeInTheDocument();
 
   // Remembered on the next visit.
   unmount();
@@ -2574,6 +2581,35 @@ it("previews markdown while editing a memory", async () => {
 
   await userEvent.click(within(editor).getByRole("tab", { name: /Write/ }));
   expect(editor.querySelector("textarea")).toHaveValue("## Framing\nLead with **the contract**.");
+});
+
+/**
+ * A shared entry's moods are each person's, recorded from the chat. The editor
+ * shows them and leaves them alone: saving a retitled entry sends no mood
+ * fields, so the derived label and average stay true to the people underneath.
+ */
+it("shows a shared entry's moods read-only and saves without touching them", async () => {
+  renderAt("/memories?open=memory_home_day");
+  const editor = await screen.findByRole("dialog");
+  expect(editor).toHaveTextContent("Moods, one each");
+  const chips = within(editor).getAllByTitle(/of 5$/);
+  expect(chips.map(chip => chip.getAttribute("title"))).toEqual(["Sarah: drained, 2 of 5", "you: good, 4 of 5"]);
+  expect(within(editor).queryByRole("button", { name: /Mood 3 of 5/ })).not.toBeInTheDocument();
+  expect(within(editor).queryByLabelText("In your own words")).not.toBeInTheDocument();
+
+  const title = within(editor).getByPlaceholderText("Optional, but useful");
+  await userEvent.clear(title);
+  await userEvent.type(title, "Day wrap-up – Home, revised");
+  await userEvent.click(within(editor).getByRole("button", { name: "Save memory" }));
+  await waitFor(() => {
+    const patch = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).includes("/api/memories/memory_home_day") && init?.method === "PATCH");
+    expect(patch).toBeTruthy();
+    const body = JSON.parse(String(patch![1]?.body)) as Record<string, unknown>;
+    expect(body.title).toBe("Day wrap-up – Home, revised");
+    expect("mood_score" in body).toBe(false);
+    expect("mood_label" in body).toBe(false);
+    expect("moods" in body).toBe(false);
+  });
 });
 
 it("asks before deleting a memory", async () => {

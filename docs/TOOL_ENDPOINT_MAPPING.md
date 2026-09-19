@@ -95,7 +95,9 @@ Completing an occurrence is the ordinary status write on either path, and both c
 
 `create_memory.moods` / `update_memory.patch.moods` (and the same field on the REST routes) carry one mood per person on a shared entry — `[{ name, label, score }]`, `name` nullable for the turn's speaker. The tool executor and the routes both go through `resolveMoodFields()` in [`server/moods.ts`](../server/moods.ts): incoming people are upserted by name into `memories.moods_json`, and `mood_label` / `mood_score` are **derived** (words joined, average rounded) whenever `moods` is present, so the model never averages. `clear_fields` admits `"moods"`. `memoryJson()` returns `moods` (an empty array when there is none). See [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#group-check-ins).
 
-`GET /api/overview/mood-trend?scope=mine|shared` has no tool. `mine` is the owner's own moods (`OWN_AREA_CLAUSE`), which is also what `/api/overview` carries as `mood_trend`; `shared` is the group chats' entries, each point with its `moods`, `life_area_id`, and `life_area_name`.
+`GET /api/overview/mood-trend?scope=mine|shared` has no tool. `mine` is the owner's own moods — `OWN_AREA_CLAUSE`, and no entry carrying another person's mood whatever its area, so a group's entry orphaned by removing the area never folds into the owner's chart — which is also what `/api/overview` carries as `mood_trend`; `shared` is the group chats' entries, each point with its `moods`, `life_area_id`, and `life_area_name`. In a group turn where the speaker is not the owner, `resolveMoodFields()` attributes every incoming mood to the speaker (`ownMoodOnly`), so the name a tool call carries cannot be used to write someone else's.
+
+The Sendblue and Twilio status webhooks keep a failed delivery's reason on the message row as `metadata_json.deliveryError` (whitespace flattened, cut to 500 characters), in addition to `reminders.last_error` for a reminder.
 
 ## Life areas and reflections
 

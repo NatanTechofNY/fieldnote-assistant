@@ -297,6 +297,15 @@ const OWNER_ONLY_TOOLS = new Set([
 ]);
 
 /**
+ * Whether the turn's speaker may record only their own mood on a shared entry:
+ * anyone in a group who is not the owner. The owner, in a group or on their own
+ * line, may name whose mood they are recording — "Sarah said she's a 2".
+ */
+function ownMoodOnly(context: ToolTurnContext | undefined): boolean {
+  return Boolean(context?.scope) && context?.speakerIsOwner !== true;
+}
+
+/**
  * A todo as the turn may see it. Outside a group this is `getTodo`; inside one,
  * a todo from any other life area is indistinguishable from one that does not
  * exist, so the caller's own "not found" fires and nothing about the owner's
@@ -879,6 +888,7 @@ export async function executeAgentTool(
       clear: false,
       plain: { mood_label: (input.mood_label as string | null | undefined) ?? null, mood_score: (input.mood_score as number | null | undefined) ?? null },
       speakerName: context?.speakerName,
+      ownMoodOnly: ownMoodOnly(context),
     });
     db.prepare(`
       INSERT INTO memories(
@@ -923,6 +933,7 @@ export async function executeAgentTool(
         mood_score: value("mood_score", current.mood_score) as number | null,
       },
       speakerName: context?.speakerName,
+      ownMoodOnly: ownMoodOnly(context),
     });
     db.transaction(() => {
       db.prepare(`

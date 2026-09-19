@@ -129,7 +129,8 @@ export const todoPatch = z.object({
  * are then derived from the list rather than taken from the write.
  */
 const personMood = z.object({
-  name: z.string().trim().min(1).max(60).nullable().optional(),
+  // Blank reads as "the speaker", the same as null, so the hosted schema and this one agree.
+  name: z.string().trim().max(60).nullable().optional(),
   label: z.string().trim().min(1).max(60),
   score: z.number().int().min(1).max(5),
 }).strict();

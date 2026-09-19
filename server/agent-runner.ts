@@ -811,8 +811,14 @@ export async function runChannelAgent(
     provider: options.inbound?.provider,
     groupId: options.inbound?.groupId,
     ...(group ? { scope: { ...group.scope, lifeAreaIsNew: group.areaIsNew }, speakerIsOwner: speaker?.speakerIsOwner === true } : {}),
-    // In a group the speaker is whoever wrote; on the owner's own line or the web it is the owner.
-    ...(options.internal ? {} : { speakerName: group ? speaker?.speakerName : OWNER_SPEAKER_NAME }),
+    // In a group the speaker is whoever wrote — by name, or by the redacted number the
+    // transcript uses for someone the owner never named; on the owner's own line or the
+    // web it is the owner. An app-composed turn has no speaker.
+    ...(options.internal ? {} : {
+      speakerName: group
+        ? speaker?.speakerName ?? (speaker?.speaker ? redactedNumber(speaker.speaker) : undefined)
+        : OWNER_SPEAKER_NAME,
+    }),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
     inboundText: options.internal ? undefined : body,
     sendSms: options.sendSms,

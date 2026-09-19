@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { OWN_AREA_CLAUSE, USER_ID, getReminders, now } from "../db.ts";
+import { OWNER_SPEAKER_NAME } from "../group-thread.ts";
 import { success } from "../http.ts";
 import { getNotificationPreferences } from "../integrations.ts";
 import { localParts } from "../local-time.ts";
@@ -94,10 +95,17 @@ type MoodTrendRow = {
  * The last fourteen entries that carry a mood, oldest first, placed on the day
  * they happened rather than the day they were typed: a reflection saved after
  * midnight is still about the day before.
+ *
+ * "Mine" is the owner's own entries: nothing filed under a group chat's area,
+ * and nothing carrying another person's mood whatever its area — a group's
+ * entry whose area was removed (the memories keep no area then) is still the
+ * household's evening, not the owner's day.
  */
 function moodTrend(db: Db, scope: "mine" | "shared"): Array<Record<string, unknown>> {
   const where = scope === "mine"
-    ? OWN_AREA_CLAUSE("m")
+    ? `${OWN_AREA_CLAUSE("m")} AND NOT EXISTS (
+        SELECT 1 FROM json_each(COALESCE(m.moods_json,'[]')) WHERE json_extract(value,'$.name')<>?
+      )`
     : "m.life_area_id IN (SELECT id FROM life_areas WHERE thread_id IS NOT NULL)";
   const rows = db.prepare(`
     SELECT m.id,m.title,COALESCE(m.occurred_at,m.created_at) at,m.mood_score score,m.mood_label label,
@@ -105,7 +113,7 @@ function moodTrend(db: Db, scope: "mine" | "shared"): Array<Record<string, unkno
     FROM memories m LEFT JOIN life_areas la ON la.id=m.life_area_id
     WHERE m.user_id=? AND m.mood_score IS NOT NULL AND ${where}
     ORDER BY COALESCE(m.occurred_at,m.created_at) DESC LIMIT 14
-  `).all(USER_ID) as MoodTrendRow[];
+  `).all(...(scope === "mine" ? [USER_ID, OWNER_SPEAKER_NAME] : [USER_ID])) as MoodTrendRow[];
   return rows.reverse().map(row => ({
     id: row.id,
     title: row.title,

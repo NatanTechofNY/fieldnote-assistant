@@ -4378,11 +4378,16 @@ describe("Sendblue provider", () => {
     );
 
     await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`)
-      .send({ message_handle: "SB_track", status: "ERROR", error_message: "Carrier rejected" }).expect(204);
+      .send({ message_handle: "SB_track", status: "ERROR", error_message: `Carrier\nrejected ${"x".repeat(600)}` }).expect(204);
     assert.deepEqual(
       db.prepare("SELECT status,last_error FROM reminders WHERE todo_id=?").get(todo.id),
-      { status: "failed", last_error: "Carrier rejected" },
+      { status: "failed", last_error: `Carrier\nrejected ${"x".repeat(600)}` },
     );
+    // The reason stays on the message too — any message, not only a reminder — flattened and bounded.
+    const message = db.prepare("SELECT status,json_extract(metadata_json,'$.deliveryError') reason FROM channel_messages WHERE id='msg_sb'").get() as { status: string; reason: string };
+    assert.equal(message.status, "failed");
+    assert.equal(message.reason.length, 500);
+    assert.match(message.reason, /^Carrier rejected x+$/);
   });
 
   it("requires a recipient before the connection test and can disconnect", async () => {
@@ -6298,6 +6303,36 @@ describe("Sendblue provider", () => {
       ], "the group's entries, oldest first, with the group named");
       assert.deepEqual(shared[1].moods, [{ name: "Sarah", label: "tired", score: 2 }, { name: "the owner", label: "content", score: 4 }]);
       await api.get("/api/overview/mood-trend?scope=everyone").expect(400);
+
+      // Someone the owner never named — admitted because the group is open — answers too. Their
+      // mood is theirs under the redacted number the transcript uses, never the owner's; and a
+      // participant who names the owner is still recording only their own.
+      withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }], true);
+      const stranger = agentContinuing([{
+        tool: "update_memory",
+        input: { id: entry.id, patch: { content: `${after[0].content}\n+1…33: Long one.`, moods: [{ name: "the owner", label: "miserable", score: 1 }] } },
+      }], "Noted.");
+      const unnamed = groupTurnOptions(stranger.fetcher, "+17185554433");
+      unnamed.userMessageMetadata = { groupId: GROUP, groupName: "Home", speaker: "+17185554433", speakerIsOwner: false } as typeof unnamed.userMessageMetadata;
+      await runSmsAgent(db, fakeSearch(db), address, "Long one. Miserable, 1.", "SB_stranger_day", unnamed);
+      const three = db.prepare(`SELECT moods_json,mood_score ${todays}`).get() as { moods_json: string; mood_score: number };
+      assert.deepEqual(JSON.parse(three.moods_json), [
+        { name: "Sarah", label: "tired", score: 2 },
+        { name: "the owner", label: "content", score: 4 },
+        { name: "+1…33", label: "miserable", score: 1 },
+      ], "the owner's mood is untouched; the unnamed speaker's is filed under their redacted number");
+      assert.equal(three.mood_score, 2, "(2 + 4 + 1) / 3 rounds to 2");
+
+      // A plain score written later cannot contradict the people underneath it.
+      await api.patch(`/api/memories/${entry.id}`).send({ title: "Wed Jan 15 — Home, revised", mood_score: 5 }).expect(200);
+      const kept = db.prepare(`SELECT title,mood_score,moods_json ${todays}`).get() as { title: string; mood_score: number; moods_json: string };
+      assert.equal(kept.title, "Wed Jan 15 — Home, revised");
+      assert.equal(kept.mood_score, 2, "derived from the list, not the write");
+      assert.equal(JSON.parse(kept.moods_json).length, 3);
+      // The orphaned case: removing the group's area cannot fold the household's evening into the owner's chart.
+      db.prepare("UPDATE memories SET life_area_id=NULL WHERE id=?").run(entry.id);
+      const mineAfter = (await api.get("/api/overview/mood-trend?scope=mine").expect(200)).body.data as Array<{ id: string }>;
+      assert.equal(mineAfter.some(point => point.id === entry.id), false, "an entry with other people's moods is never the owner's alone");
     } finally { restoreClock(); }
   });
 
@@ -7532,6 +7567,13 @@ describe("worker scheduling", () => {
     restore = atUtcTime("08:00");
     try { await runWorkerOnce(db, fakeSearch(db), dependencies); } finally { restore(); }
     assert.deepEqual(sent, ["Reminder: Quiet hours task"]);
+
+    // The owner's evening check-in set for 23:00 — inside the same quiet window — is the text they
+    // asked for, so it goes out at 23:30 while the reminder above waited for morning.
+    saveNotificationPreferences(db, { ...getNotificationPreferences(db), eveningCheckinTime: "23:00" });
+    restore = atUtcTime("23:30");
+    try { await runWorkerOnce(db, fakeSearch(db), dependencies); } finally { restore(); }
+    assert.deepEqual(sent, ["Reminder: Quiet hours task", "digest"], "a check-in timed inside quiet hours is honoured");
   });
 
   it("sends one daily digest per local day once the digest time has passed", async () => {

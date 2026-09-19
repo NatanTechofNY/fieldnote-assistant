@@ -27,11 +27,12 @@ function applyDeliveryStatus(
   `).run(status, now(), providerMessageId);
   if (status !== "failed") return;
   // The provider's reason stays with the message, so a check-in or an answer that
-  // never arrived can be explained afterwards rather than only marked failed.
+  // never arrived can be explained afterwards rather than only marked failed. Cut
+  // to a sentence or two: the row is read on every window and history load.
   db.prepare(`
     UPDATE channel_messages SET metadata_json=json_set(COALESCE(NULLIF(metadata_json,''),'{}'),'$.deliveryError',?)
     WHERE provider_message_id=?
-  `).run(error, providerMessageId);
+  `).run(error.replace(/\s+/g, " ").trim().slice(0, 500), providerMessageId);
   db.prepare(`
     UPDATE reminders SET status='failed',last_error=?,updated_at=? WHERE provider_message_id=?
   `).run(error, now(), providerMessageId);
