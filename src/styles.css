@@ -1480,7 +1480,12 @@ tr:hover .attach-button,
 .ask-editor-foot { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .ask-editor-foot small { font-size:11.5px; color:var(--text-tertiary); }
 .ask-editor-foot small.over { color:var(--danger); }
-.ask-editor-actions { display:flex; gap:6px; }
+.ask-editor-actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+.ask-helper { display:grid; gap:8px; padding:10px 12px; border:1px dashed var(--accent-border); border-radius:var(--radius); background:var(--accent-subtle); }
+.ask-helper label { display:grid; gap:5px; font-size:12px; color:var(--text); }
+.ask-helper label span { font-weight:600; }
+.ask-helper-actions { display:flex; gap:6px; justify-content:flex-end; }
+.ask-helper .field-hint { margin:0; }
 .life-area-add { display:grid; grid-template-columns:34px minmax(0,320px) auto; gap:8px; align-items:center; margin-bottom:9px; }
 .life-area-add input[type="color"] { width:34px; height:30px; padding:2px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); }
 .settings-section { transition:border-color .15s ease; }

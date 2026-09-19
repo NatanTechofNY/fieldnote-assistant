@@ -20,6 +20,7 @@ import { registerAdminRoutes } from "./routes/admin.ts";
 import { registerAgentRoutes } from "./routes/agent.ts";
 import { registerAuthRoutes } from "./routes/auth.ts";
 import { registerConversationRoutes } from "./routes/conversations.ts";
+import { registerCheckinRoutes } from "./routes/checkins.ts";
 import { registerDigestBriefRoutes } from "./routes/digest-briefs.ts";
 import { registerHealthRoutes } from "./routes/health.ts";
 import { registerIntegrationRoutes } from "./routes/integrations.ts";
@@ -62,6 +63,7 @@ const registerRoutes = [
   registerReflectionRoutes,
   registerReminderRoutes,
   registerDigestBriefRoutes,
+  registerCheckinRoutes,
   registerConversationRoutes,
   registerSearchRoutes,
   registerAgentRoutes,

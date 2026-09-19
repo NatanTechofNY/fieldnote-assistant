@@ -46,6 +46,7 @@ const lifeAreas = [
 /** What `/api/life-areas` answers; a test about a household with no group chats narrows it. */
 let servedLifeAreas: Array<Record<string, unknown>> = lifeAreas;
 const lifeAreaPatches: Array<{ id: string; body: Record<string, unknown> }> = [];
+const askDrafts: Array<Record<string, unknown>> = [];
 
 const todo = (over: Partial<Record<string, unknown>> = {}) => ({
   id: "todo_1",
@@ -243,6 +244,11 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     return new Response(JSON.stringify({ success: true, data: { queued: 0, processed: 0 } }));
   }
   if (url.includes("/api/health")) return new Response(JSON.stringify({ success: true, data: health }));
+  if (url.endsWith("/api/checkins/draft-ask")) {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    askDrafts.push(body);
+    return new Response(JSON.stringify({ success: true, data: { ask: `Drafted for: ${body.brief}` } }));
+  }
   if (url.includes("/api/life-areas")) {
     if (init?.method === "PATCH") {
       const id = url.split("/").pop() as string;
@@ -1443,6 +1449,24 @@ it("schedules a group's check-ins, and a copy to the owner, from the Group chats
   await userEvent.click(await within(editor).findByRole("button", { name: /Use default/ }));
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { morning_checkin_prompt: null } }));
   expect(screen.getByLabelText("Evening check-in wording for Home")).toHaveAttribute("placeholder", 'Ask the group chat "Home" how today went.');
+
+  // The agent can write it from what the chat is for; the draft lands in the field, unsaved, to read first.
+  askDrafts.length = 0;
+  const patchesBefore = lifeAreaPatches.length;
+  await userEvent.click(within(editor).getByRole("button", { name: /Help me write it/ }));
+  const about = within(editor).getByLabelText("Morning check-in wording for Home: what it should be like");
+  expect(within(editor).getByRole("button", { name: /Write it/ })).toBeDisabled();
+  await userEvent.type(about, "Sarah and me running the house");
+  await userEvent.click(within(editor).getByRole("button", { name: /Write it/ }));
+  await waitFor(() => expect(wording.value).toBe("Drafted for: Sarah and me running the house"));
+  expect(askDrafts).toEqual([{ kind: "group_morning", brief: "Sarah and me running the house", life_area_id: "area_group", current: null }]);
+  expect(lifeAreaPatches).toHaveLength(patchesBefore);
+  expect(within(editor).getByText("Your wording")).toBeInTheDocument();
+  expect(within(editor).queryByLabelText(/what it should be like/)).not.toBeInTheDocument();
+  await userEvent.click(within(editor).getByRole("button", { name: /Save wording/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({
+    id: "area_group", body: { morning_checkin_prompt: "Drafted for: Sarah and me running the house" },
+  }));
 });
 
 it("fills the brief form from the end-of-day template and flags a send time inside quiet hours", async () => {

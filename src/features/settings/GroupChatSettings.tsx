@@ -95,6 +95,12 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
             value={group.morning_checkin_prompt ?? null}
             saving={checkin.isPending}
             onSave={ask => checkin.mutate({ id: group.id, morning_checkin_prompt: ask })}
+            draft={{
+              prompt: "What is this group chat for, and how should the morning note sound?",
+              placeholder: "Sarah and me running the house — keep it light, tease us a little about the laundry",
+              request: (brief, current) => api.draftCheckinAsk({ kind: "group_morning", brief, life_area_id: group.id, current }).then(result => result.ask),
+              onError: notify,
+            }}
           />
           <AskEditor
             label="Evening question"
@@ -103,6 +109,12 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
             value={group.evening_checkin_prompt ?? null}
             saving={checkin.isPending}
             onSave={ask => checkin.mutate({ id: group.id, evening_checkin_prompt: ask })}
+            draft={{
+              prompt: "What is this group chat for, and how should the evening question sound?",
+              placeholder: "A couple's check-in — ask for one thing we're grateful for, warm and short",
+              request: (brief, current) => api.draftCheckinAsk({ kind: "group_evening", brief, life_area_id: group.id, current }).then(result => result.ask),
+              onError: notify,
+            }}
           />
           <small className="field-hint">Write <code>{"{group}"}</code> anywhere to stand for the group&rsquo;s current name.</small>
         </div>

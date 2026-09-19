@@ -39,3 +39,45 @@ export function renderAsk(override: string | null | undefined, fallback: string,
   const ask = override?.trim() ? override.trim() : fallback;
   return groupName === undefined ? ask : ask.split(GROUP_NAME_TOKEN).join(groupName);
 }
+
+export type AskKind = "group_morning" | "group_evening" | "owner_evening";
+
+/** What each ask must keep doing whatever its wording, so a draft stays a check-in. */
+const ASK_ESSENTIALS: Record<AskKind, string> = {
+  group_morning: "name what is still going in the group and when each is due, and ask what to wrap up today or move",
+  group_evening: "ask everyone in the group how their day went, one line each, with a mood word and a number from 1 to 5",
+  owner_evening: "ask me how today went, in one line, with a mood word and a number from 1 to 5",
+};
+
+/**
+ * The turn that drafts an ask for the owner. The agent is told what an ask is
+ * — an instruction to itself, not the text that will be sent — what the
+ * default says, what the owner wants this one to be like, and the frame the
+ * app keeps around it, so the draft carries only the wording and never tries
+ * to do the context's job. Plain text back, ready to paste into the field.
+ */
+export function composeAskDraftTurn(input: {
+  kind: AskKind;
+  brief: string;
+  groupName?: string;
+  current?: string | null;
+}): string {
+  const fallback = CHECKIN_DEFAULTS[input.kind === "group_morning" ? "groupMorning" : input.kind === "group_evening" ? "groupEvening" : "ownerEvening"];
+  const group = input.kind !== "owner_evening";
+  const what = input.kind === "group_morning" ? "morning check-in" : "evening check-in";
+  const where = group ? `the group chat "${input.groupName}"` : "me, on my own line";
+  return [
+    `Write the instruction you will be given each day before composing the ${what} for ${where}. It is the ask`
+    + " you will read, not the message that gets sent: one short paragraph telling yourself what to write and in what"
+    + " tone. Answer with the instruction alone — plain text, no quotes, no heading, no preamble, nothing else.",
+    "",
+    "--- Context supplied by the app, not typed into a chat. This turn uses no tools and saves nothing.",
+    `What the ask must still do: ${ASK_ESSENTIALS[input.kind]}.`,
+    `The default reads: ${fallback}`,
+    ...group ? [`Write ${GROUP_NAME_TOKEN} wherever the group's name belongs; the app fills it in. The group is currently named "${input.groupName}".`] : [],
+    `Keep it under ${CHECKIN_PROMPT_MAX} characters. Do not list tasks, people, or dates yourself: the app appends`
+    + " what is open, who is in the chat, and today's date underneath the ask each time it runs.",
+    input.current?.trim() ? `The owner's current wording, to revise rather than start over: ${input.current.trim()}` : "There is no wording yet; the default is in use.",
+    `What the owner says this should be like: ${input.brief.trim()}`,
+  ].join("\n");
+}

@@ -3069,8 +3069,11 @@ describe("Sendblue provider", () => {
     json({ message_handle: handle, status: "QUEUED", error_code: null });
 
   /** Skips the connect handshake for cases about delivery rather than setup. */
-  function connectedFixture(provider: "twilio" | "sendblue" = "sendblue") {
-    const context = fixture();
+  function connectedFixture(
+    provider: "twilio" | "sendblue" = "sendblue",
+    draftWithAgent?: NonNullable<Parameters<typeof createApp>[0]>["draftWithAgent"],
+  ) {
+    const context = fixture(undefined, draftWithAgent);
     saveSendblueConfig(context.db, {
       ...CREDENTIALS,
       webhookBaseUrl: "https://assistant.example.com",
@@ -5815,8 +5818,8 @@ describe("Sendblue provider", () => {
   const CHECKIN_DAY = "2030-01-15";
 
   /** A connected Sendblue line, the group thread, its area, and an agent that answers with `text`. */
-  function checkinFixture() {
-    const context = connectedFixture();
+  function checkinFixture(draftWithAgent?: NonNullable<Parameters<typeof createApp>[0]>["draftWithAgent"]) {
+    const context = connectedFixture("sendblue", draftWithAgent);
     withTrustedContacts(context.db, [{ phone: WIFE, name: "Sarah" }]);
     const timestamp = new Date().toISOString();
     context.db.prepare(`
@@ -6134,6 +6137,60 @@ describe("Sendblue provider", () => {
     assert.equal(reset.morning_checkin_prompt, null);
     assert.equal(reset.evening_checkin_prompt, "Ask {group} for a high and a low from today, and a mood 1–5.", "one at a time");
     assert.match(composeGroupMorningTurn(db, { id: area.id, name: "Home", groupId: GROUP, morningAsk: null }, { date: CHECKIN_DAY, timezone: "UTC" }), /^Write this morning's check-in/);
+  });
+
+  /**
+   * The agent drafts an ask from what the owner says the chat is for. The turn
+   * tells it what an ask is and what the app keeps around it; the answer comes
+   * back as wording for the field and nothing is saved.
+   */
+  it("drafts a check-in's ask from what the owner says the group is for, without saving it", async () => {
+    const drafts: Array<{ prompt: string; address: string; options?: unknown }> = [];
+    let reply = '"Morning, {group}! One playful line about what\'s still open, then ask who\'s taking what today."';
+    const { api, area, db } = checkinFixture(async (prompt, address, options) => {
+      drafts.push({ prompt, address, options });
+      return reply;
+    });
+
+    await api.post("/api/checkins/draft-ask").send({ kind: "group_morning", brief: "Sarah and me running the house" }).expect(400);
+    await api.post("/api/checkins/draft-ask").send({ kind: "group_morning", brief: "  ", life_area_id: area.id }).expect(400);
+    await api.post("/api/checkins/draft-ask").send({ kind: "group_morning", brief: "Work", life_area_id: "area_work" }).expect(400);
+    await api.post("/api/checkins/draft-ask").send({ kind: "group_morning", brief: "Nope", life_area_id: "area_missing" }).expect(404);
+    assert.equal(drafts.length, 0, "a bad request never reaches the agent");
+
+    const drafted = (await api.post("/api/checkins/draft-ask").send({
+      kind: "group_morning", brief: "Sarah and me running the house — keep it light, tease us about the laundry", life_area_id: area.id,
+    }).expect(200)).body.data;
+    assert.equal(drafted.ask, "Morning, {group}! One playful line about what's still open, then ask who's taking what today.", "quotes stripped");
+    assert.equal(drafts.length, 1);
+    assert.equal(drafts[0].address, `checkin-ask:group_morning:${area.id}`);
+    assert.deepEqual(drafts[0].options, { context: { kind: "checkin_ask_draft", briefName: "Morning note for Home", instruction: "Sarah and me running the house — keep it light, tease us about the laundry" } });
+    const prompt = drafts[0].prompt;
+    assert.match(prompt, /^Write the instruction you will be given each day before composing the morning check-in for the group chat "Home"/);
+    assert.match(prompt, /It is the ask you will read, not the message that gets sent/);
+    assert.match(prompt, /This turn uses no tools and saves nothing/);
+    assert.match(prompt, /must still do: name what is still going in the group and when each is due/);
+    assert.match(prompt, /The default reads: Write this morning's check-in for the group chat "\{group\}"/);
+    assert.match(prompt, /Write \{group\} wherever the group's name belongs.*currently named "Home"/);
+    assert.match(prompt, /There is no wording yet; the default is in use\./);
+    assert.match(prompt, /What the owner says this should be like: Sarah and me running the house — keep it light, tease us about the laundry$/);
+    const stored = db.prepare("SELECT morning_checkin_prompt FROM life_areas WHERE id=?").get(area.id) as { morning_checkin_prompt: string | null };
+    assert.equal(stored.morning_checkin_prompt, null, "a draft is a suggestion until the owner saves it");
+
+    // A revision carries the current wording; the owner's own evening needs no group.
+    reply = "Ask me for one win and one do-over, then a mood 1–5.";
+    const owner = (await api.post("/api/checkins/draft-ask").send({
+      kind: "owner_evening", brief: "Short and direct", current: "Ask me how the day went, warmly.",
+    }).expect(200)).body.data;
+    assert.equal(owner.ask, "Ask me for one win and one do-over, then a mood 1–5.");
+    assert.equal(drafts[1].address, "checkin-ask:owner_evening:owner");
+    assert.match(drafts[1].prompt, /evening check-in for me, on my own line/);
+    assert.match(drafts[1].prompt, /must still do: ask me how today went/);
+    assert.doesNotMatch(drafts[1].prompt, /\{group\}/, "no group token for the owner's own ask");
+    assert.match(drafts[1].prompt, /current wording, to revise rather than start over: Ask me how the day went, warmly\./);
+
+    reply = "   ";
+    await api.post("/api/checkins/draft-ask").send({ kind: "owner_evening", brief: "Anything" }).expect(502);
   });
 
   it("keeps the owner's records out of a group chat", async () => {

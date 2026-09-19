@@ -434,6 +434,12 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
                 fallback={data.checkinDefaults.ownerEvening}
                 value={data.notifications.eveningCheckinPrompt ?? null}
                 onChange={setEveningAsk}
+                draft={{
+                  prompt: "How do you want to be asked about your day?",
+                  placeholder: "Short and direct — one win, one thing I'd do differently, then the mood number",
+                  request: (brief, current) => api.draftCheckinAsk({ kind: "owner_evening", brief, current }).then(result => result.ask),
+                  onError: notify,
+                }}
               />
               <small className="field-hint">Saved with the SMS schedule below.</small>
             </div>
