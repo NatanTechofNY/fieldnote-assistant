@@ -806,20 +806,27 @@ export async function runWorkerOnce(
   } catch (error) {
     console.error("Rolling recurring todos failed", error);
   }
-  if (
-    preferences.smsEnabled
-    && preferences.recipientPhone
-    && !preferences.optedOutAt
-    && !inQuietHours(local.time, preferences.quietHoursStart, preferences.quietHoursEnd)
-  ) {
+  const recipient = preferences.smsEnabled && !preferences.optedOutAt ? preferences.recipientPhone : null;
+  const quiet = inQuietHours(local.time, preferences.quietHoursStart, preferences.quietHoursEnd);
+  /*
+   * A check-in is due once its local time has passed today. Quiet hours hold
+   * it — unless the owner set that time inside quiet hours themselves, in
+   * which case the text at 11:35 PM is the one they asked for. A check-in
+   * timed for the evening that the worker only gets to at 3 AM, because the
+   * laptop was asleep, still waits; nobody chose 3 AM.
+   */
+  const checkinDue = (time: string | null): time is string =>
+    Boolean(time) && local.time >= (time as string)
+    && (!quiet || inQuietHours(time as string, preferences.quietHoursStart, preferences.quietHoursEnd));
+  if (recipient && !quiet) {
     for (const reminder of claimDueReminders(db)) {
-      await deliverReminder(db, search, reminder, preferences.recipientPhone, send);
+      await deliverReminder(db, search, reminder, recipient, send);
     }
     if (preferences.dailyDigestEnabled && local.time >= preferences.dailyDigestTime) {
       await deliverDailyDigest(
         db,
         search,
-        preferences.recipientPhone,
+        recipient,
         local.date,
         {
           timezone: preferences.timezone,
@@ -834,22 +841,24 @@ export async function runWorkerOnce(
     // one enforcement covers every outbound channel message.
     for (const brief of dueDigestBriefs(db, local.time)) {
       await deliverDigestBrief(
-        db, search, brief, preferences.recipientPhone, local, preferences.timezone, runAgent, send,
+        db, search, brief, recipient, local, preferences.timezone, runAgent, send,
       );
     }
-    if (preferences.eveningCheckinTime && local.time >= preferences.eveningCheckinTime) {
+  }
+  if (recipient) {
+    if (checkinDue(preferences.eveningCheckinTime)) {
       await deliverEveningCheckin(
-        db, search, preferences.recipientPhone, local, preferences.timezone, preferences.eveningCheckinPrompt, runAgent, send,
+        db, search, recipient, local, preferences.timezone, preferences.eveningCheckinPrompt, runAgent, send,
       );
     }
     // A group's check-ins go into the group, which only iMessage can carry.
     if (isSmsProviderConnected(db, "sendblue")) {
       for (const area of checkinAreas(db)) {
-        if (area.morning_checkin_time && local.time >= area.morning_checkin_time) {
-          await deliverGroupCheckin(db, search, "morning", area, preferences.recipientPhone, local, preferences.timezone, runAgent, send);
+        if (checkinDue(area.morning_checkin_time)) {
+          await deliverGroupCheckin(db, search, "morning", area, recipient, local, preferences.timezone, runAgent, send);
         }
-        if (area.evening_checkin_time && local.time >= area.evening_checkin_time) {
-          await deliverGroupCheckin(db, search, "evening", area, preferences.recipientPhone, local, preferences.timezone, runAgent, send);
+        if (checkinDue(area.evening_checkin_time)) {
+          await deliverGroupCheckin(db, search, "evening", area, recipient, local, preferences.timezone, runAgent, send);
         }
       }
     }

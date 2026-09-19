@@ -6116,13 +6116,24 @@ describe("Sendblue provider", () => {
     try { await runWorkerOnce(db, fakeSearch(db), worker); } finally { restore(); }
     assert.equal(agentRuns, 0, "off is off");
     await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30" }).expect(200);
-    saveNotificationPreferences(db, { ...getNotificationPreferences(db), quietHoursStart: "22:00", quietHoursEnd: "10:00" });
-    restore = atUtcTime("09:00");
+    // Quiet hours hold a check-in that only lands in them because the worker got to it
+    // late: 08:30 is outside 09:00–10:00, and nobody chose 09:30.
+    saveNotificationPreferences(db, { ...getNotificationPreferences(db), quietHoursStart: "09:00", quietHoursEnd: "10:00" });
+    restore = atUtcTime("09:30");
     try { await runWorkerOnce(db, fakeSearch(db), worker); } finally { restore(); }
     assert.equal(agentRuns, 0, "quiet hours hold it");
     restore = atUtcTime("10:30");
     try { await runWorkerOnce(db, fakeSearch(db), worker); } finally { restore(); }
     assert.equal(agentRuns, 1, "and release it");
+
+    // A time the owner set inside quiet hours is the text they asked for: 23:35 with quiet hours from 22:00 goes out at 23:35.
+    db.prepare("DELETE FROM scheduled_dispatches").run();
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: null, evening_checkin_time: "23:35" }).expect(200);
+    saveNotificationPreferences(db, { ...getNotificationPreferences(db), quietHoursStart: "22:00", quietHoursEnd: "07:00" });
+    restore = atUtcTime("23:40");
+    try { await runWorkerOnce(db, fakeSearch(db), worker); } finally { restore(); }
+    assert.equal(agentRuns, 2, "a check-in timed inside quiet hours is honoured");
+    assert.equal(sends.length, 2, "the released morning note earlier, and now the evening question");
   });
 
   it("asks a group how the day went in the evening, and keeps one shared entry for the answers", async () => {

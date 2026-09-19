@@ -471,7 +471,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
           </div>
           <div className="quiet-note">
             <Pause size={13}/>
-            <span>No scheduled texts from <strong>{humanTime(quietStart)}</strong> to <strong>{humanTime(quietEnd)}</strong>. Anything due overnight waits until quiet hours end.</span>
+            <span>No scheduled texts from <strong>{humanTime(quietStart)}</strong> to <strong>{humanTime(quietEnd)}</strong>. Anything due overnight waits until quiet hours end, except a check-in you timed inside them.</span>
           </div>
         </div>
 
@@ -572,7 +572,8 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               <strong>Check-ins per group</strong>
               <span>
                 A morning note about what that group has in progress or due soon, an evening question about how the day went,
-                or both. Sent in the schedule timezone, outside quiet hours, and saved as you switch them.
+                or both. Sent in the schedule timezone and saved as you switch them. A time you set inside quiet hours is
+                still honoured &mdash; you chose it.
               </span>
             </div>
             <Clock3 size={17}/>
