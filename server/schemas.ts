@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CHECKIN_PROMPT_MAX } from "./checkin-prompts.ts";
 import { maxLeadMinutes } from "./recurrence.ts";
 import { isSendblueReaction } from "./sendblue-service.ts";
 
@@ -122,12 +123,26 @@ export const todoPatch = z.object({
 }).partial().strict()
   .refine((value) => Object.keys(value).length > 0, "No changes provided");
 
+/**
+ * One person's mood on a shared entry. The name may be left out by a tool, in
+ * which case it is the speaker's; `mood_label` and `mood_score` on the entry
+ * are then derived from the list rather than taken from the write.
+ */
+const personMood = z.object({
+  // Blank reads as "the speaker", the same as null, so the hosted schema and this one agree.
+  name: z.string().trim().max(60).nullable().optional(),
+  label: z.string().trim().min(1).max(60),
+  score: z.number().int().min(1).max(5),
+}).strict();
+const moods = z.array(personMood).max(20).nullable().optional();
+
 export const memoryCreate = z.object({
   title: z.string().trim().max(300).nullable().optional(),
   content: z.string().trim().min(1).max(50_000),
   kind: memoryKind.default("note"),
   mood_label: z.string().trim().min(1).max(100).nullable().optional(),
   mood_score: z.number().int().min(1).max(5).nullable().optional(),
+  moods,
   category_id: nullableId,
   life_area_id: nullableId,
   life_area_source: lifeAreaSource.nullable().optional(),
@@ -150,6 +165,40 @@ export const lifeAreaCreate = z.object({
   name: z.string().trim().min(1).max(80),
   color: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/, "Use a six-digit hex color"),
 }).strict();
+
+/** The owner's wording for a check-in's ask. Blank is not a wording; send null to return to the default. */
+const checkinPrompt = z.string().trim().min(1, "Write the ask, or clear it to use the default")
+  .max(CHECKIN_PROMPT_MAX, `Keep the ask under ${CHECKIN_PROMPT_MAX} characters`);
+
+/** A request for the agent to draft an ask: which one, what it should be like, and the group when it is a group's. */
+export const askDraftInput = z.object({
+  kind: z.enum(["group_morning", "group_evening", "owner_evening"]),
+  brief: z.string().trim().min(1, "Say what this check-in should be like").max(500, "Keep the brief under 500 characters"),
+  life_area_id: z.string().trim().min(1).max(100).optional(),
+  current: checkinPrompt.nullable().optional(),
+}).strict().superRefine((value, context) => {
+  if (value.kind !== "owner_evening" && value.life_area_id === undefined) {
+    context.addIssue({ code: "custom", message: "Name the group chat's classification", path: ["life_area_id"] });
+  }
+  if (value.kind === "owner_evening" && value.life_area_id !== undefined) {
+    context.addIssue({ code: "custom", message: "The owner's own evening has no group", path: ["life_area_id"] });
+  }
+});
+
+/**
+ * A patch may also set the check-in times a group chat's area carries: the
+ * local `HH:MM` the chat is texted a morning note and an evening question, or
+ * null to turn either off. The route refuses them on an area no group owns.
+ */
+export const lifeAreaPatch = lifeAreaCreate.partial().extend({
+  morning_checkin_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time").nullable().optional(),
+  evening_checkin_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time").nullable().optional(),
+  /** Whether the owner is also texted a copy of the group's check-ins on their own number. */
+  checkin_copy_to_owner: z.boolean().optional(),
+  /** The owner's wording for each ask; null returns to the default. */
+  morning_checkin_prompt: checkinPrompt.nullable().optional(),
+  evening_checkin_prompt: checkinPrompt.nullable().optional(),
+}).strict().refine(value => Object.keys(value).length > 0, "No changes provided");
 
 export const reminderCreate = z.object({
   todo_id: z.string().min(1).max(100),
@@ -277,6 +326,10 @@ export const notificationInput = z.object({
   quietHoursEnd: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
   trustedContacts: z.array(trustedContact).max(25).default([]),
   groupAllowAll: z.boolean().default(false),
+  /** Local time of the owner's own evening check-in; null or absent leaves it off. */
+  eveningCheckinTime: clockTime.nullable().default(null),
+  /** The owner's wording for their evening ask; null or absent uses the default. */
+  eveningCheckinPrompt: checkinPrompt.nullable().default(null),
 }).strict().superRefine((value, context) => {
   const seen = new Set<string>();
   value.trustedContacts.forEach((contact, index) => {
@@ -331,6 +384,7 @@ const memoryToolFields = {
   content: z.string().trim().min(1).max(50_000).optional(),
   mood_label: z.string().trim().min(1).max(100).nullable().optional(),
   mood_score: z.number().int().min(1).max(5).nullable().optional(),
+  moods,
   category_id: nullableId,
   life_area_id: nullableId,
   occurred_at: nullableIso,
@@ -423,7 +477,7 @@ export const toolInput = {
     patch: z.object({
       ...memoryToolFields,
       clear_fields: clearFields([
-        "title", "mood_label", "mood_score", "category_id",
+        "title", "mood_label", "mood_score", "moods", "category_id",
         "life_area_id", "occurred_at", "tags",
       ]),
     }).default({}),

@@ -90,6 +90,6 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
       <input className="input" value={name} onChange={event => setName(event.target.value)} placeholder="New classification name" required/>
       <button className="button primary" disabled={create.isPending || !name.trim()}><Plus size={14}/>Add</button>
     </form>
-    <small className="field-hint">Work, Personal, and Side Project are stable defaults and cannot be deleted. Custom classifications can be renamed or removed here. A group chat's classification is created by the assistant when the group first writes in; rename it here or ask the assistant, and if it is removed while the chat is still active, the next message there creates a fresh one.</small>
+    <small className="field-hint">Work, Personal, and Side Project are stable defaults and cannot be deleted. Custom classifications can be renamed or removed here. A group chat's classification is created by the assistant when the group first writes in; rename it here or ask the assistant, and if it is removed while the chat is still active, the next message there creates a fresh one. A group's check-ins and who may talk to the assistant there are set under Group chats.</small>
   </div>;
 }

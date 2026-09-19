@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS life_areas (
   name TEXT NOT NULL,
   color TEXT NOT NULL,
   thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL,
+  morning_checkin_time TEXT,
+  evening_checkin_time TEXT,
+  checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1)),
+  morning_checkin_prompt TEXT,
+  evening_checkin_prompt TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, slug)
@@ -81,6 +86,7 @@ CREATE TABLE IF NOT EXISTS memories (
   kind TEXT NOT NULL CHECK(kind IN ('fact','note','journal')),
   mood_label TEXT,
   mood_score INTEGER CHECK(mood_score IS NULL OR mood_score BETWEEN 1 AND 5),
+  moods_json TEXT,
   category_id TEXT REFERENCES categories(id) ON DELETE SET NULL,
   life_area_id TEXT REFERENCES life_areas(id) ON DELETE SET NULL,
   life_area_source TEXT CHECK(life_area_source IS NULL OR life_area_source IN ('agent','user')),
@@ -201,6 +207,8 @@ CREATE TABLE IF NOT EXISTS notification_preferences (
   opted_out_at TEXT,
   trusted_contacts_json TEXT NOT NULL DEFAULT '[]',
   group_allow_all INTEGER NOT NULL DEFAULT 0 CHECK(group_allow_all IN (0,1)),
+  evening_checkin_time TEXT,
+  evening_checkin_prompt TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -276,7 +284,7 @@ CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS scheduled_dispatches (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief')),
+  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin','evening_checkin')),
   idempotency_key TEXT NOT NULL UNIQUE,
   scheduled_for TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending'
@@ -321,6 +329,39 @@ function dispatchKindAllows(db: Db, kind: string): boolean {
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='scheduled_dispatches'",
   ).get() as { sql?: string } | undefined)?.sql || "");
   return sql.includes(`'${kind}'`);
+}
+
+/**
+ * Widens the dispatch kind CHECK by copying the table and renaming it, the
+ * same way v11 and v12 did, carrying `available_at` when the table being
+ * copied already has it. SQLite cannot alter a CHECK in place.
+ */
+function rebuildScheduledDispatches(db: Db, suffix: string, kinds: string[]): void {
+  const carried = columns(db, "scheduled_dispatches").has("available_at")
+    ? "id,user_id,kind,idempotency_key,scheduled_for,status,attempts,available_at,provider_message_id,last_error,created_at,updated_at"
+    : "id,user_id,kind,idempotency_key,scheduled_for,status,attempts,NULL,provider_message_id,last_error,created_at,updated_at";
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE scheduled_dispatches_${suffix} (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN (${kinds.map(kind => `'${kind}'`).join(",")})),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        scheduled_for TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending','processing','sent','failed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT,
+        provider_message_id TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO scheduled_dispatches_${suffix} SELECT ${carried} FROM scheduled_dispatches;
+      DROP TABLE scheduled_dispatches;
+      ALTER TABLE scheduled_dispatches_${suffix} RENAME TO scheduled_dispatches;
+    `);
+  })();
 }
 
 function migrateLegacyV1(db: Db): void {
@@ -456,6 +497,28 @@ function migrateMessaging(db: Db): void {
     db.exec("ALTER TABLE life_areas ADD COLUMN thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL");
   }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS life_areas_thread ON life_areas(thread_id) WHERE thread_id IS NOT NULL");
+  // A group's area carries the local times its chat is checked in on, morning
+  // and evening; null is off. Only a group's area ever has them set.
+  const areaColumns = columns(db, "life_areas");
+  if (!areaColumns.has("morning_checkin_time")) db.exec("ALTER TABLE life_areas ADD COLUMN morning_checkin_time TEXT");
+  if (!areaColumns.has("evening_checkin_time")) db.exec("ALTER TABLE life_areas ADD COLUMN evening_checkin_time TEXT");
+  // Whether the owner is also texted a copy of the group's check-ins on their own number.
+  if (!areaColumns.has("checkin_copy_to_owner")) {
+    db.exec("ALTER TABLE life_areas ADD COLUMN checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1))");
+  }
+  // Each person's mood on a shared journal entry; mood_label/mood_score are derived from it.
+  if (!columns(db, "memories").has("moods_json")) db.exec("ALTER TABLE memories ADD COLUMN moods_json TEXT");
+  // The owner's wording for each ask; null uses the default in checkin-prompts.ts.
+  if (!areaColumns.has("morning_checkin_prompt")) db.exec("ALTER TABLE life_areas ADD COLUMN morning_checkin_prompt TEXT");
+  if (!areaColumns.has("evening_checkin_prompt")) db.exec("ALTER TABLE life_areas ADD COLUMN evening_checkin_prompt TEXT");
+  // The owner's own evening check-in, on the same footing as the daily digest.
+  const checkinColumns = columns(db, "notification_preferences");
+  if (!checkinColumns.has("evening_checkin_time")) {
+    db.exec("ALTER TABLE notification_preferences ADD COLUMN evening_checkin_time TEXT");
+  }
+  if (!checkinColumns.has("evening_checkin_prompt")) {
+    db.exec("ALTER TABLE notification_preferences ADD COLUMN evening_checkin_prompt TEXT");
+  }
   const timestamp = now();
   db.prepare(`
     INSERT OR IGNORE INTO notification_preferences(
@@ -757,6 +820,27 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
       if (!todoColumns.has("last_completed_at")) db.exec("ALTER TABLE todos ADD COLUMN last_completed_at TEXT");
       db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(14,?)").run(now());
     })();
+  }
+  const groupCheckinDispatchApplied = db.prepare(
+    "SELECT 1 found FROM schema_migrations WHERE version=15",
+  ).get();
+  if (!groupCheckinDispatchApplied) {
+    // Group check-ins claim a dispatch row per group per local day, so the kind
+    // CHECK has to admit 'group_checkin'.
+    if (!dispatchKindAllows(db, "group_checkin")) rebuildScheduledDispatches(db, "v15", ["daily_digest", "reminder", "digest_brief", "group_checkin"]);
+    db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(15,?)").run(now());
+  }
+  const eveningCheckinDispatchApplied = db.prepare(
+    "SELECT 1 found FROM schema_migrations WHERE version=16",
+  ).get();
+  if (!eveningCheckinDispatchApplied) {
+    // The owner's evening check-in was first filed under 'daily_digest'; its
+    // own kind keeps the column meaning what it says. Existing rows are renamed.
+    if (!dispatchKindAllows(db, "evening_checkin")) {
+      rebuildScheduledDispatches(db, "v16", ["daily_digest", "reminder", "digest_brief", "group_checkin", "evening_checkin"]);
+    }
+    db.prepare("UPDATE scheduled_dispatches SET kind='evening_checkin' WHERE kind='daily_digest' AND idempotency_key LIKE 'evening_checkin:%'").run();
+    db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(16,?)").run(now());
   }
   // NeuralSearch is opt-in: it is a paid add-on, so an application without the
   // entitlement gets plain keyword search rather than a failed setup.

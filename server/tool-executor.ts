@@ -16,6 +16,7 @@ import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
 import { addressesAssistant, ASSISTANT_NAME, speakerNameOf } from "./group-thread.ts";
 import type { SmsProvider } from "./integrations.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
+import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
 import { toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
@@ -45,7 +46,7 @@ const todoJson = (row: TodoRow) => ({
 
 const memoryJson = (row: MemoryRow) => ({
   id: row.id, title: row.title, content: row.content, kind: row.kind,
-  mood_label: row.mood_label, mood_score: row.mood_score, category_id: row.category_id,
+  mood_label: row.mood_label, mood_score: row.mood_score, moods: parseMoods(row.moods_json), category_id: row.category_id,
   category_name: row.category_name ?? null, life_area_id: row.life_area_id,
   life_area_name: row.life_area_name ?? null, life_area_slug: row.life_area_slug ?? null,
   life_area_source: row.life_area_source, occurred_at: row.occurred_at,
@@ -235,6 +236,12 @@ export type ToolTurnContext = {
    * may drive in a group have something to check.
    */
   speakerIsOwner?: boolean;
+  /**
+   * Who wrote the message being answered, as the app names them: a trusted
+   * contact's name in a group, the owner on their own line. A mood saved
+   * without a name is this person's.
+   */
+  speakerName?: string;
   /** The message being answered, and so the only one a tapback may land on. */
   inboundMessageHandle?: string;
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
@@ -262,7 +269,21 @@ export type ToolTurnContext = {
   sentText?: boolean;
   /** How a tool that texts mid-turn sends; the active provider unless a test supplies one. */
   sendSms?: SmsSender;
+  /**
+   * The kind of app-composed turn this is (`group_morning`, `evening_checkin`,
+   * …), when it is one. The check-ins are told they use no tools; this is
+   * what makes it so whatever the text — or a record quoted in it — says.
+   */
+  appTurn?: string;
 };
+
+/**
+ * App-composed turns that only write a message, never a record: the check-ins
+ * and the wording draft. Their instruction quotes records people saved — in a
+ * group, anyone in it — so "no tools" cannot be left to the prompt. Digests
+ * and reflection drafts are app-composed too, but are meant to read.
+ */
+const NO_TOOL_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "checkin_ask_draft"]);
 
 /**
  * Tools that read the owner's working life or their Atlassian account. None of
@@ -274,6 +295,15 @@ const OWNER_ONLY_TOOLS = new Set([
   "list_jira_boards", "list_jira_issues", "get_jira_issue", "list_jira_users",
   "list_confluence_spaces", "list_confluence_pages", "get_confluence_page", "list_confluence_comments",
 ]);
+
+/**
+ * Whether the turn's speaker may record only their own mood on a shared entry:
+ * anyone in a group who is not the owner. The owner, in a group or on their own
+ * line, may name whose mood they are recording — "Sarah said she's a 2".
+ */
+function ownMoodOnly(context: ToolTurnContext | undefined): boolean {
+  return Boolean(context?.scope) && context?.speakerIsOwner !== true;
+}
 
 /**
  * A todo as the turn may see it. Outside a group this is `getTodo`; inside one,
@@ -412,6 +442,12 @@ export async function executeAgentTool(
   // as a 400 through the shared error handler.
   const schema = toolInput[name as ToolName];
   if (schema) input = schema.parse(input) as Input;
+  if (context?.appTurn && NO_TOOL_APP_TURNS.has(context.appTurn)) {
+    throw new Error(
+      `This turn is the app asking you to write the ${context.appTurn.replace(/_/g, " ")}; it uses no tools`
+      + (name === "stay_quiet" ? " — there is no message to stay quiet on" : ", so write the text instead"),
+    );
+  }
   const scope = context?.scope;
   if (scope && OWNER_ONLY_TOOLS.has(name)) throw new Error(`${name} is not available in a group chat`);
 
@@ -475,6 +511,9 @@ export async function executeAgentTool(
     // assistant. The reason lands in the archive as this tool's row; the turn
     // itself sends nothing. A 1:1 text is always for the assistant.
     if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat; a text sent to you is for you");
+    // A scheduled check-in is the assistant speaking to the room, not a
+    // message to judge; there is no inbound to stay quiet on.
+    if (!context.inboundMessageHandle) throw new Error("This turn is the app asking you to write to the group; there is no message to stay quiet on");
     // Until the assistant has answered once in a group, the owner has just
     // brought it in and the room is owed an introduction and a name for its
     // area; a quiet first turn would consume both cues for good.
@@ -843,14 +882,22 @@ export async function executeAgentTool(
     const timestamp = now();
     const memoryId = id("memory");
     const area = classificationForWrite(scope, input);
+    const mood = resolveMoodFields({
+      existingJson: null,
+      incoming: input.moods as IncomingMood[] | null | undefined,
+      clear: false,
+      plain: { mood_label: (input.mood_label as string | null | undefined) ?? null, mood_score: (input.mood_score as number | null | undefined) ?? null },
+      speakerName: context?.speakerName,
+      ownMoodOnly: ownMoodOnly(context),
+    });
     db.prepare(`
       INSERT INTO memories(
-        id,user_id,title,content,kind,mood_label,mood_score,category_id,life_area_id,life_area_source,
+        id,user_id,title,content,kind,mood_label,mood_score,moods_json,category_id,life_area_id,life_area_source,
         occurred_at,review_worthy,tags_json,created_at,updated_at
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       memoryId, USER_ID, input.title ?? null, input.content as string, input.kind || "note",
-      input.mood_label ?? null, input.mood_score ?? null, area.category_id,
+      mood.mood_label, mood.mood_score, mood.moods_json, area.category_id,
       area.life_area_id, area.life_area_source,
       input.occurred_at ?? null, input.review_worthy === true ? 1 : 0,
       JSON.stringify(input.tags ?? []), timestamp, timestamp,
@@ -877,14 +924,25 @@ export async function executeAgentTool(
     const lifeAreaSource = lifeAreaId === current.life_area_id
       ? current.life_area_source
       : lifeAreaId ? "agent" : null;
+    const mood = resolveMoodFields({
+      existingJson: current.moods_json,
+      incoming: patch.moods as IncomingMood[] | null | undefined,
+      clear: clear.has("moods"),
+      plain: {
+        mood_label: value("mood_label", current.mood_label) as string | null,
+        mood_score: value("mood_score", current.mood_score) as number | null,
+      },
+      speakerName: context?.speakerName,
+      ownMoodOnly: ownMoodOnly(context),
+    });
     db.transaction(() => {
       db.prepare(`
-        UPDATE memories SET kind=?,title=?,content=?,mood_label=?,mood_score=?,category_id=?,
+        UPDATE memories SET kind=?,title=?,content=?,mood_label=?,mood_score=?,moods_json=?,category_id=?,
           life_area_id=?,life_area_source=?,occurred_at=?,review_worthy=?,tags_json=?,updated_at=?
         WHERE id=? AND user_id=?
       `).run(
         value("kind", current.kind), value("title", current.title), value("content", current.content),
-        value("mood_label", current.mood_label), value("mood_score", current.mood_score),
+        mood.mood_label, mood.mood_score, mood.moods_json,
         scope ? current.category_id : value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
         value("occurred_at", current.occurred_at),
         value("review_worthy", Boolean(current.review_worthy)) ? 1 : 0,

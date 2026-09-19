@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { validateAtlassianConfig } from "../atlassian-service.ts";
+import { CHECKIN_DEFAULTS } from "../checkin-prompts.ts";
 import { USER_ID } from "../db.ts";
 import { completeExternalEvent, listExternalEvents, pollGranola } from "../event-ingestion.ts";
 import { failure, success } from "../http.ts";
@@ -23,6 +24,8 @@ export function registerIntegrationRoutes({ app, db, search }: RouteContext): vo
     atlassian: getAtlassianConfig(db),
     notifications: getNotificationPreferences(db),
     tasks: getTaskPreferences(db),
+    /* The asks the check-ins use when the owner has not reworded them, shown beside the override fields. */
+    checkinDefaults: CHECKIN_DEFAULTS,
     webhookPaths: {
       sms: "/api/webhooks/twilio/sms",
       status: "/api/webhooks/twilio/status",

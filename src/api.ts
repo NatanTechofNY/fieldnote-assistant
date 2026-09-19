@@ -1,6 +1,6 @@
 import type {
   Category, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource,
-  ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, Overview, ReflectionEvidence,
+  ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoStatus,
   UniversalSearchResult,
 } from "./types";
@@ -43,6 +43,8 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs?: number):
 
 export const api = {
   overview: () => request<Overview>("/overview"),
+  /** The mood chart's other view; `mine` is what /overview already carries. */
+  moodTrend: (scope: MoodTrendScope) => request<MoodPoint[]>(`/overview/mood-trend?scope=${scope}`),
   health: () => request<Health>("/health"),
   todos: (includeDone = true, lifeAreaId?: string, scope?: "mine") => {
     const query = new URLSearchParams({ includeDone: String(includeDone) });
@@ -79,10 +81,21 @@ export const api = {
   lifeAreas: () => request<LifeArea[]>("/life-areas"),
   createLifeArea: (input: { name: string; color: string }) =>
     request<LifeArea>("/life-areas", { method: "POST", body: JSON.stringify(input) }),
-  updateLifeArea: (id: string, input: { name?: string; color?: string }) =>
+  updateLifeArea: (id: string, input: {
+    name?: string; color?: string;
+    morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean;
+    morning_checkin_prompt?: string | null; evening_checkin_prompt?: string | null;
+  }) =>
     request<LifeArea>(`/life-areas/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteLifeArea: (id: string) =>
     request<{ id: string }>(`/life-areas/${id}`, { method: "DELETE" }),
+  /** The agent drafts a check-in's ask from what the owner says it should be like; nothing is saved. */
+  draftCheckinAsk: (input: {
+    kind: "group_morning" | "group_evening" | "owner_evening";
+    brief: string;
+    life_area_id?: string;
+    current?: string | null;
+  }) => request<{ ask: string }>("/checkins/draft-ask", { method: "POST", body: JSON.stringify(input) }),
   reviewQuarter: (year?: number, quarter?: number) => {
     const query = new URLSearchParams();
     if (year) query.set("year", String(year));

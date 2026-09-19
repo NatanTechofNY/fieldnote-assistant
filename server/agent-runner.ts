@@ -1,6 +1,6 @@
 import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./algolia.ts";
 import { ensureGroupLifeArea, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
-import { redactedNumber, speakerLabel } from "./group-thread.ts";
+import { OWNER_SPEAKER_NAME, redactedNumber, speakerLabel } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
@@ -318,11 +318,24 @@ function userMessage(db: Db, threadId: string, row: UserRow): AgentMessage {
 
 function threadHistory(db: Db, threadId: string): AgentMessage[] {
   const cutoff = new Date(Date.now() - CONTEXT_WINDOW_MS).toISOString();
+  /*
+   * An app-composed instruction is not part of the conversation. It is the
+   * turn being answered when it is current — `runChannelAgent()` appends it
+   * then — and once answered it would only read back as a stranger's message:
+   * a group's morning check-in instruction, replayed the next day in the
+   * group's shared window, with no speaker and the app's wording. The reply it
+   * produced stays, since that is what the people in the thread are answering.
+   * A copy of a group's check-in echoed to the owner (`copyOf`) is not a
+   * question asked of them either: left in, the owner's next line on their own
+   * thread would read as the answer to an evening check-in of theirs.
+   */
   const rows = db.prepare(`
     SELECT id,role,content,metadata_json,rowid FROM (
       SELECT id,role,content,metadata_json,created_at,rowid FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant') AND created_at>=?
         AND status<>'failed'
+        AND NOT (role='user' AND COALESCE(json_extract(metadata_json,'$.internal'),0)=1)
+        AND json_extract(metadata_json,'$.copyOf') IS NULL
       ORDER BY created_at DESC,rowid DESC LIMIT 40
     ) ORDER BY created_at,rowid
   `).all(threadId, cutoff) as Array<{
@@ -713,6 +726,24 @@ export type InboundContext = {
   groupId?: string;
 };
 
+/** What the runner says when the model finished a turn without any text to send. */
+export const NO_TEXT_FALLBACK = "I completed that request, but did not receive a text response.";
+
+/**
+ * What a turn hands back: the text to send and the thread it ran on, plus the
+ * rows it wrote so a caller that sends afterwards can pin the provider's id to
+ * the right row, or mark the turn failed when the send does not go through.
+ */
+export type AgentTurnResult = {
+  text: string;
+  threadId: string;
+  replyTo?: string;
+  /** The row of the message being answered (the instruction, on an app-composed turn). */
+  inboundMessageId?: string;
+  /** The archived reply; absent when the turn ended without one (a gesture, or stay_quiet). */
+  replyMessageId?: string;
+};
+
 export async function runChannelAgent(
   db: Db,
   search: SearchWriter,
@@ -738,8 +769,22 @@ export async function runChannelAgent(
     inbound?: InboundContext;
     /** The sender a tool that texts mid-turn uses; the worker passes its own so a test can capture both. */
     sendSms?: SmsSender;
+    /**
+     * Filed on the reply row alongside its parts. A scheduled group check-in
+     * marks its reply this way so the archive, the history page, and the
+     * prompt's reply rules can tell it from an ordinary answer.
+     */
+    assistantMetadata?: Record<string, unknown>;
+    /**
+     * Whether the reply row is marked internal too. Defaults to `internal`,
+     * right for a scratch thread whose real message is recorded elsewhere once
+     * sent. A group check-in composes on the group's real thread, where the
+     * reply *is* the message the room receives, so it passes false and the
+     * reply stays public — in the window and in the index.
+     */
+    replyInternal?: boolean;
   } = {},
-): Promise<{ text: string; threadId: string; replyTo?: string }> {
+): Promise<AgentTurnResult> {
   const thread = getOrCreateThread(db, channel, address);
   const internalMark = options.internal ? { internal: true } : {};
   const threadMark = options.inbound?.replyTo
@@ -766,9 +811,18 @@ export async function runChannelAgent(
     provider: options.inbound?.provider,
     groupId: options.inbound?.groupId,
     ...(group ? { scope: { ...group.scope, lifeAreaIsNew: group.areaIsNew }, speakerIsOwner: speaker?.speakerIsOwner === true } : {}),
+    // In a group the speaker is whoever wrote — by name, or by the redacted number the
+    // transcript uses for someone the owner never named; on the owner's own line or the
+    // web it is the owner. An app-composed turn has no speaker.
+    ...(options.internal ? {} : {
+      speakerName: group
+        ? speaker?.speakerName ?? (speaker?.speaker ? redactedNumber(speaker.speaker) : undefined)
+        : OWNER_SPEAKER_NAME,
+    }),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
     inboundText: options.internal ? undefined : body,
     sendSms: options.sendSms,
+    ...(options.internal && typeof options.userMessageMetadata?.kind === "string" ? { appTurn: options.userMessageMetadata.kind } : {}),
   };
   search.flushSoon();
   const messages = threadHistory(db, thread.id);
@@ -798,6 +852,11 @@ export async function runChannelAgent(
       // as 17:30 with this offset rather than converted to UTC and then
       // given the offset as well.
       currentLocalDateTime: localIsoWithOffset(new Date(), preferences.timezone),
+      // An app-composed turn says what it is, so the prompt's rules for it key
+      // on a name rather than on the wording of the instruction.
+      ...(options.internal && typeof options.userMessageMetadata?.kind === "string"
+        ? { appTurn: options.userMessageMetadata.kind }
+        : {}),
       ...(options.inbound?.groupId && group
         ? {
           groupId: options.inbound.groupId,
@@ -940,16 +999,21 @@ export async function runChannelAgent(
          */
         if (!text && (context.reacted || context.sentText || context.stayedQuiet)) {
           search.flushSoon();
-          return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle };
+          return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
         }
-        const finalText = text || "I completed that request, but did not receive a text response.";
-        saveChannelMessage(db, thread.id, "outbound", "assistant", finalText, undefined, {
+        const finalText = text || NO_TEXT_FALLBACK;
+        // The reply is marked internal with the instruction on a scratch thread,
+        // where the real message is recorded elsewhere once sent; on a real
+        // thread the caller keeps it public, since it is the message.
+        const replyMark = (options.replyInternal ?? options.internal) ? { internal: true } : {};
+        const replyMessageId = saveChannelMessage(db, thread.id, "outbound", "assistant", finalText, undefined, {
+          ...options.assistantMetadata,
           parts: response.parts,
           agentConversationId: thread.agent_conversation_id,
-          ...internalMark,
+          ...replyMark,
         });
         search.flushSoon();
-        return { text: finalText, threadId: thread.id, replyTo: context.replyToMessageHandle };
+        return { text: finalText, threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId, replyMessageId };
       }
 
       // Real work is about to start, and the mark says on what. A batch that
@@ -1034,8 +1098,10 @@ export async function runSmsAgent(
     userMessageMetadata?: Record<string, unknown>;
     inbound?: InboundContext;
     sendSms?: SmsSender;
+    assistantMetadata?: Record<string, unknown>;
+    replyInternal?: boolean;
   } = {},
-): Promise<{ text: string; threadId: string; replyTo?: string }> {
+): Promise<AgentTurnResult> {
   return runChannelAgent(db, search, "sms", fromPhone, body, providerMessageId, options);
 }
 
@@ -1051,19 +1117,37 @@ export function recordOutboundProviderMessage(
   providerMessageId: string,
   status: string,
   replyTo?: string,
+  /** The row to pin to; without it, the latest outbound row on the thread. */
+  messageId?: string,
 ): void {
   db.prepare(`
     UPDATE channel_messages SET provider_message_id=?,status=?,updated_at=?,
       metadata_json=CASE WHEN ? IS NULL THEN metadata_json
         ELSE json_set(COALESCE(NULLIF(metadata_json,''),'{}'),'$.replyTo',?) END
-    WHERE id=(SELECT id FROM channel_messages WHERE thread_id=? AND direction='outbound'
-      ORDER BY created_at DESC LIMIT 1)
+    WHERE id=COALESCE(?,(SELECT id FROM channel_messages WHERE thread_id=? AND direction='outbound'
+      ORDER BY created_at DESC LIMIT 1))
   `).run(
     providerMessageId,
     status === "queued" ? "queued" : "sent",
     now(),
     replyTo ?? null,
     replyTo ?? null,
+    messageId ?? null,
     threadId,
   );
+}
+
+/**
+ * Takes an app-composed turn out of the conversation after its send failed:
+ * the instruction and the reply it produced are both marked failed, so the
+ * window skips them, the archive does not show a message nobody received, and
+ * the retry composes fresh instead of reading its own undelivered note. The
+ * rows stay for the record; `queueIndexJob` drops the reply from the index.
+ */
+export function failAgentTurn(db: Db, turn: Pick<AgentTurnResult, "inboundMessageId" | "replyMessageId">): void {
+  const ids = [turn.inboundMessageId, turn.replyMessageId].filter((value): value is string => Boolean(value));
+  if (!ids.length) return;
+  db.prepare(`UPDATE channel_messages SET status='failed',updated_at=? WHERE id IN (${ids.map(() => "?").join(",")})`)
+    .run(now(), ...ids);
+  if (turn.replyMessageId) queueIndexJob(db, "channel_message", turn.replyMessageId, "delete");
 }

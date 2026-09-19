@@ -522,6 +522,35 @@
             "maximum": 5,
             "description": "Mood score from 1 to 5, or null when the user was asked and gave none"
           },
+          "moods": {
+            "type": ["array", "null"],
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": ["string", "null"],
+                  "maxLength": 60,
+                  "description": "Whose mood this is; null for the person whose message you are answering"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 60,
+                  "description": "Their mood in their own word or two"
+                },
+                "score": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 5,
+                  "description": "Their score from 1 to 5"
+                }
+              },
+              "required": ["name", "label", "score"],
+              "additionalProperties": false
+            },
+            "description": "A shared entry's moods, one per person; on a group's evening entry pass the answering person's mood here and the server keeps everyone's and derives mood_label and mood_score. Null for an entry with one person's mood."
+          },
           "category_id": {
             "type": ["string", "null"],
             "description": "Category ID or null"
@@ -550,7 +579,7 @@
             "description": "Memory tags; empty when none"
           }
         },
-        "required": ["kind", "title", "content", "mood_label", "mood_score", "category_id", "life_area_id", "occurred_at", "review_worthy", "tags"],
+        "required": ["kind", "title", "content", "mood_label", "mood_score", "moods", "category_id", "life_area_id", "occurred_at", "review_worthy", "tags"],
         "additionalProperties": false
       }
     }
@@ -598,6 +627,35 @@
                 "maximum": 5,
                 "description": "New mood score or null for unchanged"
               },
+              "moods": {
+                "type": ["array", "null"],
+                "maxItems": 20,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": ["string", "null"],
+                      "maxLength": 60,
+                      "description": "Whose mood this is; null for the person whose message you are answering"
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 60,
+                      "description": "Their mood in their own word or two"
+                    },
+                    "score": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 5,
+                      "description": "Their score from 1 to 5"
+                    }
+                  },
+                  "required": ["name", "label", "score"],
+                  "additionalProperties": false
+                },
+                "description": "Moods to add or correct, one per person; each replaces that person's earlier mood and everyone else's stays, and mood_label and mood_score are derived. Null for unchanged."
+              },
               "category_id": {
                 "type": ["string", "null"],
                 "description": "New category ID or null for unchanged"
@@ -630,12 +688,12 @@
                 "uniqueItems": true,
                 "items": {
                   "type": "string",
-                  "enum": ["title", "mood_label", "mood_score", "category_id", "life_area_id", "occurred_at", "tags"]
+                  "enum": ["title", "mood_label", "mood_score", "moods", "category_id", "life_area_id", "occurred_at", "tags"]
                 },
                 "description": "Nullable fields to clear; empty when none"
               }
             },
-            "required": ["kind", "title", "content", "mood_label", "mood_score", "category_id", "life_area_id", "occurred_at", "review_worthy", "tags", "clear_fields"],
+            "required": ["kind", "title", "content", "mood_label", "mood_score", "moods", "category_id", "life_area_id", "occurred_at", "review_worthy", "tags", "clear_fields"],
             "additionalProperties": false
           },
           "override_user_classification": {

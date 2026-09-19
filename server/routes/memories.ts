@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { OWN_AREA_CLAUSE, USER_ID, getMemory, id, likePattern, now, queueIndexJob } from "../db.ts";
+import { OWNER_SPEAKER_NAME } from "../group-thread.ts";
 import { failure, success } from "../http.ts";
+import { resolveMoodFields } from "../moods.ts";
 import { iso, memoryCreate, memoryPatch } from "../schemas.ts";
 import { memoryJson } from "../serializers.ts";
 import { type MemoryRow } from "../types.ts";
@@ -130,14 +132,19 @@ export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
     const body = memoryCreate.parse(req.body);
     const memoryId = id("memory");
     const timestamp = now();
+    // From the app the writer is the owner, so a mood left unnamed is theirs.
+    const mood = resolveMoodFields({
+      existingJson: null, incoming: body.moods, clear: false, speakerName: OWNER_SPEAKER_NAME,
+      plain: { mood_label: body.mood_label ?? null, mood_score: body.mood_score ?? null },
+    });
     db.transaction(() => {
       db.prepare(`
         INSERT INTO memories(
-          id,user_id,title,content,kind,mood_label,mood_score,category_id,life_area_id,life_area_source,
+          id,user_id,title,content,kind,mood_label,mood_score,moods_json,category_id,life_area_id,life_area_source,
           occurred_at,review_worthy,tags_json,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-      `).run(memoryId, USER_ID, body.title ?? null, body.content, body.kind, body.mood_label ?? null,
-        body.mood_score ?? null, body.category_id ?? null, body.life_area_id ?? null,
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(memoryId, USER_ID, body.title ?? null, body.content, body.kind, mood.mood_label,
+        mood.mood_score, mood.moods_json, body.category_id ?? null, body.life_area_id ?? null,
         body.life_area_source ?? null, body.occurred_at ?? null, body.review_worthy ? 1 : 0,
         JSON.stringify(body.tags), timestamp, timestamp);
       queueIndexJob(db, "memory", memoryId);
@@ -149,14 +156,21 @@ export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
     const body = memoryPatch.parse(req.body);
     const current = getMemory(db, req.params.id);
     if (!current) return failure(res, 404, "Memory not found");
+    // `moods: null` clears the list; absent leaves it; an array merges by person.
+    const mood = resolveMoodFields({
+      existingJson: current.moods_json, incoming: body.moods ?? undefined, clear: body.moods === null, speakerName: OWNER_SPEAKER_NAME,
+      plain: {
+        mood_label: body.mood_label === undefined ? current.mood_label : body.mood_label,
+        mood_score: body.mood_score === undefined ? current.mood_score : body.mood_score,
+      },
+    });
     db.transaction(() => {
       db.prepare(`
-        UPDATE memories SET title=?,content=?,kind=?,mood_label=?,mood_score=?,category_id=?,
+        UPDATE memories SET title=?,content=?,kind=?,mood_label=?,mood_score=?,moods_json=?,category_id=?,
           life_area_id=?,life_area_source=?,occurred_at=?,review_worthy=?,tags_json=?,updated_at=?
         WHERE id=? AND user_id=?
       `).run(body.title === undefined ? current.title : body.title, body.content ?? current.content,
-        body.kind ?? current.kind, body.mood_label === undefined ? current.mood_label : body.mood_label,
-        body.mood_score === undefined ? current.mood_score : body.mood_score,
+        body.kind ?? current.kind, mood.mood_label, mood.mood_score, mood.moods_json,
         body.category_id === undefined ? current.category_id : body.category_id,
         body.life_area_id === undefined ? current.life_area_id : body.life_area_id,
         body.life_area_source === undefined ? current.life_area_source : body.life_area_source,

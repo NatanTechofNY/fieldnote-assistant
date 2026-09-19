@@ -90,6 +90,8 @@ export interface MemoryRow {
   kind: MemoryKind;
   mood_label: string | null;
   mood_score: number | null;
+  /** Each person's mood on a shared entry, JSON `[{ name, label, score }]`; null when the entry has one mood. */
+  moods_json?: string | null;
   category_id: string | null;
   life_area_id: string | null;
   life_area_source: LifeAreaSource | null;
@@ -166,6 +168,8 @@ export interface NotificationPreferencesRow {
   opted_out_at: string | null;
   trusted_contacts_json: string;
   group_allow_all: 0 | 1;
+  evening_checkin_time: string | null;
+  evening_checkin_prompt: string | null;
   created_at: string;
   updated_at: string;
 }

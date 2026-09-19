@@ -44,8 +44,10 @@ const lifeAreas = [
   { id: "area_group", slug: "home", name: "Home", color: "#2f7d6d", is_builtin: 0, is_group: 1 },
 ];
 /** What `/api/life-areas` answers; a test about a household with no group chats narrows it. */
-let servedLifeAreas = lifeAreas;
+let servedLifeAreas: Array<Record<string, unknown>> = lifeAreas;
 const lifeAreaPatches: Array<{ id: string; body: Record<string, unknown> }> = [];
+const askDrafts: Array<Record<string, unknown>> = [];
+const moodTrendRequests: string[] = [];
 
 const todo = (over: Partial<Record<string, unknown>> = {}) => ({
   id: "todo_1",
@@ -97,6 +99,8 @@ const todos = [
 
 /** Stateful so a saved preference reads back the way the server would return it. */
 const taskPreferences = { autoCompleteParent: false };
+/** Every SMS schedule the settings page saved. */
+const notificationSaves: Array<Record<string, unknown>> = [];
 
 const memory = (over: Partial<Record<string, unknown>> = {}) => ({
   id: "memory_1",
@@ -128,6 +132,20 @@ const memories = [
     title: "Good run-through",
     content: "Felt ready.",
     mood_score: 4,
+  }),
+  // A group's shared evening entry: one mood per person, the combined ones derived.
+  memory({
+    id: "memory_home_day",
+    kind: "journal",
+    title: "Day wrap-up – Home",
+    content: "Sarah: Long day.\nthe owner: Good one.",
+    mood_label: "Sarah drained · the owner good",
+    mood_score: 3,
+    moods: [{ name: "Sarah", label: "drained", score: 2 }, { name: "the owner", label: "good", score: 4 }],
+    life_area_id: "area_group",
+    life_area_name: "Home",
+    life_area_slug: "home",
+    tags: ["end-of-day", "group"],
   }),
 ];
 
@@ -241,13 +259,20 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     return new Response(JSON.stringify({ success: true, data: { queued: 0, processed: 0 } }));
   }
   if (url.includes("/api/health")) return new Response(JSON.stringify({ success: true, data: health }));
+  if (url.endsWith("/api/checkins/draft-ask")) {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    askDrafts.push(body);
+    return new Response(JSON.stringify({ success: true, data: { ask: `Drafted for: ${body.brief}` } }));
+  }
   if (url.includes("/api/life-areas")) {
     if (init?.method === "PATCH") {
       const id = url.split("/").pop() as string;
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       lifeAreaPatches.push({ id, body });
-      const area = lifeAreas.find(item => item.id === id)!;
-      return new Response(JSON.stringify({ success: true, data: { ...area, ...body } }));
+      // Stateful, so a saved check-in time reads back the way the server would return it.
+      servedLifeAreas = servedLifeAreas.map(item => item.id === id ? { ...item, ...body } : item);
+      const area = servedLifeAreas.find(item => item.id === id)!;
+      return new Response(JSON.stringify({ success: true, data: area }));
     }
     return new Response(JSON.stringify({ success: true, data: servedLifeAreas }));
   }
@@ -297,11 +322,27 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       },
     }));
   }
+  if (url.includes("/api/overview/mood-trend")) {
+    moodTrendRequests.push(url.slice(url.indexOf("scope=") + 6));
+    return new Response(JSON.stringify({
+      success: true,
+      data: [{
+        id: "memory_family_day", title: "Day wrap-up – Family", at: "2026-07-27T00:00:00.000Z", score: 4, label: "Mom cheerful · the owner good",
+        moods: [{ name: "Mom", label: "cheerful", score: 4 }, { name: "the owner", label: "good", score: 4 }],
+        life_area_id: "area_family", life_area_name: "Family",
+      }, {
+        id: "memory_home_day", title: "Day wrap-up – Home", at: "2026-07-28T00:00:00.000Z", score: 3, label: "Sarah drained · the owner good",
+        moods: [{ name: "Sarah", label: "drained", score: 2 }, { name: "the owner", label: "good", score: 4 }],
+        life_area_id: "area_group", life_area_name: "Home",
+      }],
+    }));
+  }
   if (url.includes("/api/overview")) return new Response(JSON.stringify({
     success: true,
     data: {
       counts: { pending: 0, in_progress: 0, blocked: 0, done: 0, cancelled: 0, active: 0, memories: 0 },
-      in_progress: [], blocked: [], due_today: [], recent_memories: [], mood_trend: [], subtask_progress: {},
+      in_progress: [], blocked: [], due_today: [], recent_memories: [], subtask_progress: {},
+      mood_trend: [{ id: "memory_mine", title: "A quiet one", at: "2026-07-27T00:00:00.000Z", score: 4, label: "calm", moods: [] }],
       // One task, two schedule rows: its due date and the reminder it was asked for.
       upcoming_reminders: [
         {
@@ -459,6 +500,16 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       },
       createdAt: "2026-07-20T20:00:08.000Z",
       updatedAt: "2026-07-20T20:00:08.000Z",
+    }, {
+      // A group's evening question echoed to the owner's own line, marked as the copy it is.
+      id: "message_test_copy",
+      direction: "outbound",
+      role: "assistant",
+      content: "[Home] Evening, both! How did today go?",
+      status: "sent",
+      metadata: { kind: "group_evening", date: "2026-07-20", groupId: "3fa85f64-5717-4562-b3fc-2c963f66afa6", copyOf: "area_group", groupName: "Home", internal: true },
+      createdAt: "2026-07-20T20:30:00.000Z",
+      updatedAt: "2026-07-20T20:30:00.000Z",
     }],
   }));
   if (url.includes("/api/conversations/channels/thread_reflection/messages")) return new Response(JSON.stringify({
@@ -622,6 +673,11 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     Object.assign(taskPreferences, JSON.parse(String(init?.body ?? "{}")));
     return new Response(JSON.stringify({ success: true, data: taskPreferences }));
   }
+  if (url.endsWith("/api/integrations/notifications")) {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    notificationSaves.push(body);
+    return new Response(JSON.stringify({ success: true, data: { ...body, smsProvider: "twilio", optedOutAt: null } }));
+  }
   if (url.endsWith("/api/integrations")) return new Response(JSON.stringify({
     success: true,
     data: {
@@ -642,8 +698,15 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
         optedOutAt: null,
         trustedContacts: [],
         groupAllowAll: false,
+        eveningCheckinTime: null,
+        eveningCheckinPrompt: null,
       },
       tasks: { ...taskPreferences },
+      checkinDefaults: {
+        groupMorning: 'Write this morning\'s check-in for the group chat "{group}": two or three warm sentences.',
+        groupEvening: 'Ask the group chat "{group}" how today went.',
+        ownerEvening: "Ask me how today went, in one warm line.",
+      },
       webhookPaths: {
         sms: "/api/webhooks/twilio/sms",
         status: "/api/webhooks/twilio/status",
@@ -696,6 +759,53 @@ it("renders the standalone assistant shell and overview", async () => {
   expect(within(row).getByText("Reminder")).toBeInTheDocument();
   expect(within(row).getByText("Jul 29 · 9:00 AM")).toBeInTheDocument();
   expect(within(row).getByText("Due")).toBeInTheDocument();
+});
+
+/**
+ * The mood chart is the owner's own by default. With a group chat there is a
+ * Shared view: the bar is the combined score and each person's own score is a
+ * mark on it, so a 2 and a 4 do not simply read as a 3. The choice sticks.
+ */
+it("charts my own moods by default and switches to the shared ones, each person marked", async () => {
+  moodTrendRequests.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { unmount } = render(<QueryClientProvider client={client}><MemoryRouter><App /></MemoryRouter></QueryClientProvider>);
+  const card = (await screen.findByText("How the days have felt")).closest("article") as HTMLElement;
+  expect(within(card).getByRole("button", { name: "Mine" })).toHaveAttribute("aria-pressed", "true");
+  expect(within(card).getByLabelText(/Jul 2[67]: calm, 4 of 5/)).toBeInTheDocument();
+  expect(within(card).getByText("calm")).toBeInTheDocument();
+  expect(moodTrendRequests).toEqual([]);
+  expect(card.querySelectorAll(".mood-mark")).toHaveLength(0);
+
+  await userEvent.click(within(card).getByRole("button", { name: "Shared" }));
+  expect(await within(card).findByText("Sarah drained 2 · you good 4")).toBeInTheDocument();
+  expect(moodTrendRequests).toEqual(["shared"]);
+  const column = within(card).getByLabelText(/Sarah drained 2 · you good 4, 3 of 5/);
+  const marks = column.querySelectorAll(".mood-mark");
+  expect(marks).toHaveLength(2);
+  expect(marks[0]).toHaveAttribute("title", "Sarah: drained, 2 of 5");
+  expect(marks[1]).toHaveAttribute("title", "you: good, 4 of 5");
+  expect(within(card).getByRole("button", { name: "Shared" })).toHaveAttribute("aria-pressed", "true");
+  // With more than one group charted, the caption says which one the latest entry is from.
+  expect(within(card).getByText(/in Home on Jul 2[78]/)).toBeInTheDocument();
+  expect(within(card).getByLabelText(/Family · Mom cheerful 4 · you good 4, 4 of 5/)).toBeInTheDocument();
+
+  // Remembered on the next visit.
+  unmount();
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter><App /></MemoryRouter></QueryClientProvider>);
+  const again = (await screen.findByText("How the days have felt")).closest("article") as HTMLElement;
+  expect(within(again).getByRole("button", { name: "Shared" })).toHaveAttribute("aria-pressed", "true");
+  expect(await within(again).findByText("Sarah drained 2 · you good 4")).toBeInTheDocument();
+});
+
+/** Without a group chat there is nothing to share, so the card has no toggle. */
+it("hides the mood toggle when there are no group chats", async () => {
+  servedLifeAreas = lifeAreas.filter(area => !area.is_group);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><MemoryRouter><App /></MemoryRouter></QueryClientProvider>);
+  const card = (await screen.findByText("How the days have felt")).closest("article") as HTMLElement;
+  await within(card).findByText("calm");
+  expect(within(card).queryByRole("button", { name: "Shared" })).not.toBeInTheDocument();
 });
 
 /**
@@ -1331,6 +1441,132 @@ it("badges a group chat's classification and renames it inline", async () => {
   expect(lifeAreaPatches).toEqual([{ id: "area_group", body: { name: "Sarah & me" } }]);
 });
 
+/** The owner's evening question is one switch beside the daily digest, and off is null. */
+it("saves the owner's evening check-in time with the SMS schedule", async () => {
+  window.localStorage.clear();
+  notificationSaves.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Delivery schedule"));
+  const time = screen.getByLabelText("Evening check-in time");
+  expect(time).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
+  await waitFor(() => expect(notificationSaves).toHaveLength(1));
+  expect(notificationSaves[0].eveningCheckinTime).toBe(null);
+
+  expect(screen.getByLabelText("My evening check-in wording")).not.toBeVisible();
+  await userEvent.click(screen.getByRole("checkbox", { name: "My evening check-in" }));
+  expect(time).toBeEnabled();
+  fireEvent.change(time, { target: { value: "21:15" } });
+  await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
+  await waitFor(() => expect(notificationSaves).toHaveLength(2));
+  expect(notificationSaves[1].eveningCheckinTime).toBe("21:15");
+  // Blank wording is the default.
+  expect(notificationSaves[1].eveningCheckinPrompt).toBe(null);
+
+  // The wording shows the default and takes the owner's own; it saves with the schedule.
+  const wording = screen.getByLabelText("My evening check-in wording") as HTMLTextAreaElement;
+  expect(wording.placeholder).toBe("Ask me how today went, in one warm line.");
+  expect(wording.value).toBe("");
+  fireEvent.change(wording, { target: { value: "  Ask me for a high and a low, then a mood 1–5.  " } });
+  // Switching the check-in off and back on keeps the typed wording: the field and what Save sends agree.
+  await userEvent.click(screen.getByRole("checkbox", { name: "My evening check-in" }));
+  expect(wording).not.toBeVisible();
+  await userEvent.click(screen.getByRole("checkbox", { name: "My evening check-in" }));
+  expect(screen.getByLabelText("My evening check-in wording")).toHaveValue("  Ask me for a high and a low, then a mood 1–5.  ");
+  await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
+  await waitFor(() => expect(notificationSaves).toHaveLength(3));
+  expect(notificationSaves[2].eveningCheckinPrompt).toBe("Ask me for a high and a low, then a mood 1–5.");
+});
+
+/**
+ * Everything per group lives in the Group chats section: who may talk there,
+ * and each group's check-ins. A switch saves at once with the remembered time.
+ */
+it("schedules a group's check-ins, and a copy to the owner, from the Group chats section", async () => {
+  window.localStorage.clear();
+  lifeAreaPatches.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Classifications"));
+  const classifications = (await screen.findByText("Group chat")).closest("details")!;
+
+  await userEvent.click(screen.getByText("Group chats"));
+  expect(await screen.findByText("Who can talk to the assistant")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Morning check-in for Work")).not.toBeInTheDocument();
+
+  const morning = screen.getByLabelText("Morning check-in for Home");
+  const groupChats = morning.closest("details")!;
+  expect(classifications).not.toContainElement(morning);
+  expect(groupChats).toHaveTextContent("Group chats");
+  expect(groupChats).toContainElement(screen.getByRole("button", { name: /Add trusted contact/ }));
+  expect(morning).not.toBeChecked();
+  expect(screen.getByLabelText("Morning check-in time for Home")).toBeDisabled();
+  await userEvent.click(morning);
+  await waitFor(() => expect(lifeAreaPatches).toEqual([{ id: "area_group", body: { morning_checkin_time: "08:30" } }]));
+
+  const eveningTime = screen.getByLabelText("Evening check-in time for Home");
+  await userEvent.click(screen.getByLabelText("Evening check-in for Home"));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { evening_checkin_time: "20:30" } }));
+  // A time input fires change per segment; the time saves once the field is left.
+  const patchesBeforeTyping = lifeAreaPatches.length;
+  fireEvent.change(eveningTime, { target: { value: "21:00" } });
+  expect(eveningTime).toHaveValue("21:00");
+  expect(lifeAreaPatches).toHaveLength(patchesBeforeTyping);
+  fireEvent.blur(eveningTime);
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { evening_checkin_time: "21:00" } }));
+
+  const copy = screen.getByLabelText("Also text me a copy for Home");
+  expect(copy).not.toBeChecked();
+  await userEvent.click(copy);
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { checkin_copy_to_owner: true } }));
+
+  // The wording shows the default with the group named, saves the owner's own, and goes back on "Use default".
+  const wording = screen.getByLabelText("Morning check-in wording for Home") as HTMLTextAreaElement;
+  expect(wording.placeholder).toBe('Write this morning\'s check-in for the group chat "Home": two or three warm sentences.');
+  expect(wording.value).toBe("");
+  const editor = wording.closest(".ask-editor") as HTMLElement;
+  expect(within(editor).getByText("Default")).toBeInTheDocument();
+  expect(within(editor).getByRole("button", { name: /Save wording/ })).toBeDisabled();
+  fireEvent.change(wording, { target: { value: "Morning, {group}! One playful line, then who's taking what. " } });
+  expect(within(editor).getByText("Your wording")).toBeInTheDocument();
+  await userEvent.click(within(editor).getByRole("button", { name: /Save wording/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({
+    id: "area_group", body: { morning_checkin_prompt: "Morning, {group}! One playful line, then who's taking what." },
+  }));
+  await userEvent.click(await within(editor).findByRole("button", { name: /Use default/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { morning_checkin_prompt: null } }));
+  expect(screen.getByLabelText("Evening check-in wording for Home")).toHaveAttribute("placeholder", 'Ask the group chat "Home" how today went.');
+
+  // The agent can write it from what the chat is for; the draft lands in the field, unsaved, to read first.
+  askDrafts.length = 0;
+  const patchesBefore = lifeAreaPatches.length;
+  await userEvent.click(within(editor).getByRole("button", { name: /Help me write it/ }));
+  const about = within(editor).getByLabelText("Morning check-in wording for Home: what it should be like");
+  expect(within(editor).getByRole("button", { name: /Write it/ })).toBeDisabled();
+  await userEvent.type(about, "Sarah and me running the house");
+  await userEvent.click(within(editor).getByRole("button", { name: /Write it/ }));
+  await waitFor(() => expect(wording.value).toBe("Drafted for: Sarah and me running the house"));
+  expect(askDrafts).toEqual([{ kind: "group_morning", brief: "Sarah and me running the house", life_area_id: "area_group", current: null }]);
+  expect(lifeAreaPatches).toHaveLength(patchesBefore);
+  expect(within(editor).getByText("Your wording")).toBeInTheDocument();
+  expect(within(editor).queryByLabelText(/what it should be like/)).not.toBeInTheDocument();
+  await userEvent.click(within(editor).getByRole("button", { name: /Save wording/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({
+    id: "area_group", body: { morning_checkin_prompt: "Drafted for: Sarah and me running the house" },
+  }));
+});
+
 it("fills the brief form from the end-of-day template and flags a send time inside quiet hours", async () => {
   window.localStorage.clear();
   resetAtlassianFixtures();
@@ -1603,6 +1839,10 @@ it("renders complete channel conversation history", async () => {
   const threaded = [...document.querySelectorAll(".history-message")]
     .find(node => node.textContent?.includes("Saved it as today's journal entry."));
   expect(threaded?.querySelector(".history-reply-quote")).toHaveTextContent("Remember this conversation");
+  // A group's check-in echoed to the owner's own line says which group it came from.
+  const echoed = [...document.querySelectorAll(".history-message")]
+    .find(node => node.textContent?.includes("[Home] Evening, both!"));
+  expect(echoed?.querySelector(".history-speaker")).toHaveTextContent("Copy of Home’s evening check-in");
 
   // A group chat is titled by its name rather than a group id, and several
   // people write into it, so each of their bubbles says who.
@@ -2302,6 +2542,14 @@ it("switches memory views and searches by meaning", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Journals" }));
   expect(await screen.findByText("Good run-through", { exact: false })).toBeInTheDocument();
   expect(screen.getByText("July 18, 2026")).toBeInTheDocument();
+  // A group's shared entry is under its own area, and shows one mood chip per person rather than the blend.
+  expect(screen.queryByText("Day wrap-up – Home", { exact: false })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Home" }));
+  const shared = (await screen.findByText("Day wrap-up – Home", { exact: false })).closest("article") as HTMLElement;
+  const chips = within(shared).getAllByTitle(/of 5$/);
+  expect(chips.map(chip => chip.getAttribute("title"))).toEqual(["Sarah: drained, 2 of 5", "you: good, 4 of 5"]);
+  expect(within(shared).queryByText("Sarah drained · the owner good")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "My items" }));
 
   await userEvent.click(screen.getByRole("button", { name: "Everything" }));
   const search = await screen.findByPlaceholderText("Search by meaning, person, place, or phrase…");
@@ -2333,6 +2581,35 @@ it("previews markdown while editing a memory", async () => {
 
   await userEvent.click(within(editor).getByRole("tab", { name: /Write/ }));
   expect(editor.querySelector("textarea")).toHaveValue("## Framing\nLead with **the contract**.");
+});
+
+/**
+ * A shared entry's moods are each person's, recorded from the chat. The editor
+ * shows them and leaves them alone: saving a retitled entry sends no mood
+ * fields, so the derived label and average stay true to the people underneath.
+ */
+it("shows a shared entry's moods read-only and saves without touching them", async () => {
+  renderAt("/memories?open=memory_home_day");
+  const editor = await screen.findByRole("dialog");
+  expect(editor).toHaveTextContent("Moods, one each");
+  const chips = within(editor).getAllByTitle(/of 5$/);
+  expect(chips.map(chip => chip.getAttribute("title"))).toEqual(["Sarah: drained, 2 of 5", "you: good, 4 of 5"]);
+  expect(within(editor).queryByRole("button", { name: /Mood 3 of 5/ })).not.toBeInTheDocument();
+  expect(within(editor).queryByLabelText("In your own words")).not.toBeInTheDocument();
+
+  const title = within(editor).getByPlaceholderText("Optional, but useful");
+  await userEvent.clear(title);
+  await userEvent.type(title, "Day wrap-up – Home, revised");
+  await userEvent.click(within(editor).getByRole("button", { name: "Save memory" }));
+  await waitFor(() => {
+    const patch = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).includes("/api/memories/memory_home_day") && init?.method === "PATCH");
+    expect(patch).toBeTruthy();
+    const body = JSON.parse(String(patch![1]?.body)) as Record<string, unknown>;
+    expect(body.title).toBe("Day wrap-up – Home, revised");
+    expect("mood_score" in body).toBe(false);
+    expect("mood_label" in body).toBe(false);
+    expect("moods" in body).toBe(false);
+  });
 });
 
 it("asks before deleting a memory", async () => {

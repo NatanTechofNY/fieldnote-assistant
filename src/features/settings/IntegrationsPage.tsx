@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Newspaper, Pause, Phone, Plus, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, X, Zap } from "lucide-react";
+import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Moon, Newspaper, Pause, PenLine, Phone, Plus, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, X, Zap } from "lucide-react";
 import { api } from "../../api";
 import type {
   ExternalEvent, IntegrationState, SmsProvider, TrustedContact,
@@ -11,7 +11,9 @@ import { ErrorState, Field, Loading, ThemeToggle, Toast } from "../../components
 import { useDemoMode, useRedact } from "../../lib/demo-mode";
 import { type ThemePreference, useTheme } from "../../lib/theme";
 import { AtlassianSettings, DigestBriefsSettings } from "./AtlassianSettings";
+import { AskEditor } from "./AskEditor";
 import { LifeAreasSettings } from "./LifeAreasSettings";
+import { GroupChatSettings } from "./GroupChatSettings";
 import { SettingsSection } from "./SettingsSection";
 import { UnderHoodSettings } from "./UnderHoodSettings";
 import { humanTime, timezoneLabel, timezoneNames } from "../../lib/timezone";
@@ -65,6 +67,11 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   const [quietEnd, setQuietEnd] = useState(data.notifications.quietHoursEnd || "07:00");
   const [trustedContacts, setTrustedContacts] = useState<TrustedContact[]>(data.notifications.trustedContacts ?? []);
   const [groupAllowAll, setGroupAllowAll] = useState(data.notifications.groupAllowAll ?? false);
+  // The evening check-in is off until asked for; the time is kept while it is
+  // off so turning it back on brings back the hour that was chosen.
+  const [eveningEnabled, setEveningEnabled] = useState(Boolean(data.notifications.eveningCheckinTime));
+  const [eveningTime, setEveningTime] = useState(data.notifications.eveningCheckinTime ?? "20:30");
+  const [eveningAsk, setEveningAsk] = useState(data.notifications.eveningCheckinPrompt ?? "");
   const [contactName, setContactName] = useState("");
   const [contactPhone, setContactPhone] = useState("");
   const [granolaKey, setGranolaKey] = useState("");
@@ -126,6 +133,8 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
       quietHoursEnd: quietEnd || null,
       trustedContacts,
       groupAllowAll,
+      eveningCheckinTime: eveningEnabled ? eveningTime : null,
+      eveningCheckinPrompt: eveningAsk.trim() || null,
     }),
     onSuccess: () => { refresh(); notify("Messaging schedule saved"); },
     onError: (mutationError: Error) => notify(mutationError.message),
@@ -407,6 +416,36 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               onChange={e => setDigestOverdue(e.target.checked)}
             />
           </label>
+          <label className={`delivery-option ${eveningEnabled ? "selected" : ""}`}>
+            <span className="delivery-option-icon"><Moon size={15}/></span>
+            <span><strong>Evening check-in</strong><small>One question each evening about how the day went; your answer becomes that day&rsquo;s journal entry.</small></span>
+            <input type="checkbox" aria-label="My evening check-in" checked={eveningEnabled} onChange={e => setEveningEnabled(e.target.checked)}/>
+          </label>
+          {/* Hidden rather than unmounted while the switch is off, so wording typed and then
+              toggled away is still what the field shows — and what Save sends. */}
+          <details className="checkin-wording delivery-suboption" hidden={!eveningEnabled}>
+            <summary>
+              <PenLine size={13} aria-hidden="true"/>
+              <span>Wording</span>
+              <small>{eveningAsk.trim() ? "Your wording" : "Default"} · what the assistant is asked; what you finished today is still supplied underneath</small>
+            </summary>
+            <div className="checkin-wording-body">
+              <AskEditor
+                label="Evening question"
+                name="My evening check-in wording"
+                fallback={data.checkinDefaults.ownerEvening}
+                value={data.notifications.eveningCheckinPrompt ?? null}
+                onChange={setEveningAsk}
+                draft={{
+                  prompt: "How do you want to be asked about your day?",
+                  placeholder: "Short and direct — one win, one thing I'd do differently, then the mood number",
+                  request: (brief, current) => api.draftCheckinAsk({ kind: "owner_evening", brief, current }).then(result => result.ask),
+                  onError: notify,
+                }}
+              />
+              <small className="field-hint">Saved with the SMS schedule below.</small>
+            </div>
+          </details>
         </div>
 
         <div className="form-grid delivery-destination">
@@ -419,23 +458,55 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
           </Field>
         </div>
 
+        <div className="schedule-panel">
+          <div className="schedule-panel-head">
+            <div><strong>Daily timing</strong><span>The worker checks this schedule once per minute.</span></div>
+            <Clock3 size={17}/>
+          </div>
+          <div className="form-grid three schedule-controls">
+            <Field label="Briefing arrives"><input className="input" type="time" value={digestTime} onChange={e => setDigestTime(e.target.value)} disabled={!digestEnabled} /></Field>
+            <Field label="Evening check-in"><input className="input" type="time" aria-label="Evening check-in time" value={eveningTime} onChange={e => setEveningTime(e.target.value)} disabled={!eveningEnabled} /></Field>
+            <Field label="Quiet hours begin"><input className="input" type="time" value={quietStart} onChange={e => setQuietStart(e.target.value)} /></Field>
+            <Field label="Messages resume"><input className="input" type="time" value={quietEnd} onChange={e => setQuietEnd(e.target.value)} /></Field>
+          </div>
+          <div className="quiet-note">
+            <Pause size={13}/>
+            <span>No scheduled texts from <strong>{humanTime(quietStart)}</strong> to <strong>{humanTime(quietEnd)}</strong>. Anything due overnight waits until quiet hours end, except a check-in you timed inside them.</span>
+          </div>
+        </div>
+
+        <div className="delivery-footer">
+          <span><Database size={12}/>Saved locally and applied while the server is running</span>
+          <button className="button primary" disabled={preferences.isPending} onClick={() => preferences.mutate()}>
+            {preferences.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save SMS schedule
+          </button>
+        </div>
+        </div>
+      </SettingsSection>
+      <SettingsSection
+        sectionId="group-chats"
+        title="Group chats"
+        description="Who may talk to the assistant in an iMessage group you add it to, and what each group is texted on a schedule."
+        status={data.notifications.smsProvider === "sendblue"
+          ? `${trustedContacts.length} trusted · ${groupAllowAll ? "open groups" : "trusted only"}`
+          : "needs iMessage"}
+        icon={Users}
+      >
+        <p className="integration-copy">
+          Add the assistant&rsquo;s iMessage line to a group chat you are in and the people below can talk to it there.
+          Everything asked for in a group is filed under that group&rsquo;s own classification, and reminders for it come back to the group.
+        </p>
+        {data.notifications.smsProvider !== "sendblue" && (
+          <div className="quiet-note">
+            <TriangleAlert size={13}/>
+            <span>Group chats need iMessage. Switch the message provider to Sendblue to use them.</span>
+          </div>
+        )}
         <div className={`schedule-panel group-chats ${data.notifications.smsProvider === "sendblue" ? "" : "disabled"}`}>
           <div className="schedule-panel-head">
-            <div>
-              <strong>Group chats</strong>
-              <span>
-                Add the assistant&rsquo;s iMessage line to a group chat you are in and these people can talk to it there.
-                Reminders for anything asked for in the group come back to that group.
-              </span>
-            </div>
+            <div><strong>Who can talk to the assistant</strong><span>Trusted contacts can, in any group that also includes you.</span></div>
             <Users size={17}/>
           </div>
-          {data.notifications.smsProvider !== "sendblue" && (
-            <div className="quiet-note">
-              <TriangleAlert size={13}/>
-              <span>Group chats need iMessage. Switch the message provider to Sendblue to use them.</span>
-            </div>
-          )}
           <div className="list trusted-contacts">
             {trustedContacts.map(contact => (
               <div className="list-row" key={contact.phone}>
@@ -488,30 +559,26 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               <input type="checkbox" checked={groupAllowAll} onChange={e => setGroupAllowAll(e.target.checked)}/>
             </label>
           </div>
+          <div className="delivery-footer">
+            <span><Database size={12}/>Saved with the SMS schedule</span>
+            <button className="button primary" disabled={preferences.isPending} onClick={() => preferences.mutate()}>
+              {preferences.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save who can talk
+            </button>
+          </div>
         </div>
-
         <div className="schedule-panel">
           <div className="schedule-panel-head">
-            <div><strong>Daily timing</strong><span>The worker checks this schedule once per minute.</span></div>
+            <div>
+              <strong>Check-ins per group</strong>
+              <span>
+                A morning note about what that group has in progress or due soon, an evening question about how the day went,
+                or both. Sent in the schedule timezone and saved as you switch them. A time you set inside quiet hours is
+                still honoured &mdash; you chose it.
+              </span>
+            </div>
             <Clock3 size={17}/>
           </div>
-          <div className="form-grid three schedule-controls">
-            <Field label="Briefing arrives"><input className="input" type="time" value={digestTime} onChange={e => setDigestTime(e.target.value)} disabled={!digestEnabled} /></Field>
-            <Field label="Quiet hours begin"><input className="input" type="time" value={quietStart} onChange={e => setQuietStart(e.target.value)} /></Field>
-            <Field label="Messages resume"><input className="input" type="time" value={quietEnd} onChange={e => setQuietEnd(e.target.value)} /></Field>
-          </div>
-          <div className="quiet-note">
-            <Pause size={13}/>
-            <span>No scheduled texts from <strong>{humanTime(quietStart)}</strong> to <strong>{humanTime(quietEnd)}</strong>. Anything due overnight waits until quiet hours end.</span>
-          </div>
-        </div>
-
-        <div className="delivery-footer">
-          <span><Database size={12}/>Saved locally and applied while the server is running</span>
-          <button className="button primary" disabled={preferences.isPending} onClick={() => preferences.mutate()}>
-            {preferences.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save SMS schedule
-          </button>
-        </div>
+          <GroupChatSettings notify={notify} imessage={data.notifications.smsProvider === "sendblue"} defaults={data.checkinDefaults}/>
         </div>
       </SettingsSection>
       <SettingsSection

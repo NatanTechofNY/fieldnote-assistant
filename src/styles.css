@@ -530,6 +530,14 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
   transition: filter .12s ease;
 }
 .mood-col:hover .mood-bar { filter: brightness(1.1); }
+/* On a shared entry each person's own score is a tick on the combined bar, at its own height. */
+.mood-bar { position: relative; }
+.mood-mark {
+  position: absolute; left: 15%; right: 15%; bottom: calc(var(--m, .2) * 62px - 1px); height: 2px;
+  background: var(--surface); box-shadow: 0 0 0 1px var(--accent); border-radius: 1px;
+}
+.card-title .mood-scope { margin: 0 auto 0 12px; }
+.card-title .mood-scope button { padding: 2px 8px; font-size: 11px; }
 .mood-day { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: 10px; }
 .mood-latest { margin: 12px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .mood-latest strong { color: var(--text); font-weight: 500; }
@@ -956,6 +964,10 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
   border-radius:var(--radius-sm); color:var(--text-secondary); background:var(--surface-raised);
   border:1px solid var(--border); font-size:11px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
+.mood-pills { display:inline-flex; flex-wrap:wrap; gap:4px; max-width:100%; }
+.shared-moods { display:grid; gap:6px; }
+.shared-moods .mood-pill { font-size:12px; padding:4px 8px; }
+.mood-pill strong { font-weight:600; color:var(--text); }
 .area-filter { display:flex; gap:4px; margin:-4px 0 14px; overflow:auto; }
 .area-filter button {
   flex:none; padding:4px 9px; border:1px solid var(--border); border-radius:var(--radius-pill); color:var(--text-secondary);
@@ -1450,6 +1462,42 @@ tr:hover .attach-button,
 .life-area-rename .input { min-width:0; height:28px; font-size:12px; }
 .life-area-setting strong { font-size:12px; font-weight:500; }
 .life-area-setting small { color:var(--text-tertiary); font-size:11px; }
+/* A group's scheduled check-ins sit on their own line under the group's row. */
+.life-area-checkins { display:flex; flex-wrap:wrap; gap:8px 18px; }
+.life-area-checkin { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--text-tertiary); cursor:pointer; }
+.life-area-checkin.on { color:var(--text); }
+.life-area-checkin .input { height:26px; width:auto; font-size:12px; padding:0 6px; }
+.group-chat-list { display:grid; gap:10px; }
+.group-chat-setting { display:grid; gap:10px; padding:11px 13px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); }
+.group-chat-setting-head { display:grid; grid-template-columns:10px minmax(0,1fr) auto; align-items:center; gap:10px; color:var(--text-tertiary); }
+.group-chat-setting-head i { width:10px; height:10px; border-radius:50%; display:block; }
+.group-chat-setting-head div { display:grid; gap:2px; }
+.group-chat-setting-head strong { color:var(--text); font-size:13px; }
+.group-chat-setting-head small { font-size:11.5px; color:var(--text-tertiary); }
+.schedule-panel.disabled .group-chat-setting { opacity:.7; }
+.checkin-wording { border-top:1px solid var(--border); padding-top:8px; }
+.checkin-wording > summary { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--text-tertiary); cursor:pointer; list-style:none; }
+.checkin-wording > summary::-webkit-details-marker { display:none; }
+.checkin-wording > summary span { color:var(--text); font-weight:600; }
+.checkin-wording > summary small { font-size:11.5px; min-width:0; }
+.checkin-wording[open] > summary { color:var(--text); }
+.checkin-wording-body { display:grid; gap:12px; padding:10px 0 2px; }
+.checkin-wording.delivery-suboption { border-top:0; padding:2px 0 0 12px; }
+.ask-editor { display:grid; gap:6px; }
+.ask-editor-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+.ask-editor-head strong { font-size:12.5px; }
+.ask-editor-state { font-size:11px; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:.04em; }
+.ask-editor.custom .ask-editor-state { color:var(--accent); }
+.ask-editor-text { min-height:64px; resize:vertical; font-size:12.5px; line-height:1.45; padding:8px 10px; }
+.ask-editor-foot { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.ask-editor-foot small { font-size:11.5px; color:var(--text-tertiary); }
+.ask-editor-foot small.over { color:var(--danger); }
+.ask-editor-actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+.ask-helper { display:grid; gap:8px; padding:10px 12px; border:1px dashed var(--accent-border); border-radius:var(--radius); background:var(--accent-subtle); }
+.ask-helper label { display:grid; gap:5px; font-size:12px; color:var(--text); }
+.ask-helper label span { font-weight:600; }
+.ask-helper-actions { display:flex; gap:6px; justify-content:flex-end; }
+.ask-helper .field-hint { margin:0; }
 .life-area-add { display:grid; grid-template-columns:34px minmax(0,320px) auto; gap:8px; align-items:center; margin-bottom:9px; }
 .life-area-add input[type="color"] { width:34px; height:30px; padding:2px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); }
 .settings-section { transition:border-color .15s ease; }

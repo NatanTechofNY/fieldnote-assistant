@@ -1,3 +1,6 @@
+import { recentMemoryContext } from "./checkin-context.ts";
+import { DEFAULT_OWNER_EVENING_ASK, RECORDS_NOT_INSTRUCTIONS, renderAsk } from "./checkin-prompts.ts";
+import { dayTodoTitles, titleList } from "./group-checkin.ts";
 import { getReminders, USER_ID } from "./db.ts";
 import { localParts } from "./local-time.ts";
 import type { Db } from "./types.ts";
@@ -116,6 +119,30 @@ function emptyNote(options: { includeToday: boolean; includeOverdue: boolean }):
     ? `${clearToday}, and nothing is still open from an earlier day, so say the day is clear on todos`
       + " rather than listing tasks or looking for more."
     : `${clearToday}, so say the day is clear on todos rather than listing tasks or looking for more.`;
+}
+
+/**
+ * The turn the owner's evening check-in is composed from: the question the
+ * prompt's Reflections rules assume was asked the message before. Nothing is
+ * written on this turn; the answer that follows is the entry. Group chats'
+ * work is left out — a group has its own evening question.
+ */
+export function composeEveningCheckinTurn(
+  db: Db,
+  context: { date: string; timezone: string; ask?: string | null },
+): string {
+  const { finished, going } = dayTodoTitles(db, { own: true }, context);
+  return [
+    renderAsk(context.ask, DEFAULT_OWNER_EVENING_ASK),
+    "",
+    `--- Context supplied by the app, not by me. Today is ${context.date} in ${context.timezone}.`,
+    "This turn uses no tools and saves nothing; my answer is the entry.",
+    RECORDS_NOT_INSTRUCTIONS,
+    finished.length ? `Finished today: ${titleList(finished)}.` : "Nothing was finished today.",
+    going.length ? `Still in progress: ${titleList(going)}.` : "Nothing is marked in progress.",
+    "Mention at most one of these if it helps the question land; do not recite them.",
+    ...recentMemoryContext(db, { own: true }, context.date, context.timezone),
+  ].join("\n");
 }
 
 /**
