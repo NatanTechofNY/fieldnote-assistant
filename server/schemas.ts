@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CHECKIN_PROMPT_MAX } from "./checkin-prompts.ts";
 import { maxLeadMinutes } from "./recurrence.ts";
 import { isSendblueReaction } from "./sendblue-service.ts";
 
@@ -151,6 +152,10 @@ export const lifeAreaCreate = z.object({
   color: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/, "Use a six-digit hex color"),
 }).strict();
 
+/** The owner's wording for a check-in's ask. Blank is not a wording; send null to return to the default. */
+const checkinPrompt = z.string().trim().min(1, "Write the ask, or clear it to use the default")
+  .max(CHECKIN_PROMPT_MAX, `Keep the ask under ${CHECKIN_PROMPT_MAX} characters`);
+
 /**
  * A patch may also set the check-in times a group chat's area carries: the
  * local `HH:MM` the chat is texted a morning note and an evening question, or
@@ -161,6 +166,9 @@ export const lifeAreaPatch = lifeAreaCreate.partial().extend({
   evening_checkin_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time").nullable().optional(),
   /** Whether the owner is also texted a copy of the group's check-ins on their own number. */
   checkin_copy_to_owner: z.boolean().optional(),
+  /** The owner's wording for each ask; null returns to the default. */
+  morning_checkin_prompt: checkinPrompt.nullable().optional(),
+  evening_checkin_prompt: checkinPrompt.nullable().optional(),
 }).strict().refine(value => Object.keys(value).length > 0, "No changes provided");
 
 export const reminderCreate = z.object({
@@ -291,6 +299,8 @@ export const notificationInput = z.object({
   groupAllowAll: z.boolean().default(false),
   /** Local time of the owner's own evening check-in; null or absent leaves it off. */
   eveningCheckinTime: clockTime.nullable().default(null),
+  /** The owner's wording for their evening ask; null or absent uses the default. */
+  eveningCheckinPrompt: checkinPrompt.nullable().default(null),
 }).strict().superRefine((value, context) => {
   const seen = new Set<string>();
   value.trustedContacts.forEach((contact, index) => {

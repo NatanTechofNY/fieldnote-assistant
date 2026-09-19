@@ -82,6 +82,7 @@ export const api = {
   updateLifeArea: (id: string, input: {
     name?: string; color?: string;
     morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean;
+    morning_checkin_prompt?: string | null; evening_checkin_prompt?: string | null;
   }) =>
     request<LifeArea>(`/life-areas/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteLifeArea: (id: string) =>

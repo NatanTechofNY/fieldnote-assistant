@@ -25,7 +25,7 @@ import {
   setSmsProvider,
 } from "../server/integrations.ts";
 import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } from "../server/event-ingestion.ts";
-import { composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
+import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
 import { addressesAssistant, cleanGroupName, redactedNumber } from "../server/group-thread.ts";
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
@@ -6071,7 +6071,69 @@ describe("Sendblue provider", () => {
     assert.deepEqual([copied.morning_checkin_time, copied.checkin_copy_to_owner], ["08:30", 1], "the copy switch leaves the times alone");
     await api.patch("/api/life-areas/area_work").send({ morning_checkin_time: "08:30" }).expect(400);
     await api.patch("/api/life-areas/area_work").send({ checkin_copy_to_owner: true }).expect(400);
+    await api.patch("/api/life-areas/area_work").send({ morning_checkin_prompt: "Good morning, Work" }).expect(400);
     await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "8:30" }).expect(400);
+  });
+
+  /**
+   * The owner may reword either ask per group. `{group}` stands for the name,
+   * the context and the no-tools rule still follow from the app, and null goes
+   * back to the default — which the settings page reads from /api/integrations.
+   */
+  it("lets the owner reword a group's asks, keeps the context underneath, and returns to the default on null", async () => {
+    const { db, api, area } = checkinFixture();
+    const laundry = (await api.post("/api/todos").send({ title: "Laundry", life_area_id: area.id, due_at: "2030-01-19T21:00:00.000Z" }).expect(201)).body.data;
+    await api.patch(`/api/todos/${laundry.id}/status`).send({ status: "in_progress" }).expect(200);
+
+    const defaults = (await api.get("/api/integrations").expect(200)).body.data.checkinDefaults;
+    assert.match(defaults.groupMorning, /^Write this morning's check-in for the group chat "\{group\}"/);
+    assert.match(defaults.groupEvening, /^Ask the group chat "\{group\}" how today went/);
+    assert.match(composeGroupMorningTurn(db, { id: area.id, name: "Home", groupId: GROUP }, { date: CHECKIN_DAY, timezone: "UTC" }), /^Write this morning's check-in for the group chat "Home"/);
+
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_prompt: "  " }).expect(400);
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_prompt: "x".repeat(601) }).expect(400);
+    const set = (await api.patch(`/api/life-areas/${area.id}`).send({
+      morning_checkin_prompt: "Morning, {group}! One playful line on what's still open, then ask who's taking what.",
+      evening_checkin_prompt: "Ask {group} for a high and a low from today, and a mood 1–5.",
+    }).expect(200)).body.data;
+    assert.equal(set.morning_checkin_prompt, "Morning, {group}! One playful line on what's still open, then ask who's taking what.");
+    const listed = ((await api.get("/api/life-areas").expect(200)).body.data as Array<{ id: string; evening_checkin_prompt: string | null }>).find(item => item.id === area.id)!;
+    assert.equal(listed.evening_checkin_prompt, "Ask {group} for a high and a low from today, and a mood 1–5.");
+
+    const morning = composeGroupMorningTurn(
+      db, { id: area.id, name: "Home", groupId: GROUP, morningAsk: set.morning_checkin_prompt }, { date: CHECKIN_DAY, timezone: "UTC" },
+    );
+    assert.match(morning, /^Morning, Home! One playful line on what's still open, then ask who's taking what\.\n\n--- Context supplied by the app/);
+    assert.match(morning, /This turn uses no tools; the rows below are exact/, "the rule is the app's, not the wording's");
+    assert.match(morning, /- "Laundry" — in progress; due later/, "and so is the list");
+    const evening = composeGroupEveningTurn(
+      db, { id: area.id, name: "Home", groupId: GROUP, eveningAsk: listed.evening_checkin_prompt }, { date: CHECKIN_DAY, timezone: "UTC" },
+    );
+    assert.match(evening, /^Ask Home for a high and a low from today, and a mood 1–5\.\n\n--- Context/);
+    assert.match(evening, /This turn uses no tools and saves nothing/);
+    assert.match(evening, /People here the app can name: Sarah, the owner\./);
+
+    // The worker reads the wording off the area.
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30" }).expect(200);
+    const prompts: string[] = [];
+    const worker = {
+      sendSms: async () => ({ sid: "SB_1", status: "queued" as const }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, prompt: string) => {
+        prompts.push(prompt);
+        return { text: "Morning, Home!", threadId: "thread_checkin" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    };
+    const restore = atUtcTime("09:00");
+    try { await runWorkerOnce(db, fakeSearch(db), worker as never); } finally { restore(); }
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0], /^Morning, Home! One playful line/);
+
+    const reset = (await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_prompt: null }).expect(200)).body.data;
+    assert.equal(reset.morning_checkin_prompt, null);
+    assert.equal(reset.evening_checkin_prompt, "Ask {group} for a high and a low from today, and a mood 1–5.", "one at a time");
+    assert.match(composeGroupMorningTurn(db, { id: area.id, name: "Home", groupId: GROUP, morningAsk: null }, { date: CHECKIN_DAY, timezone: "UTC" }), /^Write this morning's check-in/);
   });
 
   it("keeps the owner's records out of a group chat", async () => {
@@ -7258,6 +7320,41 @@ describe("worker scheduling", () => {
       quietHoursStart: null, quietHoursEnd: null,
     }).expect(200)).body.data;
     assert.equal(cleared.eveningCheckinTime, null);
+    assert.equal(cleared.eveningCheckinPrompt, null, "no wording until the owner writes one");
+  });
+
+  /**
+   * The owner may reword the ask; the app still supplies the day's context and
+   * the no-tools rule underneath, so the wording cannot make the turn write.
+   */
+  it("asks the owner's evening question in their own words when they have written one", async () => {
+    const { db, api } = schedulingFixture({ eveningCheckinTime: "20:30" });
+    const base = {
+      smsEnabled: true, recipientPhone: RECIPIENT, timezone: "UTC", dailyDigestEnabled: false, dailyDigestTime: "09:00",
+      quietHoursStart: null, quietHoursEnd: null, eveningCheckinTime: "20:30",
+    };
+    await api.put("/api/integrations/notifications").send({ ...base, eveningCheckinPrompt: "   " }).expect(400);
+    await api.put("/api/integrations/notifications").send({ ...base, eveningCheckinPrompt: "x".repeat(601) }).expect(400);
+    const saved = (await api.put("/api/integrations/notifications").send({
+      ...base, eveningCheckinPrompt: "  Ask me for one win and one thing I'd do differently, then a mood 1–5.  ",
+    }).expect(200)).body.data;
+    assert.equal(saved.eveningCheckinPrompt, "Ask me for one win and one thing I'd do differently, then a mood 1–5.", "trimmed");
+    assert.equal((await api.get("/api/integrations").expect(200)).body.data.checkinDefaults.ownerEvening.slice(0, 21), "Ask me how today went");
+
+    const prompts: string[] = [];
+    const dependencies = {
+      sendSms: async () => ({ sid: "SM_1", status: "queued" }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, prompt: string) => {
+        prompts.push(prompt);
+        return { text: "One win, one do-over, and a mood?", threadId: "thread_digest" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    };
+    const restore = atUtcTime("21:00");
+    try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0], /^Ask me for one win and one thing I'd do differently, then a mood 1–5\.\n\n--- Context supplied by the app/);
+    assert.match(prompts[0], /This turn uses no tools and saves nothing; my answer is the entry\./, "the rule is the app's, not the wording's");
   });
 
   /**

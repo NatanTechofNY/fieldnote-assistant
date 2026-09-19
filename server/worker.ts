@@ -561,13 +561,14 @@ async function deliverEveningCheckin(
   recipient: string,
   local: { date: string; time: string },
   timezone: string,
+  ask: string | null,
   runAgent: typeof runSmsAgent,
   send: typeof sendSms,
 ): Promise<void> {
   const dispatchId = claimDispatch(db, "daily_digest", `evening_checkin:${USER_ID}:${local.date}`, now());
   if (!dispatchId) return;
   try {
-    const prompt = composeEveningCheckinTurn(db, { date: local.date, timezone });
+    const prompt = composeEveningCheckinTurn(db, { date: local.date, timezone, ask });
     const response = await runAgent(db, search, `digest:${recipient}`, prompt, undefined, {
       internal: true,
       userMessageMetadata: { kind: "evening_checkin", date: local.date },
@@ -594,11 +595,14 @@ type CheckinAreaRow = {
   morning_checkin_time: string | null;
   evening_checkin_time: string | null;
   checkin_copy_to_owner: 0 | 1;
+  morning_checkin_prompt: string | null;
+  evening_checkin_prompt: string | null;
 };
 
 function checkinAreas(db: Db): CheckinAreaRow[] {
   return db.prepare(`
-    SELECT la.id,la.name,t.address,la.morning_checkin_time,la.evening_checkin_time,la.checkin_copy_to_owner
+    SELECT la.id,la.name,t.address,la.morning_checkin_time,la.evening_checkin_time,la.checkin_copy_to_owner,
+      la.morning_checkin_prompt,la.evening_checkin_prompt
     FROM life_areas la JOIN channel_threads t ON t.id=la.thread_id
     WHERE la.user_id=? AND (la.morning_checkin_time IS NOT NULL OR la.evening_checkin_time IS NOT NULL)
     ORDER BY la.name
@@ -640,7 +644,10 @@ async function deliverGroupCheckin(
       `).run(now(), dispatchId);
       return;
     }
-    const checkinArea = { id: area.id, name: area.name, groupId };
+    const checkinArea = {
+      id: area.id, name: area.name, groupId,
+      morningAsk: area.morning_checkin_prompt, eveningAsk: area.evening_checkin_prompt,
+    };
     const prompt = kind === "morning"
       ? composeGroupMorningTurn(db, checkinArea, { date: local.date, timezone })
       : composeGroupEveningTurn(db, checkinArea, { date: local.date, timezone });
@@ -811,7 +818,9 @@ export async function runWorkerOnce(
       );
     }
     if (preferences.eveningCheckinTime && local.time >= preferences.eveningCheckinTime) {
-      await deliverEveningCheckin(db, search, preferences.recipientPhone, local, preferences.timezone, runAgent, send);
+      await deliverEveningCheckin(
+        db, search, preferences.recipientPhone, local, preferences.timezone, preferences.eveningCheckinPrompt, runAgent, send,
+      );
     }
     // A group's check-ins go into the group, which only iMessage can carry.
     if (isSmsProviderConnected(db, "sendblue")) {

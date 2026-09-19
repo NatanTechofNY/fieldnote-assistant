@@ -1,8 +1,18 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, MessageSquareText, Moon, Sun } from "lucide-react";
+import { Copy, MessageSquareText, Moon, PenLine, Sun } from "lucide-react";
 import { api } from "../../api";
-import type { LifeArea } from "../../types";
+import type { IntegrationState, LifeArea } from "../../types";
+import { AskEditor } from "./AskEditor";
+
+type CheckinPatch = {
+  id: string;
+  morning_checkin_time?: string | null;
+  evening_checkin_time?: string | null;
+  checkin_copy_to_owner?: boolean;
+  morning_checkin_prompt?: string | null;
+  evening_checkin_prompt?: string | null;
+};
 
 /**
  * Everything that is per group chat: each group the assistant has been added
@@ -11,18 +21,16 @@ import type { LifeArea } from "../../types";
  * schedule because it is a notification preference; these switches save at
  * once, like the view toggles elsewhere.
  */
-export function GroupChatSettings({ notify, imessage }: { notify: (message: string) => void; imessage: boolean }) {
+export function GroupChatSettings({ notify, imessage, defaults }: {
+  notify: (message: string) => void;
+  imessage: boolean;
+  defaults: IntegrationState["checkinDefaults"];
+}) {
   const queryClient = useQueryClient();
   const { data: areas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
   const groups = areas.filter(area => area.is_group);
   const checkin = useMutation({
-    mutationFn: (input: {
-      id: string; morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean;
-    }) => api.updateLifeArea(input.id, {
-      morning_checkin_time: input.morning_checkin_time,
-      evening_checkin_time: input.evening_checkin_time,
-      checkin_copy_to_owner: input.checkin_copy_to_owner,
-    }),
+    mutationFn: ({ id, ...fields }: CheckinPatch) => api.updateLifeArea(id, fields),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["life-areas"] }),
     onError: (error: Error) => notify(error.message),
   });
@@ -70,6 +78,35 @@ export function GroupChatSettings({ notify, imessage }: { notify: (message: stri
           <span>Also text me a copy</span>
         </label>
       </div>
+      <details className="checkin-wording">
+        <summary>
+          <PenLine size={13} aria-hidden="true"/>
+          <span>Wording</span>
+          <small>
+            {group.morning_checkin_prompt || group.evening_checkin_prompt ? "Your wording" : "Default"}
+            {" · "}what the assistant is asked to write; the day&rsquo;s tasks and who is here are still supplied underneath
+          </small>
+        </summary>
+        <div className="checkin-wording-body">
+          <AskEditor
+            label="Morning note"
+            name={`Morning check-in wording for ${group.name}`}
+            fallback={defaults.groupMorning.split("{group}").join(group.name)}
+            value={group.morning_checkin_prompt ?? null}
+            saving={checkin.isPending}
+            onSave={ask => checkin.mutate({ id: group.id, morning_checkin_prompt: ask })}
+          />
+          <AskEditor
+            label="Evening question"
+            name={`Evening check-in wording for ${group.name}`}
+            fallback={defaults.groupEvening.split("{group}").join(group.name)}
+            value={group.evening_checkin_prompt ?? null}
+            saving={checkin.isPending}
+            onSave={ask => checkin.mutate({ id: group.id, evening_checkin_prompt: ask })}
+          />
+          <small className="field-hint">Write <code>{"{group}"}</code> anywhere to stand for the group&rsquo;s current name.</small>
+        </div>
+      </details>
     </div>)}
   </div>;
 }

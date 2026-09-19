@@ -652,8 +652,14 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
         trustedContacts: [],
         groupAllowAll: false,
         eveningCheckinTime: null,
+        eveningCheckinPrompt: null,
       },
       tasks: { ...taskPreferences },
+      checkinDefaults: {
+        groupMorning: 'Write this morning\'s check-in for the group chat "{group}": two or three warm sentences.',
+        groupEvening: 'Ask the group chat "{group}" how today went.',
+        ownerEvening: "Ask me how today went, in one warm line.",
+      },
       webhookPaths: {
         sms: "/api/webhooks/twilio/sms",
         status: "/api/webhooks/twilio/status",
@@ -1359,12 +1365,24 @@ it("saves the owner's evening check-in time with the SMS schedule", async () => 
   await waitFor(() => expect(notificationSaves).toHaveLength(1));
   expect(notificationSaves[0].eveningCheckinTime).toBe(null);
 
+  expect(screen.queryByLabelText("My evening check-in wording")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("checkbox", { name: "My evening check-in" }));
   expect(time).toBeEnabled();
   fireEvent.change(time, { target: { value: "21:15" } });
   await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
   await waitFor(() => expect(notificationSaves).toHaveLength(2));
   expect(notificationSaves[1].eveningCheckinTime).toBe("21:15");
+  // Blank wording is the default.
+  expect(notificationSaves[1].eveningCheckinPrompt).toBe(null);
+
+  // The wording shows the default and takes the owner's own; it saves with the schedule.
+  const wording = screen.getByLabelText("My evening check-in wording") as HTMLTextAreaElement;
+  expect(wording.placeholder).toBe("Ask me how today went, in one warm line.");
+  expect(wording.value).toBe("");
+  fireEvent.change(wording, { target: { value: "  Ask me for a high and a low, then a mood 1–5.  " } });
+  await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
+  await waitFor(() => expect(notificationSaves).toHaveLength(3));
+  expect(notificationSaves[2].eveningCheckinPrompt).toBe("Ask me for a high and a low, then a mood 1–5.");
 });
 
 /**
@@ -1408,6 +1426,23 @@ it("schedules a group's check-ins, and a copy to the owner, from the Group chats
   expect(copy).not.toBeChecked();
   await userEvent.click(copy);
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { checkin_copy_to_owner: true } }));
+
+  // The wording shows the default with the group named, saves the owner's own, and goes back on "Use default".
+  const wording = screen.getByLabelText("Morning check-in wording for Home") as HTMLTextAreaElement;
+  expect(wording.placeholder).toBe('Write this morning\'s check-in for the group chat "Home": two or three warm sentences.');
+  expect(wording.value).toBe("");
+  const editor = wording.closest(".ask-editor") as HTMLElement;
+  expect(within(editor).getByText("Default")).toBeInTheDocument();
+  expect(within(editor).getByRole("button", { name: /Save wording/ })).toBeDisabled();
+  fireEvent.change(wording, { target: { value: "Morning, {group}! One playful line, then who's taking what. " } });
+  expect(within(editor).getByText("Your wording")).toBeInTheDocument();
+  await userEvent.click(within(editor).getByRole("button", { name: /Save wording/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({
+    id: "area_group", body: { morning_checkin_prompt: "Morning, {group}! One playful line, then who's taking what." },
+  }));
+  await userEvent.click(await within(editor).findByRole("button", { name: /Use default/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { morning_checkin_prompt: null } }));
+  expect(screen.getByLabelText("Evening check-in wording for Home")).toHaveAttribute("placeholder", 'Ask the group chat "Home" how today went.');
 });
 
 it("fills the brief form from the end-of-day template and flags a send time inside quiet hours", async () => {

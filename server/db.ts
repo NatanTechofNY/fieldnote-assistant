@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS life_areas (
   morning_checkin_time TEXT,
   evening_checkin_time TEXT,
   checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1)),
+  morning_checkin_prompt TEXT,
+  evening_checkin_prompt TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, slug)
@@ -205,6 +207,7 @@ CREATE TABLE IF NOT EXISTS notification_preferences (
   trusted_contacts_json TEXT NOT NULL DEFAULT '[]',
   group_allow_all INTEGER NOT NULL DEFAULT 0 CHECK(group_allow_all IN (0,1)),
   evening_checkin_time TEXT,
+  evening_checkin_prompt TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -469,9 +472,16 @@ function migrateMessaging(db: Db): void {
   if (!areaColumns.has("checkin_copy_to_owner")) {
     db.exec("ALTER TABLE life_areas ADD COLUMN checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1))");
   }
+  // The owner's wording for each ask; null uses the default in checkin-prompts.ts.
+  if (!areaColumns.has("morning_checkin_prompt")) db.exec("ALTER TABLE life_areas ADD COLUMN morning_checkin_prompt TEXT");
+  if (!areaColumns.has("evening_checkin_prompt")) db.exec("ALTER TABLE life_areas ADD COLUMN evening_checkin_prompt TEXT");
   // The owner's own evening check-in, on the same footing as the daily digest.
-  if (!columns(db, "notification_preferences").has("evening_checkin_time")) {
+  const checkinColumns = columns(db, "notification_preferences");
+  if (!checkinColumns.has("evening_checkin_time")) {
     db.exec("ALTER TABLE notification_preferences ADD COLUMN evening_checkin_time TEXT");
+  }
+  if (!checkinColumns.has("evening_checkin_prompt")) {
+    db.exec("ALTER TABLE notification_preferences ADD COLUMN evening_checkin_prompt TEXT");
   }
   const timestamp = now();
   db.prepare(`

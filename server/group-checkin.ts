@@ -1,3 +1,4 @@
+import { DEFAULT_GROUP_EVENING_ASK, DEFAULT_GROUP_MORNING_ASK, renderAsk } from "./checkin-prompts.ts";
 import { USER_ID } from "./db.ts";
 import { getNotificationPreferences } from "./integrations.ts";
 import { OWNER_SPEAKER_NAME } from "./group-thread.ts";
@@ -18,8 +19,17 @@ type CheckinTodoRow = {
   completed_at: string | null;
 };
 
-/** A group's area, as the check-ins need it: where its records are, and where the note goes. */
-export type CheckinArea = { id: string; name: string; groupId: string };
+/**
+ * A group's area, as the check-ins need it: where its records are, where the
+ * note goes, and the owner's wording for each ask when there is one.
+ */
+export type CheckinArea = {
+  id: string;
+  name: string;
+  groupId: string;
+  morningAsk?: string | null;
+  eveningAsk?: string | null;
+};
 
 /** The local calendar day after `date` (`YYYY-MM-DD`). */
 function dayAfter(date: string): string {
@@ -83,10 +93,12 @@ function participantNames(db: Db): string[] {
 }
 
 /**
- * The turn a group's morning note is composed from. The request leads and what
- * the app looked up follows as clearly labelled context, the digest's shape, so
- * the agent cannot mistake the list for part of the ask. Empty lists never get
- * here: the worker sends nothing on a morning with nothing to say.
+ * The turn a group's morning note is composed from. The request leads — the
+ * owner's wording or the default — and what the app looked up follows as
+ * clearly labelled context, the digest's shape, so the agent cannot mistake
+ * the list for part of the ask. The no-tools rule sits in the context so a
+ * rewording cannot drop it. Empty lists never get here: the worker sends
+ * nothing on a morning with nothing to say.
  */
 export function composeGroupMorningTurn(
   db: Db,
@@ -95,11 +107,10 @@ export function composeGroupMorningTurn(
 ): string {
   const { lines, more } = groupCheckinItems(db, area.id, context.date, context.timezone);
   return [
-    `Write this morning's check-in for the group chat "${area.name}": two or three warm sentences to the room`
-    + " naming what is still going and when each is due, and asking what to wrap up today or move. No list, no"
-    + " headings, no tools; the rows below are exact, so use these titles and times as given.",
+    renderAsk(area.morningAsk, DEFAULT_GROUP_MORNING_ASK, area.name),
     "",
     `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
+    "This turn uses no tools; the rows below are exact, so use these titles and times as given.",
     "Open in this group, in progress or due by tomorrow:",
     ...lines,
     ...more ? [`(+${more} more not shown)`] : [],
@@ -131,11 +142,10 @@ export function composeGroupEveningTurn(
   const finished = [...new Set([...finishedToday, ...occurrences].map(row => row.title))];
   const going = rows.filter(todo => todo.status === "in_progress").map(todo => todo.title);
   return [
-    `Ask the group chat "${area.name}" how today went: one warm question to everyone in it, asking each for a line`
-    + " about their day and a mood word with a number from 1 to 5. Nothing else on this turn — no summary, no"
-    + " list, no tools, and nothing saved; the answers that follow are what gets recorded.",
+    renderAsk(area.eveningAsk, DEFAULT_GROUP_EVENING_ASK, area.name),
     "",
     `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
+    "This turn uses no tools and saves nothing; the answers that follow are what gets recorded.",
     `People here the app can name: ${participantNames(db).join(", ")}.`,
     finished.length ? `Finished in this group today: ${finished.map(title => `"${title}"`).join(", ")}.` : "Nothing in this group was finished today.",
     going.length ? `Still in progress: ${going.map(title => `"${title}"`).join(", ")}.` : "Nothing is marked in progress.",

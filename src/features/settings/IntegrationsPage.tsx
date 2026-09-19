@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Moon, Newspaper, Pause, Phone, Plus, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, X, Zap } from "lucide-react";
+import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Moon, Newspaper, Pause, PenLine, Phone, Plus, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, X, Zap } from "lucide-react";
 import { api } from "../../api";
 import type {
   ExternalEvent, IntegrationState, SmsProvider, TrustedContact,
@@ -11,6 +11,7 @@ import { ErrorState, Field, Loading, ThemeToggle, Toast } from "../../components
 import { useDemoMode, useRedact } from "../../lib/demo-mode";
 import { type ThemePreference, useTheme } from "../../lib/theme";
 import { AtlassianSettings, DigestBriefsSettings } from "./AtlassianSettings";
+import { AskEditor } from "./AskEditor";
 import { LifeAreasSettings } from "./LifeAreasSettings";
 import { GroupChatSettings } from "./GroupChatSettings";
 import { SettingsSection } from "./SettingsSection";
@@ -70,6 +71,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   // off so turning it back on brings back the hour that was chosen.
   const [eveningEnabled, setEveningEnabled] = useState(Boolean(data.notifications.eveningCheckinTime));
   const [eveningTime, setEveningTime] = useState(data.notifications.eveningCheckinTime ?? "20:30");
+  const [eveningAsk, setEveningAsk] = useState(data.notifications.eveningCheckinPrompt ?? "");
   const [contactName, setContactName] = useState("");
   const [contactPhone, setContactPhone] = useState("");
   const [granolaKey, setGranolaKey] = useState("");
@@ -132,6 +134,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
       trustedContacts,
       groupAllowAll,
       eveningCheckinTime: eveningEnabled ? eveningTime : null,
+      eveningCheckinPrompt: eveningAsk.trim() || null,
     }),
     onSuccess: () => { refresh(); notify("Messaging schedule saved"); },
     onError: (mutationError: Error) => notify(mutationError.message),
@@ -418,6 +421,23 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             <span><strong>Evening check-in</strong><small>One question each evening about how the day went; your answer becomes that day&rsquo;s journal entry.</small></span>
             <input type="checkbox" aria-label="My evening check-in" checked={eveningEnabled} onChange={e => setEveningEnabled(e.target.checked)}/>
           </label>
+          {eveningEnabled && <details className="checkin-wording delivery-suboption">
+            <summary>
+              <PenLine size={13} aria-hidden="true"/>
+              <span>Wording</span>
+              <small>{eveningAsk.trim() ? "Your wording" : "Default"} · what the assistant is asked; what you finished today is still supplied underneath</small>
+            </summary>
+            <div className="checkin-wording-body">
+              <AskEditor
+                label="Evening question"
+                name="My evening check-in wording"
+                fallback={data.checkinDefaults.ownerEvening}
+                value={data.notifications.eveningCheckinPrompt ?? null}
+                onChange={setEveningAsk}
+              />
+              <small className="field-hint">Saved with the SMS schedule below.</small>
+            </div>
+          </details>}
         </div>
 
         <div className="form-grid delivery-destination">
@@ -549,7 +569,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             </div>
             <Clock3 size={17}/>
           </div>
-          <GroupChatSettings notify={notify} imessage={data.notifications.smsProvider === "sendblue"}/>
+          <GroupChatSettings notify={notify} imessage={data.notifications.smsProvider === "sendblue"} defaults={data.checkinDefaults}/>
         </div>
       </SettingsSection>
       <SettingsSection

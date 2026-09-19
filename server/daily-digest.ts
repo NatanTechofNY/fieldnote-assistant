@@ -1,3 +1,4 @@
+import { DEFAULT_OWNER_EVENING_ASK, renderAsk } from "./checkin-prompts.ts";
 import { getReminders, OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
 import { localParts } from "./local-time.ts";
 import type { Db } from "./types.ts";
@@ -126,7 +127,7 @@ function emptyNote(options: { includeToday: boolean; includeOverdue: boolean }):
  */
 export function composeEveningCheckinTurn(
   db: Db,
-  context: { date: string; timezone: string },
+  context: { date: string; timezone: string; ask?: string | null },
 ): string {
   const localDate = (value: string) => localParts(new Date(value), context.timezone).date;
   const rows = db.prepare(`
@@ -136,10 +137,10 @@ export function composeEveningCheckinTurn(
   const finished = rows.filter(todo => todo.completed_at && localDate(todo.completed_at) === context.date).map(todo => todo.title);
   const going = rows.filter(todo => todo.status === "in_progress").map(todo => todo.title);
   return [
-    "Ask me how today went, in one warm line, asking for a mood word and a number from 1 to 5 with it. Nothing else"
-    + " on this turn — no summary, no list, no tools, and nothing saved; my answer is the entry.",
+    renderAsk(context.ask, DEFAULT_OWNER_EVENING_ASK),
     "",
     `--- Context supplied by the app, not by me. Today is ${context.date} in ${context.timezone}.`,
+    "This turn uses no tools and saves nothing; my answer is the entry.",
     finished.length ? `Finished today: ${finished.map(title => `"${title}"`).join(", ")}.` : "Nothing was finished today.",
     going.length ? `Still in progress: ${going.map(title => `"${title}"`).join(", ")}.` : "Nothing is marked in progress.",
     "Mention at most one of these if it helps the question land; do not recite them.",

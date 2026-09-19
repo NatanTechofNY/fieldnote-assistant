@@ -16,6 +16,9 @@ export interface LifeArea {
   evening_checkin_time?: string | null;
   /** Whether the owner is also texted a copy of the group's check-ins on their own number. */
   checkin_copy_to_owner?: number | boolean;
+  /** The owner's wording for each ask; null or absent uses the default. `{group}` stands for the group's name. */
+  morning_checkin_prompt?: string | null;
+  evening_checkin_prompt?: string | null;
 }
 
 export interface Category {
@@ -264,8 +267,12 @@ export interface IntegrationState {
     groupAllowAll: boolean;
     /** Local `HH:MM` the owner is asked how the day went, or null for never. */
     eveningCheckinTime: string | null;
+    /** The owner's wording for that evening ask, or null for the default. */
+    eveningCheckinPrompt: string | null;
   };
   tasks: { autoCompleteParent: boolean };
+  /** The asks each check-in uses unless reworded; shown beside the override fields. */
+  checkinDefaults: { groupMorning: string; groupEvening: string; ownerEvening: string };
   webhookPaths: {
     sms: string;
     status: string;
