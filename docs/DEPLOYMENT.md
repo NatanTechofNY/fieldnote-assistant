@@ -37,7 +37,7 @@ Railway, Fly.io, Render with a paid disk, or any VPS running Docker all satisfy 
 2. Add a volume mounted at `/data`.
 3. Set the variables listed in [Required variables](#required-variables).
 4. Generate a public domain for the service.
-5. Deploy, then open `/settings`, enter the public URL, and select **Connect & configure** so Twilio webhooks point at the deployed origin.
+5. Deploy, then open `/settings` on the new domain. The **Public HTTPS URL** field under each message provider shows the origin the page was served from — prefilled when nothing is saved yet, or flagged with a **Use this URL** button when the saved URL is an older tunnel or host — along with the exact webhook endpoints it resolves to. Select **Connect & configure** (Twilio) or **Connect & register webhook** (Sendblue) so the provider points at the deployed origin.
 
 The image defaults `DATABASE_PATH` to `/data/assistant.db`, so no override is needed when the volume is mounted at `/data`.
 

@@ -1603,6 +1603,29 @@ tr:hover .attach-button,
   border:1px solid var(--warn-border); border-radius:var(--radius); background:var(--warn-subtle); color:var(--warn); font-size:12px;
 }
 .integration-warning code { font:11px var(--font-mono); }
+/* The webhook base URL sits beside the origin the app is served from, so a
+   move shows up here before the provider is pointed at a dead URL. */
+.webhook-field { display:flex; flex-direction:column; min-width:0; }
+.webhook-origin {
+  display:flex; align-items:center; gap:8px; margin-top:8px; padding:7px 9px 7px 10px;
+  border:1px solid var(--accent-border); border-radius:var(--radius); background:var(--accent-subtle);
+  color:var(--text-secondary); font-size:11px; line-height:1.45;
+}
+.webhook-origin > svg { flex:none; color:var(--accent); }
+.webhook-origin > span { flex:1; min-width:0; }
+.webhook-origin code { font:11px var(--font-mono); overflow-wrap:anywhere; }
+.webhook-origin .button { flex:none; padding:4px 8px; min-height:26px; font-size:11px; }
+.webhook-origin.moved { border-color:var(--warn-border); background:var(--warn-subtle); color:var(--warn); }
+.webhook-origin.moved > svg { color:var(--warn); }
+.webhook-match { display:flex; align-items:center; gap:4px; color:var(--accent); }
+.webhook-endpoints { list-style:none; margin:8px 0 0; padding:0; display:flex; flex-direction:column; gap:4px; }
+.webhook-endpoints li { display:flex; align-items:center; gap:8px; min-width:0; font-size:11px; }
+.webhook-endpoint-label { flex:none; width:104px; color:var(--text-tertiary); }
+.webhook-endpoints code {
+  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font:11px var(--font-mono); color:var(--text-secondary);
+}
+.webhook-endpoints .button.icon { padding:4px; min-height:0; }
 .integration-status {
   display:flex; align-items:center; gap:8px; margin:10px 0 16px; padding:7px 10px;
   border:1px solid var(--border); border-radius:var(--radius); background:var(--surface);

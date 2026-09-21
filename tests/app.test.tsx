@@ -1418,6 +1418,60 @@ it("renders secure messaging and event integration settings", async () => {
   expect(destructiveButton).toBeEnabled();
 });
 
+/**
+ * After a deploy the provider still calls the old tunnel, and nothing in the
+ * app fails loudly. The Settings page shows the origin it was served from
+ * beside the webhook field so the move is visible and one click fixes it.
+ */
+it("offers the origin the app is served from as the webhook URL", async () => {
+  const original = window.location;
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: { ...original, origin: "https://assistant.example.com" },
+  });
+  window.localStorage.clear();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  try {
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Settings.")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("Message provider"));
+    // Nothing saved yet, so the field starts as the current origin and the
+    // endpoints the provider will be pointed at are spelled out.
+    const field = screen.getByLabelText("Public HTTPS URL");
+    expect(field).toHaveValue("https://assistant.example.com");
+    expect(screen.getByText("Matches where this app is running.")).toBeInTheDocument();
+    expect(screen.getByText("https://assistant.example.com/api/webhooks/twilio/sms")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect & configure" })).toBeInTheDocument();
+    // Typing an older URL brings the current one back as a one-click fix.
+    await userEvent.clear(field);
+    await userEvent.type(field, "https://old-tunnel.ngrok-free.app");
+    expect(screen.queryByText("Matches where this app is running.")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Use this URL" }));
+    expect(field).toHaveValue("https://assistant.example.com");
+  } finally {
+    Object.defineProperty(window, "location", { configurable: true, value: original });
+  }
+});
+
+it("keeps the webhook field empty in development, where the origin is plain HTTP", async () => {
+  window.localStorage.clear();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Message provider"));
+  expect(screen.getByLabelText("Public HTTPS URL")).toHaveValue("");
+  expect(screen.queryByRole("button", { name: "Use this URL" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Connect Twilio" })).toBeInTheDocument();
+});
+
 it("badges a group chat's classification and renames it inline", async () => {
   window.localStorage.clear();
   lifeAreaPatches.length = 0;

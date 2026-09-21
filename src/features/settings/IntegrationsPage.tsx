@@ -16,6 +16,8 @@ import { LifeAreasSettings } from "./LifeAreasSettings";
 import { GroupChatSettings } from "./GroupChatSettings";
 import { SettingsSection } from "./SettingsSection";
 import { UnderHoodSettings } from "./UnderHoodSettings";
+import { WebhookUrlField } from "./WebhookUrlField";
+import { currentPublicOrigin } from "../../lib/public-origin";
 import { humanTime, timezoneLabel, timezoneNames } from "../../lib/timezone";
 
 const themeStatus: Record<ThemePreference, string> = {
@@ -50,12 +52,15 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   const [accountSid, setAccountSid] = useState(data.twilio.accountSid || "");
   const [authToken, setAuthToken] = useState("");
   const [fromPhone, setFromPhone] = useState(data.twilio.fromPhone || "");
-  const [webhookBaseUrl, setWebhookBaseUrl] = useState(data.twilio.webhookBaseUrl || "");
+  // An unset base URL starts as the origin this page came from: on a deployed
+  // install that is the URL the provider has to call, and in development it is
+  // plain HTTP and offers nothing.
+  const [webhookBaseUrl, setWebhookBaseUrl] = useState(data.twilio.webhookBaseUrl || currentPublicOrigin() || "");
   const [providerTab, setProviderTab] = useState<SmsProvider>(data.notifications.smsProvider);
   const [sendblueKeyId, setSendblueKeyId] = useState(data.sendblue.apiKeyId || "");
   const [sendblueSecret, setSendblueSecret] = useState("");
   const [sendbluePhone, setSendbluePhone] = useState(data.sendblue.fromPhone || "");
-  const [sendblueWebhookBaseUrl, setSendblueWebhookBaseUrl] = useState(data.sendblue.webhookBaseUrl || "");
+  const [sendblueWebhookBaseUrl, setSendblueWebhookBaseUrl] = useState(data.sendblue.webhookBaseUrl || currentPublicOrigin() || "");
   const [recipientPhone, setRecipientPhone] = useState(data.notifications.recipientPhone || "");
   const [timezone, setTimezone] = useState(data.notifications.timezone);
   const [digestEnabled, setDigestEnabled] = useState(data.notifications.dailyDigestEnabled);
@@ -303,10 +308,17 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
           <Field label={data.twilio.configured ? "New auth token (only to rotate)" : "Auth token"}><input className="input" type="password" value={authToken} onChange={e => setAuthToken(e.target.value)} placeholder="Stored encrypted" /></Field>
           <div className="form-grid">
             <Field label="Twilio number"><input className="input" type={redact.inputType("tel")} value={fromPhone} onChange={e => setFromPhone(e.target.value)} placeholder="+17185551234" /></Field>
-            <Field label="Public HTTPS URL">
-              <input className="input" type={redact.inputType("url")} value={webhookBaseUrl} onChange={e => setWebhookBaseUrl(e.target.value)} placeholder="https://your-tunnel.ngrok-free.app" />
-              <small className="field-hint">Localhost cannot receive Twilio webhooks. Use ngrok, Cloudflare Tunnel, or your deployed URL.</small>
-            </Field>
+            <WebhookUrlField
+              provider="Twilio"
+              value={webhookBaseUrl}
+              savedValue={data.twilio.webhookBaseUrl}
+              onChange={setWebhookBaseUrl}
+              paths={[
+                { label: "Inbound SMS", path: data.webhookPaths.sms },
+                { label: "Delivery status", path: data.webhookPaths.status },
+              ]}
+              hint="Localhost cannot receive Twilio webhooks. Use ngrok, Cloudflare Tunnel, or your deployed URL. Saving points the Twilio number at the endpoints below."
+            />
           </div>
           {twilioConnect.error && <div className="inline-error"><TriangleAlert size={14}/><span>{twilioConnect.error.message}</span></div>}
           <div className="actions">
@@ -331,10 +343,17 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
           <Field label={data.sendblue.configured ? "New API secret (only to rotate)" : "API secret"}><input className="input" type="password" value={sendblueSecret} onChange={e => setSendblueSecret(e.target.value)} placeholder="Stored encrypted" /></Field>
           <div className="form-grid">
             <Field label="Sendblue number"><input className="input" type={redact.inputType("tel")} value={sendbluePhone} onChange={e => setSendbluePhone(e.target.value)} placeholder="+15551234567" /></Field>
-            <Field label="Public HTTPS URL">
-              <input className="input" type={redact.inputType("url")} value={sendblueWebhookBaseUrl} onChange={e => setSendblueWebhookBaseUrl(e.target.value)} placeholder="https://your-tunnel.ngrok-free.app" />
-              <small className="field-hint">Registers <code>{data.webhookPaths.sendblueInbound}</code> plus the blocked-line and reassigned-line webhooks, each with a generated secret. Sendblue webhooks are account-wide, so this replaces those URLs for every line.</small>
-            </Field>
+            <WebhookUrlField
+              provider="Sendblue"
+              value={sendblueWebhookBaseUrl}
+              savedValue={data.sendblue.webhookBaseUrl}
+              onChange={setSendblueWebhookBaseUrl}
+              paths={[
+                { label: "Inbound message", path: data.webhookPaths.sendblueInbound },
+                { label: "Delivery status", path: data.webhookPaths.sendblueStatus },
+              ]}
+              hint="Saving registers the endpoints below plus the blocked-line and reassigned-line webhooks, each with a generated secret. Sendblue webhooks are account-wide, so this replaces those URLs for every line."
+            />
           </div>
           {data.sendblue.configured && <p className="integration-copy">
             {data.sendblue.autoTypingIndicator && data.sendblue.autoMarkRead
