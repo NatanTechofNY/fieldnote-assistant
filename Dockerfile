@@ -50,8 +50,10 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/tsconfig.json ./tsconfig.json
 COPY --from=build /app/tsconfig.server.json ./tsconfig.server.json
 
-# SQLite owns reminders and delivery state, so this must be a real volume.
-VOLUME ["/data"]
+# SQLite owns reminders and delivery state, so /data must be a real volume.
+# There is deliberately no VOLUME instruction: Railway's builder rejects it
+# ("docker VOLUME is not supported, use Railway Volumes"), and railway.json's
+# requiredMountPath enforces the mount there. Plain Docker hosts pass -v.
 EXPOSE 4174
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
