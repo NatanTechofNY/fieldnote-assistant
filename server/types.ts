@@ -133,6 +133,8 @@ export interface ReminderRow {
   created_at: string;
   updated_at: string;
   todo_title?: string;
+  /** The todo's notes, joined on claim; the reminder text carries them so a number to call arrives with the nudge. */
+  todo_notes?: string | null;
   /** The todo's current life area; joined on claim, and what a group-bound reminder's subtasks are filtered to. */
   todo_life_area_id?: string | null;
   /**

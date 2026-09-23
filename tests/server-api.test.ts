@@ -2045,6 +2045,76 @@ describe("SMS, reminders, and channel agent execution", () => {
     );
   });
 
+  /**
+   * "Call my PCP at 9" fired on time and without the number the user had handed
+   * over the night before, because it sat in the todo's notes and the text only
+   * carried the title. The notes are what the user needs in hand when it fires.
+   */
+  it("carries the todo's notes in the reminder it sends", async () => {
+    const { db, api } = fixture();
+    await api.post("/api/todos").send({
+      title: "Call PCP on the way to the office",
+      notes: "Dr. Ortiz, Riverside Medical, 914-849-7060",
+      reminder_at: "2020-01-01T00:00:00.000Z",
+    }).expect(201);
+    saveNotificationPreferences(db, {
+      smsEnabled: true,
+      recipientPhone: "+17185551111",
+      timezone: "UTC",
+      dailyDigestEnabled: false,
+      dailyDigestTime: "09:00",
+      quietHoursStart: null,
+      quietHoursEnd: null,
+    });
+    let content = "";
+    await runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async (_db, _to, body) => { content = body; return { sid: "SM_1", status: "queued" }; },
+      runSmsAgent: async () => ({ text: "digest", threadId: "unused" }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    });
+    assert.equal(content, "Reminder: Call PCP on the way to the office\nDr. Ortiz, Riverside Medical, 914-849-7060");
+  });
+
+  it("collapses and cuts long notes, and puts them before the open subtasks", async () => {
+    const { db, api } = fixture();
+    const paragraph = "Ask about the referral first.\n\nThen   the prescription renewal. ".repeat(6);
+    await api.post("/api/todos").send({
+      title: "Call the clinic",
+      notes: paragraph,
+      reminder_at: "2020-01-01T00:00:00.000Z",
+      subtasks: [{ title: "Find the insurance card" }],
+    }).expect(201);
+    // Whitespace-only notes are the same as none.
+    await api.post("/api/todos").send({
+      title: "Water the plants",
+      notes: "  \n ",
+      reminder_at: "2020-01-01T00:00:00.000Z",
+    }).expect(201);
+    saveNotificationPreferences(db, {
+      smsEnabled: true,
+      recipientPhone: "+17185551111",
+      timezone: "UTC",
+      dailyDigestEnabled: false,
+      dailyDigestTime: "09:00",
+      quietHoursStart: null,
+      quietHoursEnd: null,
+    });
+    const sent: string[] = [];
+    await runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async (_db, _to, body) => { sent.push(body); return { sid: `SM_${sent.length}`, status: "queued" }; },
+      runSmsAgent: async () => ({ text: "digest", threadId: "unused" }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    });
+    const clinic = sent.find(body => body.startsWith("Reminder: Call the clinic"));
+    assert.ok(clinic, "the clinic reminder went out");
+    const [headline, notes, open] = clinic.split("\n");
+    assert.equal(headline, "Reminder: Call the clinic");
+    assert.ok(notes.startsWith("Ask about the referral first. Then the prescription renewal. Ask about"), "line breaks and runs of spaces are collapsed");
+    assert.ok(notes.endsWith("…") && notes.length <= 200, `a long note is cut to one line, got ${notes.length} characters`);
+    assert.equal(open, "1 open: Find the insurance card");
+    assert.ok(sent.includes("Reminder: Water the plants"), "blank notes add no line");
+  });
+
   it("claims each due reminder once and records provider delivery IDs", async () => {
     const { db, api } = fixture();
     await api.post("/api/todos").send({

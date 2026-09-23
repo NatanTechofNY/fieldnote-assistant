@@ -276,7 +276,8 @@ function claimDueReminders(db: Db, limit = 50): ReminderRow[] {
      * from then on the todo is theirs alone and so is its reminder.
      */
     const rows = db.prepare(`
-      SELECT r.*,t.title todo_title,t.life_area_id todo_life_area_id,ct.address reply_address FROM reminders r
+      SELECT r.*,t.title todo_title,t.notes todo_notes,t.life_area_id todo_life_area_id,ct.address reply_address
+      FROM reminders r
       JOIN todos t ON t.id=r.todo_id
       LEFT JOIN channel_threads ct
         ON ct.id=t.reply_thread_id
@@ -300,22 +301,46 @@ function claimDueReminders(db: Db, limit = 50): ReminderRow[] {
  * away for the rest.
  */
 const NAMED_SUBTASKS = 3;
+/**
+ * How much of a todo's notes a reminder text carries. Enough for a name, a
+ * place, and a number to call; short enough that a paragraph of context in the
+ * app does not turn the nudge into a wall of text.
+ */
+const NOTES_IN_REMINDER = 200;
+
+/**
+ * The todo's notes as one line of the reminder, or nothing. Notes are written
+ * in the app or by the agent as free text, so line breaks and runs of spaces
+ * are collapsed before the cut, and a long note is cut rather than dropped.
+ */
+export function reminderNotesLine(notes: string | null | undefined): string | null {
+  const collapsed = (notes ?? "").replace(/\s+/g, " ").trim();
+  if (!collapsed) return null;
+  if (collapsed.length <= NOTES_IN_REMINDER) return collapsed;
+  return `${collapsed.slice(0, NOTES_IN_REMINDER - 1).trimEnd()}…`;
+}
 
 /*
  * A reminder on a parent used to send its title alone, which named the work
- * without saying what was left in it. Only what is still open is worth the
- * characters, and the wording stays inside GSM-7 so a checklist does not halve
- * the room a segment has.
+ * without saying what was left in it. The notes come next, because that is
+ * where the agent puts what the user will need in hand when it fires — "call
+ * my PCP at 9" is no use without the number — and only what is still open
+ * among the subtasks is worth the characters after that. The wording stays
+ * inside GSM-7 so a checklist does not halve the room a segment has.
  */
 function reminderBody(db: Db, reminder: ReminderRow, groupBound: boolean): string {
-  const headline = `Reminder: ${reminder.todo_title || "You have a task due."}`;
+  const lines = [`Reminder: ${reminder.todo_title || "You have a task due."}`];
+  const notes = reminderNotesLine(reminder.todo_notes);
+  if (notes) lines.push(notes);
   // Into a group, only the steps the group can see; the owner may have filed a
   // private one under the same parent from the app.
   const open = openSubtasks(db, reminder.todo_id, groupBound ? reminder.todo_life_area_id ?? undefined : undefined);
-  if (!open.length) return headline;
-  const named = open.slice(0, NAMED_SUBTASKS).map(subtask => subtask.title);
-  const rest = open.length - named.length;
-  return `${headline}\n${open.length} open: ${named.join("; ")}${rest ? `; +${rest} more` : ""}`;
+  if (open.length) {
+    const named = open.slice(0, NAMED_SUBTASKS).map(subtask => subtask.title);
+    const rest = open.length - named.length;
+    lines.push(`${open.length} open: ${named.join("; ")}${rest ? `; +${rest} more` : ""}`);
+  }
+  return lines.join("\n");
 }
 
 async function deliverReminder(
