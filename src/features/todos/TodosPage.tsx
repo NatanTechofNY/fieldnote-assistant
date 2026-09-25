@@ -13,7 +13,7 @@ import { areaFilterParams, inAreaFilter } from "../../lib/area-filter";
 import { useAreaFilter } from "../../lib/use-area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { CompleteParentDialog } from "./CompleteParentDialog";
-import { SubtaskCheck } from "./SubtaskCheck";
+import { SubtaskCheck, SubtaskState } from "./SubtaskCheck";
 import { TodoModal } from "./TodoModal";
 import { CalendarView } from "./calendar/CalendarView";
 import { describeRecurrence } from "../../lib/recurrence";
@@ -395,6 +395,7 @@ function DraggableTodo({ todo, subtasks, onOpen, onStatus }: { todo: Todo; subta
   // and the summary is there to fold a long one away.
   const [isOpen, setIsOpen] = useState(true);
   const done = subtasks.filter(t => t.status === "done").length;
+  const going = subtasks.filter(t => t.status === "in_progress").length;
   return <article ref={setNodeRef} className={`todo-card ${isDragging ? "dragging" : ""}`} style={{ transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined }} onDoubleClick={() => onOpen(todo)}>
     <div style={{ display: "flex", gap: 8 }}><button aria-label="Drag task" className="button icon ghost" {...listeners} {...attributes}><GripVertical size={13}/></button><div style={{ flex: 1 }}><h4><button type="button" className="card-open" onClick={() => onOpen(todo)}>{todo.title}</button></h4><div className="todo-meta">
       <LifeAreaPill name={todo.life_area_name} slug={todo.life_area_slug}/>{todo.category_name && <span>{todo.category_name}</span>} {todo.recurrence
@@ -402,13 +403,17 @@ function DraggableTodo({ todo, subtasks, onOpen, onStatus }: { todo: Todo; subta
         : <>{todo.due_at && <span>Due {friendlyDueDate(todo.due_at, timezone)}</span>} {todo.reminder_at && <span title="Reminder"><BellRing size={11}/>{friendlyDate(todo.reminder_at, timezone)}{todo.extra_reminders?.length ? ` +${todo.extra_reminders.length}` : ""}</span>}</>} {todo.priority && <span>! {todo.priority}</span>}
     </div></div><AttachButton item={todoAttachment(todo, subtasks)} size={13}/></div>
     {subtasks.length > 0 && <div className="card-subtasks" onDoubleClick={event => event.stopPropagation()}>
-      <div className="progress"><span style={{ width: `${(done / subtasks.length) * 100}%` }}/></div>
+      <div className="progress">
+        <span style={{ width: `${(done / subtasks.length) * 100}%` }}/>
+        {going > 0 && <span className="progress-going" style={{ width: `${(going / subtasks.length) * 100}%` }}/>}
+      </div>
       <button type="button" className="subtask-summary" aria-expanded={isOpen} onClick={() => setIsOpen(open => !open)}>
-        <ChevronRight size={12}/>{done}/{subtasks.length} subtasks
+        <ChevronRight size={12}/>{done}/{subtasks.length} subtasks{going > 0 && <span className="subtask-going"> · {going} in progress</span>}
       </button>
       {isOpen && <ul className="subtask-list">{subtasks.map(subtask => <li key={subtask.id}>
         <SubtaskCheck todo={subtask} onToggle={() => onStatus(subtask.id, subtask.status === "done" ? "pending" : "done")}/>
         <button type="button" className="subtask-title" onClick={() => onOpen(subtask)}>{subtask.title}</button>
+        <SubtaskState todo={subtask}/>
         <AttachButton item={todoAttachment(subtask, [], todo.title)} size={11}/>
       </li>)}</ul>}
     </div>}

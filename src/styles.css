@@ -714,8 +714,9 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 .todo-card h4 { margin:0 0 6px; font-size:13px; font-weight:500; line-height:1.4; }
 .todo-meta { display:flex; gap:8px; flex-wrap:wrap; align-items:center; color:var(--text-tertiary); font-size:11px; }
 .todo-meta > span { display:inline-flex; align-items:center; gap:3px; }
-.progress { margin-top:8px; height:3px; border-radius:var(--radius-pill); background:var(--surface-active); overflow:hidden; }
+.progress { display:flex; margin-top:8px; height:3px; border-radius:var(--radius-pill); background:var(--surface-active); overflow:hidden; }
 .progress > span { display:block; height:100%; background:var(--success); }
+.progress > .progress-going { background:var(--status-progress); opacity:.7; }
 
 /* The subtask checklist, shared by the board card and the task editor. Ticking
    one writes the same status the board's own columns do. */
@@ -734,6 +735,8 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
   text-align:left; color:var(--text-secondary); font-size:12px;
 }
 .subtask-title:hover { color:var(--accent); }
+.subtask-state { flex:none; font-size:10.5px; font-weight:500; }
+.subtask-going { color:var(--status-progress); }
 .subtask-check[aria-checked="true"] + .subtask-title,
 .subtask-list li.done .subtask-name { color:var(--text-tertiary); text-decoration:line-through; }
 

@@ -2224,6 +2224,26 @@ it("ticks a subtask off from the board card it belongs to", async () => {
   expect(within(card).queryByText("Write the outline")).not.toBeInTheDocument();
 });
 
+/** A step someone has started does not look untouched: its box, a word, and the summary say so. */
+it("shows which of a card's subtasks are in progress", async () => {
+  const step = todos.find(item => item.id === "todo_open_sub")!;
+  step.status = "in_progress";
+  try {
+    renderAt("/todos");
+    expect(await screen.findByText("The board.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Board" }));
+
+    const card = (await screen.findByText("Wrap the sprint")).closest("article") as HTMLElement;
+    const check = within(card).getByRole("checkbox", { name: "Complete subtask Send the recap (in progress)" });
+    expect(check).not.toBeChecked();
+    expect(check).toHaveAttribute("data-status", "in_progress");
+    expect(within(card).getByText("In progress")).toBeInTheDocument();
+    expect(within(card).getByText("· 1 in progress")).toBeInTheDocument();
+  } finally {
+    step.status = "pending";
+  }
+});
+
 it("manages a task's subtasks from the editor", async () => {
   renderAt("/todos");
   await userEvent.click(await screen.findByRole("button", { name: "Prepare the DevCon demo" }));
