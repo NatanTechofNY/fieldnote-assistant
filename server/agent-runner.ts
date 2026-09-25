@@ -203,6 +203,21 @@ const RUNTIME_MARKS = new Set<string>([...PROGRESS_MARKS, ...Object.values(CLOSI
  */
 const RECORD_WRITE_TOOLS = new Set([...WRITE_TOOLS].filter(name => !GESTURE_TOOLS.has(name)));
 
+/**
+ * A reply that says a todo's status changed. "Marked “Leave for PCP
+ * appointment” as done" went out beside two creates and a get_todo, with no
+ * set_todo_status anywhere in the turn: the prompt's rule against unbacked
+ * claims is advice the model can skip, so the runner holds it to the claim.
+ */
+const STATUS_CLAIM = /\b(?:marked|checked off|crossed off)\b[^.!?\n]{0,120}?\b(?:done|complete(?:d)?|finished|cancell?ed|in progress|blocked|pending)\b|\b(?:checked|crossed) (?:it|that|them|those) off\b/i;
+
+const STATUS_CLAIM_CHECK = [
+  "[runtime check, not from the user] Your reply says a todo's status was changed,",
+  "but no set_todo_status call succeeded in this turn, so no status changed.",
+  "Call set_todo_status now for each todo you said you changed, then write your reply again.",
+  "If a tool result showed a todo already had that status, say that instead of claiming you changed it.",
+].join(" ");
+
 /** The mark for one round of tool calls, or `undefined` when the round is gestures only. */
 function progressReactionFor(toolNames: string[]): string | undefined {
   const marks = new Set(
@@ -943,6 +958,8 @@ export async function runChannelAgent(
   // What the turn has done so far, for the closing mark. A write an earlier
   // attempt landed counts: the retry that answers is confirming that write.
   let changedRecord = priorWrites.some(part => RECORD_WRITE_TOOLS.has(String(part.type).slice(5)));
+  let changedStatus = priorWrites.some(part => part.type === "tool-set_todo_status");
+  let checkedStatusClaim = false;
   let lookedUp = false;
   const closingMark = (): string | undefined => {
     if (changedRecord) return CLOSING_REACTIONS.changed;
@@ -978,6 +995,17 @@ export async function runChannelAgent(
           .map(part => part.text)
           .join("\n")
           .trim();
+        // Once per turn, so a model that insists cannot loop the turn out of its budget.
+        if (!changedStatus && !checkedStatusClaim && STATUS_CLAIM.test(text)) {
+          checkedStatusClaim = true;
+          appendResponse(messages, response);
+          messages.push({
+            id: `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`,
+            role: "user",
+            parts: [{ type: "text", text: STATUS_CLAIM_CHECK }],
+          });
+          continue;
+        }
         // The answer is in. The progress mark gives way to the closing one, or
         // comes down when there is nothing to confirm; the agent's own reaction,
         // if it made one, is left exactly where it is. A turn that decided the
@@ -1041,27 +1069,14 @@ export async function runChannelAgent(
             changedRecord = true;
             context.changedRecord = true;
           }
+          if (toolName === "set_todo_status") changedStatus = true;
         } catch (error) {
           part.output = { success: false, error: error instanceof Error ? error.message : "Tool failed" };
         }
         part.state = "output-available";
         saveToolTrace(db, thread.id, part);
       }
-      /*
-       * Agent Studio does not answer a trailing assistant message with a new
-       * one; it continues it, handing back the same id with the accumulated
-       * parts. Pushed as a second message, the two copies shared an id and the
-       * next completion was refused with `Messages must have unique ids`, so
-       * every turn that needed two tool rounds failed on its first attempt and
-       * was rescued, slowly, by the retry. The continuation replaces what it
-       * continued.
-       */
-      const trailing = messages[messages.length - 1];
-      if (trailing?.role === "assistant" && trailing.id === response.id) {
-        messages[messages.length - 1] = response;
-      } else {
-        messages.push(response);
-      }
+      appendResponse(messages, response);
     }
     throw new Error("Agent exceeded the maximum tool-call iterations");
   } catch (error) {
@@ -1083,6 +1098,24 @@ export async function runChannelAgent(
         .run(now(), inboundId);
     }
     throw error;
+  }
+}
+
+/*
+ * Agent Studio does not answer a trailing assistant message with a new
+ * one; it continues it, handing back the same id with the accumulated
+ * parts. Pushed as a second message, the two copies shared an id and the
+ * next completion was refused with `Messages must have unique ids`, so
+ * every turn that needed two tool rounds failed on its first attempt and
+ * was rescued, slowly, by the retry. The continuation replaces what it
+ * continued.
+ */
+function appendResponse(messages: AgentMessage[], response: AgentMessage): void {
+  const trailing = messages[messages.length - 1];
+  if (trailing?.role === "assistant" && trailing.id === response.id) {
+    messages[messages.length - 1] = response;
+  } else {
+    messages.push(response);
   }
 }
 

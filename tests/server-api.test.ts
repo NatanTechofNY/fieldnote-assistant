@@ -1852,6 +1852,70 @@ describe("SMS, reminders, and channel agent execution", () => {
   });
 
   /*
+   * "PCP was done yesterday" got a reply saying the todo was marked done, from a
+   * turn that read it with get_todo and never called set_todo_status.
+   */
+  it("sends a reply that claims a status change back until the status write lands", async () => {
+    const { api, db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    const todo = (await api.post("/api/todos").send({ title: "Leave for PCP appointment" }).expect(201)).body.data as { id: string };
+    type Message = { id: string; role: string; parts: Array<{ type?: string; text?: string }> };
+    const requests: Message[][] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] };
+      requests.push(messages);
+      const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+      if (requests.length === 1) return reply([{ type: "text", text: "Marked “Leave for PCP appointment” as done." }]);
+      if (requests.length === 2) {
+        return reply([{
+          type: "tool-set_todo_status", tool_call_id: "call_status", state: "input-available",
+          input: { id: todo.id, status: "done" },
+        }]);
+      }
+      return reply([{ type: "text", text: "Marked it done for real." }]);
+    };
+
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "PCP was done yesterday", undefined, { fetcher });
+
+    assert.equal(response.text, "Marked it done for real.");
+    const check = requests[1][requests[1].length - 1];
+    assert.equal(check.role, "user");
+    assert.match(check.parts[0].text ?? "", /no set_todo_status call succeeded/);
+    assert.equal(
+      (db.prepare("SELECT status FROM todos WHERE id=?").get(todo.id) as { status: string }).status,
+      "done",
+    );
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM channel_messages WHERE content LIKE '%runtime check%'").get() as { count: number }).count,
+      0,
+      "the check is never archived as something the user said",
+    );
+  });
+
+  it("accepts a status claim the turn's own set_todo_status backs", async () => {
+    const { api, db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    const todo = (await api.post("/api/todos").send({ title: "Vacuum" }).expect(201)).body.data as { id: string };
+    let calls = 0;
+    const fetcher: typeof fetch = async () => {
+      calls += 1;
+      const parts = calls === 1
+        ? [{ type: "tool-set_todo_status", tool_call_id: "call_1", state: "input-available", input: { id: todo.id, status: "done" } }]
+        : [{ type: "text", text: "Marked Vacuum as done." }];
+      return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+    };
+
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "vacuumed", undefined, { fetcher });
+
+    assert.equal(response.text, "Marked Vacuum as done.");
+    assert.equal(calls, 2, "no extra round when the claim is backed");
+  });
+
+  /*
    * Agent Studio titles a conversation from its first message and never retitles,
    * so one id pinned to a phone number for life collected three weeks of texts
    * into a single record named after whatever was said first. A conversation now
@@ -2353,6 +2417,39 @@ describe("agent tools over /api/agent/tools/:name", () => {
     assert.equal(evidence.candidate_totals.todos, 1);
   });
 
+  /*
+   * "Wash is in progress" was written to the laundry parent because the create
+   * that made the steps returned only the parent's id.
+   */
+  it("hands back the steps it created and starts the parent when a step starts", async () => {
+    const { api } = fixture();
+    const call = async (name: string, input: object = {}, expected = 200) =>
+      (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
+
+    const created = (await call("create_todo", {
+      title: "Laundry - clean, fold, put away",
+      subtasks: [{ title: "Wash laundry" }, { title: "Dry laundry" }],
+    })).data as { id: string; subtasks: Array<{ id: string; title: string; status: string }> };
+    assert.deepEqual(created.subtasks.map(step => [step.title, step.status]), [["Wash laundry", "pending"], ["Dry laundry", "pending"]]);
+
+    const wash = created.subtasks[0];
+    assert.equal((await call("set_todo_status", { id: wash.id, status: "in_progress" })).data.status, "in_progress");
+    const parent = (await call("get_todo", { id: created.id })).data as {
+      todo: { status: string; started_at: string | null };
+      subtasks: Array<{ title: string; status: string }>;
+    };
+    assert.equal(parent.todo.status, "in_progress", "a started step starts the task");
+    assert.ok(parent.todo.started_at);
+    assert.deepEqual(parent.subtasks.map(step => step.status), ["in_progress", "pending"], "and moves no other step");
+
+    await call("set_todo_status", { id: created.id, status: "blocked" });
+    await call("set_todo_status", { id: created.subtasks[1].id, status: "in_progress" });
+    assert.equal((await call("get_todo", { id: created.id })).data.todo.status, "blocked", "only a pending parent is started");
+
+    const missing = await call("set_todo_status", { id: "todo_00000000-0000-0000-0000-000000000000", status: "done" }, 404);
+    assert.match(missing.error, /Todo not found\. Never guess or reuse a todo id: search the todo index/);
+  });
+
   /**
    * The agent is instructed to send RFC 3339 with an explicit offset, while a
    * reminder row is stored in UTC. Every reminder tool used to match the two as
@@ -2412,7 +2509,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
     await api.post("/api/agent/tools/create_todo").send({ title: "" }).expect(400);
 
     const missing = await api.post("/api/agent/tools/get_todo").send({ id: "todo_missing" }).expect(404);
-    assert.equal(missing.body.error, "Todo not found");
+    assert.match(missing.body.error, /^Todo not found\. /);
     await api.post("/api/agent/tools/get_memory").send({ id: "mem_missing" }).expect(404);
     await api.post("/api/agent/tools/update_reminder")
       .send({ id: "rem_missing", reminder_at: "2030-01-01T00:00:00.000Z" }).expect(404);

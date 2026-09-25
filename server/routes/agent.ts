@@ -19,7 +19,7 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       // A miss and an unknown tool are both caller mistakes. Leaving them to the
       // generic handler reported them as 500s, which told the agent to retry a
       // request that could never succeed and buried real faults in the logs.
-      if (/ not found$/i.test(message)) return failure(res, 404, message);
+      if (/ not found(?:$|\. )/i.test(message)) return failure(res, 404, message);
       if (/^Unsupported tool: /.test(message)) return failure(res, 400, message);
       // A repeating todo's refusals — filed under a task, given subtasks, or
       // its derived times written directly — mean the request has to change,

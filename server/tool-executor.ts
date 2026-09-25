@@ -20,7 +20,7 @@ import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
 import { toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
-import { completeParentIfSettled, completionStats, hasSubtasks, syncOccurrenceCompletion } from "./todo-status.ts";
+import { completeParentIfSettled, completionStats, hasSubtasks, startParentIfPending, syncOccurrenceCompletion } from "./todo-status.ts";
 import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 
 /**
@@ -304,6 +304,14 @@ const OWNER_ONLY_TOOLS = new Set([
 function ownMoodOnly(context: ToolTurnContext | undefined): boolean {
   return Boolean(context?.scope) && context?.speakerIsOwner !== true;
 }
+
+/**
+ * "Laundry is in progress" was answered with set_todo_status on an id that
+ * appeared in no search, no result, and no message, and the refusal read as the
+ * end of the road. It is the same text in and out of a group, so it says nothing
+ * about records the turn cannot see.
+ */
+const TODO_NOT_FOUND = "Todo not found. Never guess or reuse a todo id: search the todo index for the task by its words, then retry with the objectID of the hit";
 
 /**
  * A todo as the turn may see it. Outside a group this is `getTodo`; inside one,
@@ -602,7 +610,7 @@ export async function executeAgentTool(
 
   if (name === "get_todo") {
     const todo = scopedTodo(db, input.id as string, scope);
-    if (!todo) throw new Error("Todo not found");
+    if (!todo) throw new Error(TODO_NOT_FOUND);
     const stats = completionStats(db, todo);
     return {
       todo: todoJson(todo),
@@ -765,12 +773,16 @@ export async function executeAgentTool(
       queueIndexJob(db, "todo", todoId);
     })();
     search.flushSoon();
-    return todoJson(getTodo(db, todoId) as TodoRow);
+    // The steps' ids are in no other result the next turn can see: without them
+    // "wash is in progress" could only be written to the parent.
+    const steps = db.prepare("SELECT id,title,status FROM todos WHERE user_id=? AND parent_id=? ORDER BY rowid")
+      .all(USER_ID, todoId) as Array<{ id: string; title: string; status: string }>;
+    return { ...todoJson(getTodo(db, todoId) as TodoRow), ...(steps.length ? { subtasks: steps } : {}) };
   }
   if (name === "update_todo") {
     const todoId = input.id as string;
     const current = scopedTodo(db, todoId, scope);
-    if (!current) throw new Error("Todo not found");
+    if (!current) throw new Error(TODO_NOT_FOUND);
     const patch = (input.patch || {}) as Input;
     const clear = new Set(Array.isArray(patch.clear_fields) ? patch.clear_fields.map(String) : []);
     const value = (key: string, currentValue: unknown) =>
@@ -840,7 +852,7 @@ export async function executeAgentTool(
     const todoId = input.id as string;
     const status = input.status as TodoStatus;
     const current = scopedTodo(db, todoId, scope);
-    if (!current) throw new Error("Todo not found");
+    if (!current) throw new Error(TODO_NOT_FOUND);
     const timestamp = now();
     const updated = db.transaction(() => {
       db.prepare(`
@@ -855,6 +867,7 @@ export async function executeAgentTool(
       syncTodoReminders(db, row);
       syncOccurrenceCompletion(db, row);
       completeParentIfSettled(db, row, scope?.lifeAreaId);
+      startParentIfPending(db, row, scope?.lifeAreaId);
       queueIndexJob(db, "todo", todoId);
       // Re-read: logging an occurrence stamps last_completed_at on the row.
       return getTodo(db, todoId) as TodoRow;
@@ -865,7 +878,7 @@ export async function executeAgentTool(
   if (name === "delete_todo") {
     if (input.confirmed !== true) throw new Error("Explicit confirmation is required");
     const todoId = input.id as string;
-    if (!scopedTodo(db, todoId, scope)) throw new Error("Todo not found");
+    if (!scopedTodo(db, todoId, scope)) throw new Error(TODO_NOT_FOUND);
     db.transaction(() => {
       db.prepare("DELETE FROM todos WHERE id=? AND user_id=?").run(todoId, USER_ID);
       queueIndexJob(db, "todo", todoId, "delete");
@@ -1002,7 +1015,7 @@ export async function executeAgentTool(
   }
   if (name === "create_reminder") {
     const todo = scopedTodo(db, input.todo_id as string, scope);
-    if (!todo) throw new Error("Todo not found");
+    if (!todo) throw new Error(TODO_NOT_FOUND);
     const reminderAt = input.reminder_at as string;
     const extras = JSON.parse(todo.extra_reminders_json) as string[];
     if (isDerivedReminder(todo, input.slot === "extra" ? "escalation" : "pre")) throw new Error(DERIVED_REMINDER);

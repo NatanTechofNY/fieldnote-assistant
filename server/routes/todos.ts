@@ -7,7 +7,7 @@ import {
 import { iso, status, todoCreate, todoPatch } from "../schemas.ts";
 import { applyStatusTimes, completionJson, reminderJson, todoJson } from "../serializers.ts";
 import {
-  completeParentIfSettled, completionStats, hasSubtasks, syncOccurrenceCompletion,
+  completeParentIfSettled, completionStats, hasSubtasks, startParentIfPending, syncOccurrenceCompletion,
 } from "../todo-status.ts";
 import { type TodoRow } from "../types.ts";
 import type { RouteContext } from "./context.ts";
@@ -183,6 +183,7 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
         syncTodoReminders(db, todo);
         syncOccurrenceCompletion(db, todo);
         completeParentIfSettled(db, todo);
+        startParentIfPending(db, todo);
       }
       queueIndexJob(db, "todo", current.id);
     })();
@@ -203,6 +204,7 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
         syncTodoReminders(db, todo);
         syncOccurrenceCompletion(db, todo);
         completeParentIfSettled(db, todo);
+        startParentIfPending(db, todo);
       }
       queueIndexJob(db, "todo", current.id);
     })();

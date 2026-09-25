@@ -96,6 +96,28 @@ export function completeParentIfSettled(db: Db, child: TodoRow, lifeAreaId?: str
 }
 
 /**
+ * A task whose first step is underway is underway too, so starting a step starts
+ * a parent that has not been started. Nothing else about the parent moves: a
+ * blocked or finished parent keeps its status. `lifeAreaId` fences a group turn
+ * as in `completeParentIfSettled()`.
+ */
+export function startParentIfPending(db: Db, child: TodoRow, lifeAreaId?: string): TodoRow | null {
+  if (!child.parent_id || child.status !== "in_progress") return null;
+  const parent = getTodo(db, child.parent_id);
+  if (!parent || parent.status !== "pending") return null;
+  if (lifeAreaId && parent.life_area_id !== lifeAreaId) return null;
+  const timestamp = now();
+  db.prepare(`
+    UPDATE todos SET status='in_progress',started_at=COALESCE(started_at,?),updated_at=?
+    WHERE id=? AND user_id=?
+  `).run(timestamp, timestamp, parent.id, USER_ID);
+  const started = getTodo(db, parent.id) as TodoRow;
+  syncTodoReminders(db, started);
+  queueIndexJob(db, "todo", parent.id);
+  return started;
+}
+
+/**
  * The steps still standing between a task and being finished. A parent closed
  * while these are open leaves them alive but unreachable, so both the REST layer
  * and the UI ask about them first.
