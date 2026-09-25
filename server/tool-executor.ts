@@ -6,7 +6,7 @@ import {
 import { productCaption, productJson, searchStoreProductsLocally, STORE_NAME } from "./catalog.ts";
 import {
   getMemory, getReminders, getStoreProduct, getTodo, GROUP_NAME_SQL, id, insertOutboundChannelMessage, instant, now,
-  queueIndexJob, recordMessageReaction, renameLifeArea, syncTodoReminders, USER_ID, userTimezone,
+  OWN_AREA_CLAUSE, queueIndexJob, recordMessageReaction, renameLifeArea, syncTodoReminders, USER_ID, userTimezone,
 } from "./db.ts";
 import {
   DERIVED_REMINDER, DERIVED_SCHEDULE, REPEATING_PARENT, REPEATING_SUBTASK,
@@ -106,17 +106,20 @@ export function getReflectionEvidence(
     lifeAreaIds?: string[];
     categoryIds?: string[];
     sources?: Array<"memories" | "todos">;
+    /** Leave out every group chat's records, whatever areas are asked for. */
+    ownAreasOnly?: boolean;
   } = {},
 ) {
   const lifeAreaIds = [...new Set(filters.lifeAreaIds || [])];
   const categoryIds = [...new Set(filters.categoryIds || [])];
   const sources = [...new Set(filters.sources?.length ? filters.sources : ["memories", "todos"])] as Array<"memories" | "todos">;
+  const own = (alias: string) => filters.ownAreasOnly ? `AND ${OWN_AREA_CLAUSE(alias)}` : "";
   const memoryCandidates = sources.includes("memories")
     ? (db.prepare(`
       SELECT m.*,c.name category_name,la.name life_area_name,la.slug life_area_slug
       FROM memories m LEFT JOIN categories c ON c.id=m.category_id
       LEFT JOIN life_areas la ON la.id=m.life_area_id
-      WHERE m.user_id=? AND COALESCE(m.occurred_at,m.created_at)>=? AND COALESCE(m.occurred_at,m.created_at)<?
+      WHERE m.user_id=? AND COALESCE(m.occurred_at,m.created_at)>=? AND COALESCE(m.occurred_at,m.created_at)<? ${own("m")}
       ORDER BY COALESCE(m.occurred_at,m.created_at) DESC
     `).all(USER_ID, period.start, period.endExclusive) as MemoryRow[]).filter(memory => {
       const tags = JSON.parse(memory.tags_json) as string[];
@@ -128,7 +131,7 @@ export function getReflectionEvidence(
       SELECT t.*,c.name category_name,la.name life_area_name,la.slug life_area_slug
       FROM todos t LEFT JOIN categories c ON c.id=t.category_id
       LEFT JOIN life_areas la ON la.id=t.life_area_id
-      WHERE t.user_id=? AND t.status='done' AND t.completed_at>=? AND t.completed_at<?
+      WHERE t.user_id=? AND t.status='done' AND t.completed_at>=? AND t.completed_at<? ${own("t")}
       ORDER BY t.completed_at DESC
     `).all(USER_ID, period.start, period.endExclusive) as TodoRow[]
     : [];
@@ -284,6 +287,18 @@ export type ToolTurnContext = {
  * and reflection drafts are app-composed too, but are meant to read.
  */
 const NO_TOOL_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "checkin_ask_draft"]);
+
+/**
+ * App-composed turns that report on the owner's own day. A group's work is its
+ * own check-ins' to report, so these read only what is not filed under a group
+ * chat — the reverse of a group turn's fence. The owner asking on their own
+ * line is not fenced: "did we clean the kitchen?" is theirs to ask.
+ */
+const OWN_RECORDS_APP_TURNS = new Set(["daily_digest", "digest_brief"]);
+
+export function ownRecordsOnly(context: ToolTurnContext | undefined): boolean {
+  return !context?.scope && Boolean(context?.appTurn && OWN_RECORDS_APP_TURNS.has(context.appTurn));
+}
 
 /**
  * Tools that read the owner's working life or their Atlassian account. None of
@@ -458,6 +473,7 @@ export async function executeAgentTool(
   }
   const scope = context?.scope;
   if (scope && OWNER_ONLY_TOOLS.has(name)) throw new Error(`${name} is not available in a group chat`);
+  const ownOnly = ownRecordsOnly(context);
 
   if (name === "send_message") {
     // One bubble now, ahead of the turn's own reply: an emoji, an "on it", a
@@ -691,7 +707,7 @@ export async function executeAgentTool(
       SELECT t.*,c.name category_name,la.name life_area_name,la.slug life_area_slug
       FROM todos t LEFT JOIN categories c ON c.id=t.category_id
       LEFT JOIN life_areas la ON la.id=t.life_area_id
-      WHERE t.user_id=? ORDER BY t.created_at DESC
+      WHERE t.user_id=? ${ownOnly ? `AND ${OWN_AREA_CLAUSE("t")}` : ""} ORDER BY t.created_at DESC
     `).all(USER_ID) as TodoRow[];
     // A group lists its own area whatever the agent asked for.
     if (scope) input = { ...input, life_area_id: scope.lifeAreaId };
@@ -982,12 +998,13 @@ export async function executeAgentTool(
     const end = input.end_date as string;
     const todos = (db.prepare(`
       SELECT t.*,c.name category_name FROM todos t LEFT JOIN categories c ON c.id=t.category_id
-      WHERE t.user_id=? AND t.due_at IS NOT NULL ${scope ? "AND t.life_area_id=?" : ""} ORDER BY t.due_at
+      WHERE t.user_id=? AND t.due_at IS NOT NULL ${scope ? "AND t.life_area_id=?" : ""}
+        ${ownOnly ? `AND ${OWN_AREA_CLAUSE("t")}` : ""} ORDER BY t.due_at
     `).all(...(scope ? [USER_ID, scope.lifeAreaId] : [USER_ID])) as TodoRow[]).filter(todo => {
       const date = todo.due_at?.slice(0, 10) || "";
       return date >= start && date <= end;
     });
-    const reminders = getReminders(db, undefined, { lifeAreaId: scope?.lifeAreaId }).filter(reminder => {
+    const reminders = getReminders(db, undefined, { lifeAreaId: scope?.lifeAreaId, ownAreasOnly: ownOnly }).filter(reminder => {
       const date = reminder.scheduled_for.slice(0, 10);
       return date >= start && date <= end;
     });
@@ -1011,6 +1028,7 @@ export async function executeAgentTool(
       lifeAreaIds: strings("life_area_ids"),
       categoryIds: strings("category_ids"),
       sources: strings("sources") as Array<"memories" | "todos">,
+      ownAreasOnly: ownOnly,
     }));
   }
   if (name === "create_reminder") {

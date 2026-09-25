@@ -1,7 +1,7 @@
 import { recentMemoryContext } from "./checkin-context.ts";
 import { DEFAULT_OWNER_EVENING_ASK, RECORDS_NOT_INSTRUCTIONS, renderAsk } from "./checkin-prompts.ts";
 import { dayTodoTitles, titleList } from "./group-checkin.ts";
-import { getReminders, USER_ID } from "./db.ts";
+import { getReminders, OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
 import { localParts } from "./local-time.ts";
 import type { Db } from "./types.ts";
 
@@ -43,7 +43,8 @@ export function digestTodoLines(
 ): DigestTodoLines {
   const local = (value: string) => localParts(new Date(value), timezone);
   const todos = (db.prepare(`
-    SELECT id,title,status,priority,due_at FROM todos WHERE user_id=? ORDER BY due_at IS NULL,due_at,title
+    SELECT id,title,status,priority,due_at FROM todos
+    WHERE user_id=? AND ${OWN_AREA_CLAUSE("todos")} ORDER BY due_at IS NULL,due_at,title
   `).all(USER_ID) as DigestTodoRow[]).filter(todo => OPEN_STATUSES.has(todo.status));
   /*
    * `due` rows mirror `due_at` rather than representing a notification, so
@@ -51,7 +52,7 @@ export function digestTodoLines(
    */
   const todayReminders = new Map<string, string[]>();
   const pastReminders = new Map<string, string[]>();
-  for (const reminder of getReminders(db)) {
+  for (const reminder of getReminders(db, undefined, { ownAreasOnly: true })) {
     if (reminder.kind === "due" || reminder.status === "cancelled") continue;
     const parts = local(reminder.scheduled_for);
     if (parts.date === date) {
@@ -149,6 +150,8 @@ export function composeEveningCheckinTurn(
  * The turn the daily digest is delivered as. The request leads and anything the
  * app looked up follows as clearly-labelled context, the same shape a digest
  * brief uses, so the agent cannot mistake the todo list for part of the ask.
+ * Like the evening question it is the owner's own: a group's todos and
+ * reminders are its morning note's.
  */
 export function composeDigestTurn(
   db: Db,
@@ -158,7 +161,7 @@ export function composeDigestTurn(
   const { today, overdue } = options.includeToday || options.includeOverdue
     ? digestTodoLines(db, context.date, context.timezone, options)
     : { today: [], overdue: [] };
-  const active = getReminders(db)
+  const active = getReminders(db, undefined, { ownAreasOnly: true })
     .filter(reminder => reminder.status === "pending" && reminder.kind !== "due");
   const carried = overdue.length
     ? ` ${overdue.length} thing${overdue.length === 1 ? " is" : "s are"} still open from an earlier day.`

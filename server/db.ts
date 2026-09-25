@@ -1083,6 +1083,12 @@ export const GROUP_NAME_SQL = "COALESCE(la.name,t.display_name)";
 export const OWN_AREA_CLAUSE = (alias: string): string =>
   `(${alias}.life_area_id IS NULL OR ${alias}.life_area_id NOT IN (SELECT id FROM life_areas WHERE thread_id IS NOT NULL))`;
 
+/** Every group chat's life area and thread, for fencing what is not in SQL, such as a search filter. */
+export function groupAreas(db: Db): Array<{ id: string; thread_id: string }> {
+  return db.prepare("SELECT id,thread_id FROM life_areas WHERE user_id=? AND thread_id IS NOT NULL ORDER BY id")
+    .all(USER_ID) as Array<{ id: string; thread_id: string }>;
+}
+
 export function getChannelMessage(db: Db, messageId: string): ChannelMessageRow | undefined {
   return db.prepare(`
     SELECT m.*,t.user_id,t.channel,t.address,${GROUP_NAME_SQL} group_name
@@ -1191,13 +1197,14 @@ export function getTodoCompletions(db: Db, todoId: string, limit = 30): TodoComp
 export function getReminders(
   db: Db,
   todoId?: string,
-  options: { lifeAreaId?: string } = {},
+  options: { lifeAreaId?: string; ownAreasOnly?: boolean } = {},
 ): ReminderRow[] {
   const clauses: string[] = [];
   const args: string[] = [USER_ID];
   if (todoId) { clauses.push("AND r.todo_id=?"); args.push(todoId); }
   // A group turn sees only its own area's reminders, the same fence as its todos.
   if (options.lifeAreaId) { clauses.push("AND t.life_area_id=?"); args.push(options.lifeAreaId); }
+  if (options.ownAreasOnly) clauses.push(`AND ${OWN_AREA_CLAUSE("t")}`);
   return db.prepare(`
     SELECT r.*,t.title todo_title FROM reminders r
     JOIN todos t ON t.id=r.todo_id WHERE r.user_id=? ${clauses.join(" ")}

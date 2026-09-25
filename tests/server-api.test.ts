@@ -24,6 +24,7 @@ import {
   saveTwilioConfig,
   setSmsProvider,
 } from "../server/integrations.ts";
+import { composeDigestTurn } from "../server/daily-digest.ts";
 import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } from "../server/event-ingestion.ts";
 import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
 import { addressesAssistant, cleanGroupName, redactedNumber } from "../server/group-thread.ts";
@@ -6740,6 +6741,66 @@ describe("Sendblue provider", () => {
     const ownerOutputs = toolOutputs(db, RECIPIENT);
     assert.equal(ownerOutputs.get_todo.success, true, "the owner reads the group's todo from their own thread");
     assert.equal((ownerOutputs.list_life_areas.data as unknown[]).length, 4, "and sees the group's area beside the three defaults");
+  });
+
+  /*
+   * The owner's digests report the owner's own day. "Clean kitchen", finished in
+   * the household chat, came back in the personal end-of-day brief; a group's
+   * work is its own check-ins' to report.
+   */
+  it("keeps group chats' records out of the owner's digests", async () => {
+    const { db, api } = connectedFixture();
+    agentStudioEnv();
+    const timestamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_home',?,'sms','group:home','cnv_home',?,?)
+    `).run(USER_ID, timestamp, timestamp);
+    const home = ensureGroupLifeArea(db, "thread_home", "Home");
+    const today = timestamp.slice(0, 10);
+    const due = { due_at: `${today}T23:59:00.000Z`, reminder_at: `${today}T23:59:00.000Z` };
+    const mine = (await api.post("/api/todos").send({ title: "Check how DocSearch MCP is doing", life_area_id: "area_work" }).expect(201)).body.data;
+    const theirs = (await api.post("/api/todos").send({ title: "Clean kitchen", life_area_id: home.id }).expect(201)).body.data;
+    for (const todo of [mine, theirs]) await api.patch(`/api/todos/${todo.id}/status`).send({ status: "done" }).expect(200);
+    const myOpen = (await api.post("/api/todos").send({ title: "Send the invoice", ...due }).expect(201)).body.data;
+    await api.post("/api/todos").send({ title: "Empty trash", life_area_id: home.id, ...due }).expect(201);
+
+    const reads: ToolCall[] = [
+      { tool: "get_reflection_evidence", input: { preset: "today", timezone: "UTC", sources: ["todos"] } },
+      { tool: "list_todos", input: { limit: 50 } },
+      { tool: "get_agenda", input: { start_date: today, end_date: today, timezone: "UTC" } },
+    ];
+    const digest = agentCallingMany(reads, "You closed out the DocSearch check.");
+    await runSmsAgent(db, fakeSearch(db), `digest:${RECIPIENT}`, "End-of-day reflection", undefined, {
+      fetcher: digest.fetcher, internal: true, userMessageMetadata: { kind: "digest_brief" },
+    });
+    const outputs = toolOutputs(db, `digest:${RECIPIENT}`);
+    const evidence = outputs.get_reflection_evidence.data as { todo_candidates: Array<{ id: string }> };
+    assert.deepEqual(evidence.todo_candidates.map(todo => todo.id), [mine.id], "what the household finished is not the owner's day");
+    assert.deepEqual((outputs.list_todos.data as Array<{ id: string }>).map(todo => todo.id).sort(), [mine.id, myOpen.id].sort());
+    const agenda = outputs.get_agenda.data as { todos: Array<{ id: string }>; reminders: Array<{ todo_id: string }> };
+    assert.deepEqual(agenda.todos.map(todo => todo.id), [myOpen.id]);
+    assert.deepEqual([...new Set(agenda.reminders.map(reminder => reminder.todo_id))], [myOpen.id]);
+    const user = `userId:"${USER_ID}"`;
+    assert.deepEqual(digest.requests[0].algolia, {
+      searchParameters: {
+        devcon_assistant_todos: { filters: `${user} AND NOT life_area_id:"${home.id}"` },
+        devcon_assistant_memories: { filters: `${user} AND NOT life_area_id:"${home.id}"` },
+        devcon_assistant_messages: { filters: `${user} AND NOT threadId:"thread_home"` },
+      },
+    }, "the hosted search leaves every group chat out as well");
+
+    const prompt = composeDigestTurn(db, { date: today, timezone: "UTC", includeTodos: true, includeOverdue: true });
+    assert.match(prompt, /I have 1 pending reminder\./, "a group's reminder is not counted as the owner's");
+    assert.match(prompt, /"Send the invoice"/);
+    assert.doesNotMatch(prompt, /Empty trash/);
+
+    // Asked on their own line, the owner still sees the household's work.
+    const asked = agentCallingMany([reads[0]], "Kitchen and DocSearch.");
+    await runSmsAgent(db, fakeSearch(db), RECIPIENT, "what did we finish today?", "SB_asked", { fetcher: asked.fetcher, inbound: { provider: "sendblue" } });
+    const askedEvidence = toolOutputs(db, RECIPIENT).get_reflection_evidence.data as { todo_candidates: Array<{ id: string }> };
+    assert.deepEqual(askedEvidence.todo_candidates.map(todo => todo.id).sort(), [mine.id, theirs.id].sort());
+    assert.equal(asked.requests[0].algolia, undefined);
   });
 
   it("texts a bubble mid-turn with send_message and lets it stand as the whole answer", async () => {

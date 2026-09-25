@@ -248,6 +248,8 @@ The prompt's end-of-day rules (below, under [End-of-day reflection](#end-of-day-
 
 A digest brief is a standing instruction of your own — "what changed on my board today" — that the agent composes and texts you at a per-brief `send_time`. It runs through the same agent runner and the same quiet-hours gate as everything else, and it can pull live Jira and Confluence data while composing. Briefs are managed from Settings and can be previewed before they ever send. Their internal scratch turns are marked `metadata.internal` so they stay out of the message index.
 
+Briefs and the daily digest cover only your own records: the todos, reminders, reflection evidence, and search results they can reach leave out every group chat's area and thread, the same way the owner's evening check-in does. A group's work reaches the group through its own [check-ins](#group-check-ins) (see [`TOOL_ENDPOINT_MAPPING.md`](TOOL_ENDPOINT_MAPPING.md) for the fence).
+
 Settings offers three starter templates that prefill the form rather than creating anything, so the wording and the send time can be adjusted first. Because a brief scheduled inside quiet hours is skipped silently, the form warns when the chosen `send_time` falls in that window.
 
 ### End-of-day reflection

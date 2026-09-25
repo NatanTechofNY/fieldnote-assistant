@@ -1,11 +1,11 @@
 import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./algolia.ts";
-import { ensureGroupLifeArea, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
+import { ensureGroupLifeArea, groupAreas, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
 import { OWNER_SPEAKER_NAME, redactedNumber, speakerLabel } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
-import { executeAgentTool, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
+import { executeAgentTool, ownRecordsOnly, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
 import type { Db } from "./types.ts";
 
@@ -638,11 +638,31 @@ function groupSearchParameters(scope: GroupScope): Record<string, { filters: str
   };
 }
 
+/**
+ * The same override for a turn fenced to the owner's own records: every group
+ * chat's area and thread is excluded, and an unclassified record still matches.
+ * Without a group there is nothing to leave out, so nothing is sent.
+ */
+function ownSearchParameters(db: Db): Record<string, { filters: string }> | undefined {
+  const groups = groupAreas(db);
+  if (!groups.length) return undefined;
+  const indices = configuredIndexNames();
+  const user = `userId:"${escapeFilterValue(USER_ID)}"`;
+  const excluding = (attribute: string, values: string[]) =>
+    [user, ...values.map(value => `NOT ${attribute}:"${escapeFilterValue(value)}"`)].join(" AND ");
+  const areas = excluding("life_area_id", groups.map(group => group.id));
+  return {
+    [indices.todo]: { filters: areas },
+    [indices.memory]: { filters: areas },
+    [indices.message]: { filters: excluding("threadId", groups.map(group => group.thread_id)) },
+  };
+}
+
 async function completion(
   conversationId: string,
   messages: AgentMessage[],
   fetcher: typeof fetch,
-  scope?: GroupScope,
+  searchParameters?: Record<string, { filters: string }>,
 ): Promise<AgentMessage> {
   const { appId, apiKey, agentId } = agentConfig();
   const controller = new AbortController();
@@ -661,7 +681,7 @@ async function completion(
         body: JSON.stringify({
           id: conversationId,
           messages,
-          ...(scope ? { algolia: { searchParameters: groupSearchParameters(scope) } } : {}),
+          ...(searchParameters ? { algolia: { searchParameters } } : {}),
         }),
         signal: controller.signal,
       },
@@ -967,13 +987,16 @@ export async function runChannelAgent(
     return undefined;
   };
 
+  const searchParameters = context.scope
+    ? groupSearchParameters(context.scope)
+    : ownRecordsOnly(context) ? ownSearchParameters(db) : undefined;
   const deadline = Date.now() + TURN_BUDGET_MS;
   try {
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
       if (Date.now() >= deadline) {
         throw new Error(`Agent exceeded its time budget of ${TURN_BUDGET_MS / 60_000} minutes`);
       }
-      const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch, context.scope);
+      const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch, searchParameters);
       response.id ||= `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
       for (const part of response.parts.filter(part =>
         typeof part.type === "string"
