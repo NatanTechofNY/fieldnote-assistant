@@ -1419,7 +1419,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 300,
-            "description": "What to search for, in plain search-engine words, such as \"CVS Main St hours Sunday\""
+            "description": "Place and subject in plain search-engine words, no relative dates: \"Blooming Grove NY weather\", not \"weather tomorrow\""
           },
           "limit": {
             "type": ["integer", "null"],

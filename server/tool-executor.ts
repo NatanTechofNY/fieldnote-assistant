@@ -632,7 +632,11 @@ export async function executeAgentTool(
     const results = await countedWebCall(db, context, () => searchWeb(input.query as string, limit));
     rememberResults(context?.threadId ?? "web", results);
     if (context) context.readWeb = true;
-    return { source: "web", untrusted: true, results };
+    // Google answers "weather tomorrow" with its own widget and no organic
+    // results at all, while "weather" alone returns the forecast sites.
+    const hint = results.length ? undefined
+      : "No results. Search again once with fewer words and no relative dates such as today or tomorrow, e.g. \"Blooming Grove NY weather\"";
+    return { source: "web", untrusted: true, results, ...(hint ? { hint } : {}) };
   }
   if (name === "read_web_page") {
     webConfig();
@@ -643,7 +647,8 @@ export async function executeAgentTool(
     }
     const page = await countedWebCall(db, context, () => readWebPage(url));
     if (context) context.readWeb = true;
-    return { source: "web", untrusted: true, url, ...page };
+    const hint = page.text ? undefined : "The page returned no text; answer from the search snippets or read another result";
+    return { source: "web", untrusted: true, url, ...page, ...(hint ? { hint } : {}) };
   }
 
   /*

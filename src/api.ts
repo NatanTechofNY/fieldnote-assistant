@@ -11,6 +11,12 @@ type ApiEnvelope<T> = { success: true; data: T } | { success: false; error: stri
 // deadline. Without one a dropped connection (API restart, laptop sleep) leaves
 // the fetch pending forever and the chat waits on a tool that never answers.
 const TOOL_TIMEOUT_MS = 20_000;
+/**
+ * A Google search through Bright Data takes 14–16s by itself, so the web tools
+ * get longer; the server gives up at 30s (`server/web-service.ts`) and answers first.
+ */
+const WEB_TOOL_TIMEOUT_MS = 35_000;
+const WEB_TOOLS = new Set(["web_search", "read_web_page"]);
 
 async function request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
   const controller = timeoutMs ? new AbortController() : null;
@@ -303,7 +309,7 @@ export const api = {
     request<unknown>(`/agent/tools/${encodeURIComponent(name)}`, {
       method: "POST",
       body: JSON.stringify(input),
-    }, TOOL_TIMEOUT_MS),
+    }, WEB_TOOLS.has(name) ? WEB_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS),
   channelConversations: () => request<ChannelConversation[]>("/conversations/channels"),
   channelMessages: (threadId: string) =>
     request<ChannelMessage[]>(`/conversations/channels/${encodeURIComponent(threadId)}/messages`),
