@@ -1,4 +1,5 @@
 import { USER_ID, id, lifeAreaSlug, now, queueIndexJob, renameLifeArea } from "../db.ts";
+import { refreshRosterMemory } from "../group-members.ts";
 import { failure, success } from "../http.ts";
 import { categoryCreate, lifeAreaCreate, lifeAreaPatch } from "../schemas.ts";
 import type { RouteContext } from "./context.ts";
@@ -89,7 +90,10 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
     if (checkins && !current.thread_id) return failure(res, 400, "Only a group chat's area can have check-ins");
     // The name is on every indexed record of the area, so a rename goes through
     // the helper that queues the rewrites; the colour lives only here.
-    if (body.name !== undefined && body.name !== current.name) renameLifeArea(db, current.id, body.name);
+    if (body.name !== undefined && body.name !== current.name) {
+      renameLifeArea(db, current.id, body.name);
+      refreshRosterMemory(db, current.id);
+    }
     if (body.color !== undefined) {
       db.prepare("UPDATE life_areas SET color=?,updated_at=? WHERE id=? AND user_id=?")
         .run(body.color, now(), current.id, USER_ID);

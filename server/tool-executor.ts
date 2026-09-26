@@ -13,8 +13,12 @@ import {
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
-import { addressesAssistant, ASSISTANT_NAME, speakerNameOf } from "./group-thread.ts";
+import { refreshRosterMemory, rememberGroupMember } from "./group-members.ts";
+import {
+  addressesAssistant, ASSISTANT_NAME, groupIdOfAddress, OWNER_SPEAKER_NAME, speakerLabel, speakerNameOf,
+} from "./group-thread.ts";
 import type { SmsProvider } from "./integrations.ts";
+import { localIsoWithOffset, zonedToInstant } from "./local-time.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
 import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
@@ -41,6 +45,7 @@ const todoJson = (row: TodoRow) => ({
   completed_at: row.completed_at,
   recurrence: (() => { const rule = parseRecurrence(row.recurrence_json); return rule ? recurrenceJson(rule) : null; })(),
   last_completed_at: row.last_completed_at ?? null,
+  assistant_says: Boolean(row.assistant_says),
   created_at: row.created_at, updated_at: row.updated_at,
 });
 
@@ -245,6 +250,12 @@ export type ToolTurnContext = {
    * without a name is this person's.
    */
   speakerName?: string;
+  /**
+   * The speaker's number in a group. It never reaches the model; it is what
+   * `remember_group_member` resolves "speaker" to, so a person can only ever
+   * name themselves.
+   */
+  speakerPhone?: string;
   /** The message being answered, and so the only one a tapback may land on. */
   inboundMessageHandle?: string;
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
@@ -286,7 +297,10 @@ export type ToolTurnContext = {
  * group, anyone in it — so "no tools" cannot be left to the prompt. Digests
  * and reflection drafts are app-composed too, but are meant to read.
  */
-const NO_TOOL_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "checkin_ask_draft"]);
+/** How many rows a speaker-filtered `read_conversation` looks through per call before handing back a cursor. */
+const SPEAKER_SCAN_LIMIT = 5000;
+
+const NO_TOOL_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "checkin_ask_draft", "assistant_say"]);
 
 /**
  * App-composed turns that report on the owner's own day. A group's work is its
@@ -506,8 +520,24 @@ export async function executeAgentTool(
       throw new Error("Only the owner can rename the group chat");
     }
     renameLifeArea(db, scope.lifeAreaId, groupName);
+    refreshRosterMemory(db, scope.lifeAreaId);
     search.flushSoon();
     return { life_area_id: scope.lifeAreaId, name: groupName };
+  }
+  if (name === "remember_group_member") {
+    if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat");
+    const result = rememberGroupMember(db, {
+      threadId: scope.threadId,
+      lifeAreaId: scope.lifeAreaId,
+      speakerIsOwner: context.speakerIsOwner === true,
+      speakerPhone: context.speakerPhone,
+    }, {
+      who: input.who as string,
+      name: input.name as string,
+      relationship: (input.relationship as string | null | undefined) ?? null,
+    });
+    search.flushSoon();
+    return result;
   }
 
   if (name === "react_to_message") {
@@ -658,16 +688,20 @@ export async function executeAgentTool(
   if (name === "get_conversation_context") {
     const threadId = input.thread_id as string;
     const thread = db.prepare(`
-      SELECT t.id,t.channel,${GROUP_NAME_SQL} group_name FROM channel_threads t
+      SELECT t.id,t.channel,t.address,${GROUP_NAME_SQL} group_name FROM channel_threads t
       LEFT JOIN life_areas la ON la.thread_id=t.id
       WHERE t.id=? AND t.user_id=?
-    `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; group_name: string | null } | undefined;
-    // From inside a group, the owner's other conversations do not exist.
-    if (!thread || (scope && thread.id !== scope.threadId)) throw new Error("Conversation not found");
+    `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; address: string; group_name: string | null } | undefined;
+    // From inside a group, the owner's other conversations do not exist; from
+    // a turn about the owner's own day, the groups' do not.
+    if (!thread || (scope && thread.id !== scope.threadId) || (ownOnly && groupIdOfAddress(thread.address))) {
+      throw new Error("Conversation not found");
+    }
     const limit = Math.min(Math.max(Number(input.limit) || 20, 1), 40);
     const rows = db.prepare(`
       SELECT id,role,content,created_at,metadata_json FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant')
+        AND json_extract(metadata_json,'$.reactionText') IS NULL
       ORDER BY created_at,rowid
     `).all(threadId) as Array<{
       id: string;
@@ -700,6 +734,84 @@ export async function executeAgentTool(
       channel: thread.channel,
       ...(thread.group_name ? { group_name: thread.group_name } : {}),
       messages,
+    };
+  }
+  if (name === "read_conversation") {
+    const threadId = typeof input.thread_id === "string" && input.thread_id ? input.thread_id : context?.threadId;
+    if (!threadId) throw new Error("There is no conversation to read here; search the message index instead");
+    if (scope && threadId !== scope.threadId) throw new Error("Conversation not found");
+    const thread = db.prepare(`
+      SELECT t.id,t.channel,t.address,${GROUP_NAME_SQL} group_name FROM channel_threads t
+      LEFT JOIN life_areas la ON la.thread_id=t.id
+      WHERE t.id=? AND t.user_id=?
+    `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; address: string; group_name: string | null } | undefined;
+    // A turn that reports on the owner's own day does not read a group's chat.
+    if (!thread || (ownOnly && groupIdOfAddress(thread.address))) throw new Error("Conversation not found");
+    const timezone = userTimezone(db);
+    const dateOnly = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
+    // A day the user named runs midnight to midnight on their own clock.
+    const dayStart = (date: string) => zonedToInstant(date, "00:00", timezone).toISOString();
+    const nextDay = (date: string) => {
+      const [year, month, day] = date.split("-").map(Number);
+      return new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+    };
+    // A `next_from` cursor is the next row's instant and rowid, so a page
+    // resumes exactly there even when several rows share a millisecond.
+    const cursor = /^(.+)#(\d+)$/.exec(input.from as string);
+    const fromValue = cursor ? cursor[1] : input.from as string;
+    const afterRowid = cursor ? Number(cursor[2]) : 0;
+    const toValue = (input.to as string | null | undefined) ?? null;
+    // Without it the next page would quietly run on to now, past the range that was asked for.
+    if (cursor && !toValue) throw new Error("Pass next_to as to when paging with next_from");
+    const from = dateOnly(fromValue) ? dayStart(fromValue) : new Date(fromValue).toISOString();
+    const to = toValue
+      ? dateOnly(toValue) ? dayStart(nextDay(toValue)) : new Date(toValue).toISOString()
+      // "Until now" includes the message being answered, saved a moment ago.
+      : dateOnly(fromValue) ? dayStart(nextDay(fromValue)) : new Date(Date.now() + 1000).toISOString();
+    if (to <= from) throw new Error("The end of the range has to come after its start");
+    const wanted = typeof input.speaker === "string" ? input.speaker.trim().toLowerCase() : null;
+    const limit = Number(input.limit) || 50;
+    // Speakers are matched on their label, which is worked out per row, so a
+    // filtered read scans further before it is cut; either way it is bounded.
+    const rows = db.prepare(`
+      SELECT role,content,created_at,metadata_json,rowid FROM channel_messages
+      WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
+        AND (created_at>? OR (created_at=? AND rowid>=?)) AND created_at<?
+        AND NOT (role='user' AND COALESCE(json_extract(metadata_json,'$.internal'),0)=1)
+        AND json_extract(metadata_json,'$.copyOf') IS NULL
+        AND json_extract(metadata_json,'$.reactionText') IS NULL
+      ORDER BY created_at,rowid LIMIT ?
+    `).all(thread.id, from, from, afterRowid, to, wanted ? SPEAKER_SCAN_LIMIT : limit + 1) as Array<{
+      role: "user" | "assistant"; content: string; created_at: string; metadata_json: string; rowid: number;
+    }>;
+    // Who said it, by name or redacted number; the assistant's own lines are "you".
+    const labelled = rows.map(row => ({
+      ...row,
+      speaker: row.role === "assistant" ? "you" : speakerLabel(row.metadata_json) ?? OWNER_SPEAKER_NAME,
+    }));
+    const matching = wanted
+      ? labelled.filter(row => row.speaker.toLowerCase() === wanted
+        || (row.role === "assistant" && ["assistant", ASSISTANT_NAME.toLowerCase()].includes(wanted)))
+      : labelled;
+    const MAX_CONTENT = 1000;
+    return {
+      thread_id: thread.id,
+      ...(thread.group_name ? { group_name: thread.group_name } : {}),
+      timezone,
+      from: localIsoWithOffset(new Date(from), timezone),
+      to: localIsoWithOffset(new Date(to), timezone),
+      messages: matching.slice(0, limit).map(row => ({
+        at: localIsoWithOffset(new Date(row.created_at), timezone),
+        speaker: row.speaker,
+        content: row.content.length > MAX_CONTENT ? `${row.content.slice(0, MAX_CONTENT)}…` : row.content,
+      })),
+      // The next page is the same range from the next message on: pass both back.
+      ...(matching.length > limit
+        ? { has_more: true, next_from: `${matching[limit].created_at}#${matching[limit].rowid}`, next_to: to }
+        // A speaker read that stopped at its scan bound has not seen the rest of the range yet.
+        : wanted && rows.length === SPEAKER_SCAN_LIMIT
+          ? { has_more: true, next_from: `${rows.at(-1)!.created_at}#${rows.at(-1)!.rowid + 1}`, next_to: to }
+          : { has_more: false }),
     };
   }
   if (name === "list_todos") {
@@ -755,8 +867,8 @@ export async function executeAgentTool(
       db.prepare(`
         INSERT INTO todos(
           id,user_id,title,notes,category_id,life_area_id,life_area_source,parent_id,due_at,reminder_at,extra_reminders_json,
-          priority,status,started_at,completed_at,recurrence_json,reply_thread_id,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          priority,status,started_at,completed_at,recurrence_json,reply_thread_id,assistant_says,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         todoId, USER_ID, input.title as string, input.notes ?? null,
         area.category_id, area.life_area_id,
@@ -766,6 +878,8 @@ export async function executeAgentTool(
         // Only a group chat is remembered: a 1:1 or web todo reminds the
         // recipient's own number, which needs no thread to find.
         context?.groupId ? context.threadId : null,
+        // A step is something someone does; only a top-level todo is said.
+        input.assistant_says === true && !input.parent_id ? 1 : 0,
         timestamp, timestamp,
       );
       const created = getTodo(db, todoId);
@@ -840,16 +954,17 @@ export async function executeAgentTool(
     // A rule change opens a new occurrence: the finished one is in the log
     // already, and a done status is not carried on to a day that has not come.
     const reopen = repeat.occurrenceMoved && (current.status === "done" || current.status === "in_progress");
+    const assistantSays = parentId ? 0 : typeof patch.assistant_says === "boolean" ? Number(patch.assistant_says) : current.assistant_says;
     const updated = db.transaction(() => {
       db.prepare(`
         UPDATE todos SET title=?,notes=?,category_id=?,life_area_id=?,life_area_source=?,parent_id=?,due_at=?,reminder_at=?,
-          extra_reminders_json=?,priority=?,recurrence_json=?,status=?,started_at=?,completed_at=?,updated_at=?
+          extra_reminders_json=?,priority=?,recurrence_json=?,assistant_says=?,status=?,started_at=?,completed_at=?,updated_at=?
         WHERE id=? AND user_id=?
       `).run(
         value("title", current.title), value("notes", current.notes),
         scope ? current.category_id : value("category_id", current.category_id), lifeAreaId, lifeAreaSource,
         parentId, schedule.due_at, schedule.reminder_at, schedule.extra_reminders_json,
-        value("priority", current.priority), repeat.recurrence_json,
+        value("priority", current.priority), repeat.recurrence_json, assistantSays,
         reopen ? "pending" : current.status,
         repeat.occurrenceMoved ? null : current.started_at,
         repeat.occurrenceMoved ? null : current.completed_at,

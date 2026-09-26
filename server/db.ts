@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS todos (
   recurrence_json TEXT,
   last_completed_at TEXT,
   reply_thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL,
+  assistant_says INTEGER NOT NULL DEFAULT 0 CHECK(assistant_says IN (0,1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -238,6 +239,19 @@ CREATE TABLE IF NOT EXISTS channel_messages (
   UNIQUE(provider_message_id)
 );
 CREATE INDEX IF NOT EXISTS channel_messages_thread ON channel_messages(thread_id, created_at);
+-- Who is in a group chat, one row per number the provider reported in it. The
+-- phone stays in SQLite; the agent only ever sees a name or a redacted number.
+CREATE TABLE IF NOT EXISTS group_members (
+  thread_id TEXT NOT NULL REFERENCES channel_threads(id) ON DELETE CASCADE,
+  phone TEXT NOT NULL,
+  name TEXT,
+  relationship TEXT,
+  is_owner INTEGER NOT NULL DEFAULT 0 CHECK(is_owner IN (0,1)),
+  left_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(thread_id, phone)
+);
 CREATE TABLE IF NOT EXISTS reflection_exclusions (
   user_id TEXT NOT NULL,
   scope_key TEXT NOT NULL,
@@ -487,6 +501,12 @@ function migrateMessaging(db: Db): void {
   // there. Older rows have no thread and keep going to the recipient phone.
   if (!columns(db, "todos").has("reply_thread_id")) {
     db.exec("ALTER TABLE todos ADD COLUMN reply_thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL");
+  }
+  // Someone who left a group keeps their row, so a rejoin brings back who they are.
+  if (!columns(db, "group_members").has("left_at")) db.exec("ALTER TABLE group_members ADD COLUMN left_at TEXT");
+  // A todo that is something for the assistant to say rather than for anyone to do.
+  if (!columns(db, "todos").has("assistant_says")) {
+    db.exec("ALTER TABLE todos ADD COLUMN assistant_says INTEGER NOT NULL DEFAULT 0 CHECK(assistant_says IN (0,1))");
   }
   // A group chat carries the name iMessage gave it, and owns one life area
   // that everything said in it is filed under. Neither existed for 1:1 threads.
@@ -1267,7 +1287,7 @@ export function syncTodoReminders(db: Db, todo: TodoRow): void {
 export function resetDatabase(db: Db): void {
   db.transaction(() => {
     for (const table of [
-      "scheduled_dispatches", "external_events", "channel_messages", "channel_threads",
+      "scheduled_dispatches", "external_events", "group_members", "channel_messages", "channel_threads",
       "reflection_selections", "reflection_exclusions", "index_jobs", "reminders", "todo_completions", "messages", "conversations", "memories", "todos", "categories",
     ]) {
       db.prepare(`DELETE FROM ${table}`).run();

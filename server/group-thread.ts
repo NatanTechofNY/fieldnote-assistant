@@ -42,6 +42,27 @@ export function addressesAssistant(text: string): boolean {
   return new RegExp(`(^|[^\\p{L}\\p{N}])${ASSISTANT_NAME}(?![\\p{L}\\p{N}])`, "iu").test(text);
 }
 
+/*
+ * A tapback from a phone that cannot send it as a reaction arrives as plain
+ * text quoting the message it was placed on: `Loved “…”` in English, `A réagi
+ * avec ❤️ à « … »` in French. Each form is anchored at both ends — the verb
+ * first, the quoted message last — so a sentence that merely starts with
+ * "Loved" is still a message.
+ */
+const REACTION_TEXT = [
+  // iOS quotes the message in curly quotes; `Liked "The Bear"` in straight ones is a person typing.
+  /^(?:Loved|Liked|Disliked|Laughed at|Emphasized|Questioned|Reacted .{1,16} to|Removed (?:a|an) .{1,24} from)\s+“[\s\S]*”\s*\.?\s*$/u,
+  // A tapback on a picture or a file has nothing to quote.
+  /^(?:Loved|Liked|Disliked|Laughed at|Emphasized|Questioned|Reacted .{1,16} to) (?:an image|a photo|a video|an attachment|a movie|a sticker|an audio message)\s*\.?$/u,
+  /^(?:A réagi avec .{1,16} à|A ajouté (?:un|une) « [^»]{1,32} » à|A aimé|N’aime pas|N'aime pas|A ri à propos de|A mis en évidence|A mis en doute|A retiré .{1,40} de)\s+«[\s\S]*»\s*\.?\s*$/u,
+];
+
+/** Whether `text` is a tapback that arrived as a message rather than as a reaction. */
+export function isReactionText(text: string): boolean {
+  const trimmed = text.trim();
+  return REACTION_TEXT.some(pattern => pattern.test(trimmed));
+}
+
 /** The longest iMessage group title the app keeps; the same bound `name_group_chat` enforces. */
 export const MAX_GROUP_NAME_LENGTH = 80;
 

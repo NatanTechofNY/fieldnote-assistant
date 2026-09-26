@@ -74,7 +74,7 @@ Both paths run the same validation, the same SQLite access, and queue the same i
 
 The exception is the pair of iMessage tools, `react_to_message` and `reply_in_thread`, which act on the conversation rather than on stored records. They read a `ToolTurnContext` that only the SMS path can supply, and refuse on the browser transport. See [`docs/TOOL_ENDPOINT_MAPPING.md`](TOOL_ENDPOINT_MAPPING.md#imessage-reactions-and-inline-replies). `send_product_cards` reads the same context to text picture cards mid-turn, but degrades rather than refuses on the browser: it returns the cards for the agent to describe. See [Shopping](TOOL_ENDPOINT_MAPPING.md#shopping).
 
-Conversation storage is split for historical reasons: `channel_threads` / `channel_messages` back the agent and SMS (and are what gets indexed), while the older `conversations` / `messages` tables back the deterministic fallback chat at `POST /api/chat` used when Algolia credentials are absent.
+Conversation storage is split for historical reasons: `channel_threads` / `channel_messages` back the agent and SMS (and are what gets indexed), while the older `conversations` / `messages` tables back the deterministic fallback chat at `POST /api/chat` used when Algolia credentials are absent. `group_members` sits beside them: who is in each iMessage group thread, with the names and relationships people gave, never indexed itself.
 
 ### Conversation identity
 

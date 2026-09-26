@@ -66,6 +66,8 @@ export interface TodoRow {
   last_completed_at: string | null;
   /** The chat thread whose reminders should be answered in place; null means the recipient phone. */
   reply_thread_id: string | null;
+  /** 1 when the todo is something the assistant says at its time, not a task anyone does. */
+  assistant_says: 0 | 1;
   created_at: string;
   updated_at: string;
   category_name?: string | null;
@@ -137,6 +139,8 @@ export interface ReminderRow {
   todo_notes?: string | null;
   /** The todo's current life area; joined on claim, and what a group-bound reminder's subtasks are filtered to. */
   todo_life_area_id?: string | null;
+  /** Whether the todo is something the assistant says, joined on claim; such a reminder is composed, not templated. */
+  todo_assistant_says?: 0 | 1;
   /**
    * The group thread the reminder goes back to, joined on claim and only while
    * the todo is still filed in that group's life area; null otherwise.

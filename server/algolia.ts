@@ -15,11 +15,13 @@ type AlgoliaClient = ReturnType<typeof algoliasearch>;
 
 /**
  * True for a turn the app composed itself rather than one the user wrote, which
- * `runChannelAgent` marks in the message metadata.
+ * `runChannelAgent` marks in the message metadata, and for a tapback that
+ * arrived as text: neither is something anyone said.
  */
 function isInternalChannelMessage(row: ChannelMessageRow): boolean {
   try {
-    return (JSON.parse(row.metadata_json) as { internal?: unknown }).internal === true;
+    const metadata = JSON.parse(row.metadata_json) as { internal?: unknown; reactionText?: unknown };
+    return metadata.internal === true || metadata.reactionText === true;
   } catch {
     return false;
   }
@@ -226,6 +228,7 @@ export class AlgoliaSync {
         completed_at: row.completed_at,
         recurrence: recurrenceRule ? recurrenceJson(recurrenceRule) : null,
         is_recurring: Boolean(recurrenceRule),
+        assistant_says: Boolean(row.assistant_says),
         last_completed_at: row.last_completed_at ?? null,
         created_at: row.created_at,
         updated_at: row.updated_at,
