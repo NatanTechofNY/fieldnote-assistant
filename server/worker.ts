@@ -3,19 +3,22 @@ import { getNotificationPreferences, type SmsProvider } from "./integrations.ts"
 import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
-import { failAgentTurn, liftProgressMark, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "./agent-runner.ts";
+import {
+  archiveReactionText, failAgentTurn, liftProgressMark, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent,
+} from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
-import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "./group-checkin.ts";
+import { composeAssistantSayTurn, composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "./group-checkin.ts";
 import {
   claimExternalEvents, completeExternalEvent, deferExternalEvent, nextExternalEventAvailableAt, pollGranola,
   pruneSettledExternalEvents, STALE_CLAIM_MS, unsettledExternalEventsBefore,
 } from "./event-ingestion.ts";
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
-import { openSubtasks } from "./todo-status.ts";
+import { openSubtasks, syncOccurrenceCompletion } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
-import { groupAddress, groupIdOfAddress, OWNER_SPEAKER_NAME } from "./group-thread.ts";
+import { speakerNameInGroup } from "./group-members.ts";
+import { groupAddress, groupIdOfAddress, isReactionText } from "./group-thread.ts";
 import { readSendblueInbound, type StopTypingIndicator } from "./sendblue-service.ts";
 import type { Db, DigestBriefRow, ExternalEventRow, ReminderRow, TodoRow } from "./types.ts";
 
@@ -51,6 +54,8 @@ type InboundMessage = {
   /** Set when the text arrived in an iMessage group chat; only Sendblue carries these. */
   groupId?: string;
   groupName?: string;
+  /** Every number in the conversation, the Sendblue line included. */
+  participants?: string[];
 };
 
 const INBOUND_SOURCES: Array<{
@@ -77,6 +82,7 @@ const INBOUND_SOURCES: Array<{
         threadOriginator: inbound.threadOriginator,
         groupId: inbound.groupId,
         groupName: inbound.groupName,
+        participants: inbound.participants,
       };
     },
   },
@@ -84,9 +90,9 @@ const INBOUND_SOURCES: Array<{
 
 /**
  * The thread address and the per-message metadata for a text that arrived in a
- * group. The speaker is named from the trusted contacts list when it can be, so
- * the transcript and the agent see "Sarah" rather than a phone number; the
- * recipient is named as the owner because that is the only name the app has.
+ * group. The speaker is named from the group's roster or the trusted contacts
+ * list when they can be, so the transcript and the agent see "Sarah" rather
+ * than a phone number; the recipient is named as the owner.
  */
 function groupTurn(
   db: Db,
@@ -95,11 +101,11 @@ function groupTurn(
   groupName: string | undefined,
 ): { address: string; metadata: Record<string, unknown> } {
   const preferences = getNotificationPreferences(db);
-  const contact = preferences.trustedContacts.find(entry => entry.phone === from);
+  const address = groupAddress(groupId);
   const speakerIsOwner = from === preferences.recipientPhone;
-  const speakerName = contact?.name ?? (speakerIsOwner ? OWNER_SPEAKER_NAME : undefined);
+  const speakerName = speakerNameInGroup(db, address, from);
   return {
-    address: groupAddress(groupId),
+    address,
     metadata: {
       groupId,
       ...(groupName ? { groupName } : {}),
@@ -173,6 +179,50 @@ function threadBlocker(
   return null;
 }
 
+/**
+ * The message a group reply should thread under when the agent did not ask
+ * for it. In a 1:1 chat the answer always follows the question; in a group it
+ * often does not, so the reply threads under the message it answers when that
+ * message was itself an inline reply — the conversation is already in a thread
+ * — or when someone has written again since, and an unthreaded answer would
+ * land under their message instead.
+ */
+function groupReplyThread(
+  db: Db,
+  source: SmsProvider,
+  read: (payload: Record<string, unknown>) => InboundMessage,
+  event: ExternalEventRow,
+  address: string,
+  message: InboundMessage,
+): string | undefined {
+  if (!message.groupId || !message.messageId) return undefined;
+  if (message.replyTo || message.threadOriginator) return message.messageId;
+  return newerTextWaiting(db, source, read, event, address) ? message.messageId : undefined;
+}
+
+/** Whether a text that arrived after `event` in the same thread is still waiting to be answered. */
+function newerTextWaiting(
+  db: Db,
+  source: SmsProvider,
+  read: (payload: Record<string, unknown>) => InboundMessage,
+  event: ExternalEventRow,
+  address: string,
+): boolean {
+  const later = db.prepare(`
+    SELECT id,payload_json FROM external_events
+    WHERE user_id=? AND source=? AND id<>? AND status IN ('pending','failed','processing')
+      AND (created_at>? OR (created_at=? AND rowid>?))
+    ORDER BY created_at,rowid
+  `).all(USER_ID, source, event.id, event.created_at, event.created_at, event.rowid ?? 0) as Array<{ id: string; payload_json: string }>;
+  return later.some(row => {
+    try {
+      return inboundAddress(read(JSON.parse(row.payload_json) as Record<string, unknown>)) === address;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /** What the thread hears when a text has been tried `MAX_EVENT_ATTEMPTS` times and is being let go. */
 export const GAVE_UP_TEXT = "Sorry, I couldn't get through that one. Could you send it again?";
 
@@ -204,6 +254,14 @@ async function giveUpOnTurn(
     kind: "gave_up",
     ...(sent.replyTo ? { replyTo: sent.replyTo } : {}),
   });
+}
+
+/** How long after its slot a group check-in may still go out. */
+const GROUP_CHECKIN_CATCH_UP_MINUTES = 180;
+
+function minutesOfDay(time: string): number {
+  const [hour, minute] = time.split(":").map(Number);
+  return hour * 60 + minute;
 }
 
 function inQuietHours(time: string, start: string | null, end: string | null): boolean {
@@ -276,7 +334,8 @@ function claimDueReminders(db: Db, limit = 50): ReminderRow[] {
      * from then on the todo is theirs alone and so is its reminder.
      */
     const rows = db.prepare(`
-      SELECT r.*,t.title todo_title,t.notes todo_notes,t.life_area_id todo_life_area_id,ct.address reply_address
+      SELECT r.*,t.title todo_title,t.notes todo_notes,t.life_area_id todo_life_area_id,
+        t.assistant_says todo_assistant_says,ct.address reply_address
       FROM reminders r
       JOIN todos t ON t.id=r.todo_id
       LEFT JOIN channel_threads ct
@@ -343,12 +402,80 @@ function reminderBody(db: Db, reminder: ReminderRow, groupBound: boolean): strin
   return lines.join("\n");
 }
 
+/** How many attempts a said todo gets at being written by the agent before its title goes out as is. */
+const SAID_COMPOSE_ATTEMPTS = 3;
+
+/**
+ * The message for a todo the assistant was asked to say, written by the agent
+ * on the thread it goes to. A failed composition is retried with the
+ * reminder's own backoff; after a few tries the title goes out as it was
+ * saved, since a plain "Happy birthday, Halo" beats silence on the day.
+ */
+async function composeSaidMessage(
+  db: Db,
+  search: SearchWriter,
+  reminder: ReminderRow,
+  target: string,
+  groupId: string | undefined,
+  timezone: string,
+  runAgent: typeof runSmsAgent,
+): Promise<{ text: string; turn?: Awaited<ReturnType<typeof runSmsAgent>> }> {
+  const title = reminder.todo_title || "";
+  try {
+    const place = groupId
+      ? db.prepare(`
+        SELECT la.name groupName,t.id threadId FROM channel_threads t JOIN life_areas la ON la.thread_id=t.id
+        WHERE t.user_id=? AND t.address=?
+      `).get(USER_ID, target) as { groupName: string; threadId: string } | undefined
+      : undefined;
+    const prompt = composeAssistantSayTurn(
+      db, { title, notes: reminder.todo_notes ?? null }, place ?? null,
+      { date: localParts(new Date(), timezone).date, timezone },
+    );
+    const turn = await runAgent(db, search, target, prompt, undefined, {
+      internal: true,
+      replyInternal: false,
+      ...(groupId ? { inbound: { provider: "sendblue" as const, groupId } } : {}),
+      userMessageMetadata: { kind: "assistant_say", todoId: reminder.todo_id, ...(groupId ? { groupId } : {}) },
+      assistantMetadata: { kind: "assistant_say", reminderId: reminder.id, todoId: reminder.todo_id },
+    });
+    if (!turn.text) throw new Error("The message came back empty");
+    return { text: turn.text, turn };
+  } catch (error) {
+    if (reminder.attempts < SAID_COMPOSE_ATTEMPTS) throw error;
+    console.warn("Sending a said todo as saved after the agent could not write it:", error instanceof Error ? error.message : error);
+    return { text: title };
+  }
+}
+
+/**
+ * A said todo has done its job once the message is out: the occurrence is
+ * logged as done, so it is not left overdue on the board, and a repeating one
+ * comes back on its own for the next day.
+ */
+function completeSaidOccurrence(db: Db, search: SearchWriter, todoId: string): void {
+  const current = getTodo(db, todoId);
+  if (!current || current.status === "done" || current.status === "cancelled") return;
+  const timestamp = now();
+  db.transaction(() => {
+    db.prepare("UPDATE todos SET status='done',completed_at=?,updated_at=? WHERE id=? AND user_id=?")
+      .run(timestamp, timestamp, todoId, USER_ID);
+    const row = getTodo(db, todoId) as TodoRow;
+    syncTodoReminders(db, row);
+    syncOccurrenceCompletion(db, row);
+    queueIndexJob(db, "todo", todoId);
+  })();
+  search.flushSoon();
+}
+
 async function deliverReminder(
   db: Db,
   search: SearchWriter,
   reminder: ReminderRow,
   recipient: string,
   send: typeof sendSms,
+  runAgent: typeof runSmsAgent = runSmsAgent,
+  timezone = "UTC",
 ): Promise<void> {
   /*
    * The intent to send is recorded before the provider call, so a crash between
@@ -384,14 +511,29 @@ async function deliverReminder(
      */
     const groupId = reminder.reply_address ? groupIdOfAddress(reminder.reply_address) : undefined;
     const groupBound = Boolean(groupId) && isSmsProviderConnected(db, "sendblue");
-    const content = reminderBody(db, reminder, groupBound);
     const target = groupBound ? (reminder.reply_address as string) : recipient;
-    const message = await send(db, target, content, groupBound ? { groupId } : {});
-    recordOutboundChannelMessage(db, "sms", target, content, message.sid, message.status, {
-      kind: "reminder",
-      reminderId: reminder.id,
-      todoId: reminder.todo_id,
-    });
+    const said = reminder.todo_assistant_says
+      ? await composeSaidMessage(db, search, reminder, target, groupBound ? groupId : undefined, timezone, runAgent)
+      : null;
+    let message: Awaited<ReturnType<typeof send>>;
+    if (said?.turn) {
+      try {
+        message = await send(db, target, said.text, groupBound ? { groupId } : {});
+      } catch (error) {
+        failAgentTurn(db, said.turn);
+        throw error;
+      }
+      // The runner already archived the reply on the thread; this pins the provider's id to it.
+      recordOutboundProviderMessage(db, said.turn.threadId, message.sid, message.status, undefined, said.turn.replyMessageId);
+    } else {
+      const content = said?.text ?? reminderBody(db, reminder, groupBound);
+      message = await send(db, target, content, groupBound ? { groupId } : {});
+      recordOutboundChannelMessage(db, "sms", target, content, message.sid, message.status, {
+        kind: said ? "assistant_say" : "reminder",
+        reminderId: reminder.id,
+        todoId: reminder.todo_id,
+      });
+    }
     search.flushSoon();
     db.prepare(`
       UPDATE reminders SET status='sent',delivered_at=?,provider_message_id=?,
@@ -400,6 +542,7 @@ async function deliverReminder(
     db.prepare(`
       UPDATE scheduled_dispatches SET status='sent',provider_message_id=?,updated_at=? WHERE id=?
     `).run(message.sid, now(), dispatchId);
+    if (reminder.todo_assistant_says) completeSaidOccurrence(db, search, reminder.todo_id);
   } catch (error) {
     const delayMinutes = Math.min(60, 2 ** Math.min(reminder.attempts + 1, 6));
     db.prepare(`
@@ -778,6 +921,13 @@ export async function runWorkerOnce(
           continue;
         }
         const group = message.groupId ? groupTurn(db, message.groupId, message.from, message.groupName) : null;
+        // A tapback that arrived as text is filed and never answered: "What's
+        // up?" in reply to a heart is the assistant misreading the room.
+        if (isReactionText(message.body)) {
+          archiveReactionText(db, address, message.body, message.messageId, group?.metadata ?? {});
+          completeExternalEvent(db, event.id, "processed");
+          continue;
+        }
         // The bubble goes up before the turn starts and comes down once the reply
         // is out rather than in between, so the wait is covered end to end and no
         // bubble outlives the answer.
@@ -787,7 +937,7 @@ export async function runWorkerOnce(
             provider: source,
             replyTo: message.replyTo,
             threadOriginator: message.threadOriginator,
-            ...(message.groupId ? { groupId: message.groupId } : {}),
+            ...(message.groupId ? { groupId: message.groupId, participants: message.participants } : {}),
           },
           ...(group ? { userMessageMetadata: group.metadata } : {}),
           sendSms: send,
@@ -795,9 +945,8 @@ export async function runWorkerOnce(
         // An empty reply is a turn a tapback answered on its own; there is
         // nothing to send and no outbound row to file a provider id on.
         if (response.text) {
-          // The agent threads its answer only when it asked to, via reply_in_thread.
           const sent = await send(db, address, response.text, {
-            replyTo: response.replyTo,
+            replyTo: response.replyTo ?? groupReplyThread(db, source, read, event, address, message),
             ...(message.groupId ? { groupId: message.groupId } : {}),
           });
           recordOutboundProviderMessage(db, response.threadId, sent.sid, sent.status, sent.replyTo);
@@ -843,9 +992,18 @@ export async function runWorkerOnce(
   const checkinDue = (time: string | null): boolean =>
     time !== null && local.time >= time
     && (!quiet || inQuietHours(time, preferences.quietHoursStart, preferences.quietHoursEnd));
+  /*
+   * A group's check-in is a note to a room of people, and one that arrives
+   * hours late is not the note they were promised: a group made at 8:30 PM got
+   * "good morning" at 8:44 PM, because 09:00 had passed that day. So it goes out
+   * only within a few hours of its slot, and a day that missed it waits for
+   * tomorrow's.
+   */
+  const groupCheckinDue = (time: string | null): boolean =>
+    checkinDue(time) && time !== null && minutesOfDay(local.time) - minutesOfDay(time) <= GROUP_CHECKIN_CATCH_UP_MINUTES;
   if (recipient && !quiet) {
     for (const reminder of claimDueReminders(db)) {
-      await deliverReminder(db, search, reminder, recipient, send);
+      await deliverReminder(db, search, reminder, recipient, send, runAgent, preferences.timezone);
     }
     if (preferences.dailyDigestEnabled && local.time >= preferences.dailyDigestTime) {
       await deliverDailyDigest(
@@ -879,10 +1037,10 @@ export async function runWorkerOnce(
     // A group's check-ins go into the group, which only iMessage can carry.
     if (isSmsProviderConnected(db, "sendblue")) {
       for (const area of checkinAreas(db)) {
-        if (checkinDue(area.morning_checkin_time)) {
+        if (groupCheckinDue(area.morning_checkin_time)) {
           await deliverGroupCheckin(db, search, "morning", area, recipient, local, preferences.timezone, runAgent, send);
         }
-        if (checkinDue(area.evening_checkin_time)) {
+        if (groupCheckinDue(area.evening_checkin_time)) {
           await deliverGroupCheckin(db, search, "evening", area, recipient, local, preferences.timezone, runAgent, send);
         }
       }

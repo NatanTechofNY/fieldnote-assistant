@@ -100,6 +100,8 @@ const todoFields = {
   started_at: nullableIso,
   completed_at: nullableIso,
   recurrence: nullableRecurrence,
+  /** Something the assistant says at the todo's time, rather than a task anyone does. */
+  assistant_says: z.boolean().optional(),
 };
 
 export const todoCreate = z.object({
@@ -376,7 +378,14 @@ const todoToolFields = {
   reminder_at: nullableIso,
   extra_reminders: z.array(iso).max(20).nullable().optional(),
   recurrence: nullableRecurrence,
+  assistant_says: z.boolean().nullable().optional(),
 };
+
+/** A date the user named (`2026-09-24`) or an exact instant. */
+const dateOrInstant = z.string().trim().refine(
+  value => /^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isNaN(Date.parse(value)),
+  "Use a YYYY-MM-DD date or an RFC 3339 date-time",
+);
 
 const memoryToolFields = {
   kind: memoryKind.optional(),
@@ -554,6 +563,18 @@ export const toolInput = {
   reply_in_thread: z.object({}),
   send_message: z.object({ text: z.string().trim().min(1).max(1500) }).strict(),
   name_group_chat: z.object({ name: z.string().trim().min(1).max(80) }).strict(),
+  remember_group_member: z.object({
+    who: z.string().trim().min(1).max(60),
+    name: z.string().trim().min(1).max(60),
+    relationship: z.string().trim().min(1).max(120).nullable().optional(),
+  }).strict(),
+  read_conversation: z.object({
+    thread_id: z.string().min(1).max(100).nullable().optional(),
+    from: dateOrInstant,
+    to: dateOrInstant.nullable().optional(),
+    speaker: z.string().trim().min(1).max(60).nullable().optional(),
+    limit: z.coerce.number().int().min(1).max(100).nullable().optional(),
+  }).strict(),
   stay_quiet: z.object({ reason: z.string().trim().min(1).max(200) }).strict(),
   search_store_products: z.object({
     query: z.string().trim().min(1).max(200),

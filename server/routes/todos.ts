@@ -104,13 +104,14 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
       db.prepare(`
         INSERT INTO todos(
           id,user_id,title,notes,category_id,life_area_id,life_area_source,parent_id,due_at,reminder_at,extra_reminders_json,
-          priority,status,started_at,completed_at,recurrence_json,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          priority,status,started_at,completed_at,recurrence_json,assistant_says,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(todoId, USER_ID, body.title, body.notes ?? null, body.category_id ?? null,
         body.life_area_id ?? null, body.life_area_source ?? null, body.parent_id ?? null,
         schedule.due_at, schedule.reminder_at, schedule.extra_reminders_json,
         body.priority ?? null, body.status,
-        times.startedAt, times.completedAt, repeat.recurrence_json, timestamp, timestamp);
+        times.startedAt, times.completedAt, repeat.recurrence_json,
+        body.assistant_says === true && !body.parent_id ? 1 : 0, timestamp, timestamp);
       const todo = getTodo(db, todoId);
       if (todo) {
         syncTodoReminders(db, todo);
@@ -166,10 +167,11 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
         ? current.extra_reminders_json
         : JSON.stringify(body.extra_reminders),
     };
+    const assistantSays = parentId ? 0 : body.assistant_says === undefined ? current.assistant_says : Number(body.assistant_says);
     db.transaction(() => {
       db.prepare(`
         UPDATE todos SET title=?,notes=?,category_id=?,life_area_id=?,life_area_source=?,parent_id=?,due_at=?,reminder_at=?,
-          extra_reminders_json=?,priority=?,status=?,started_at=?,completed_at=?,recurrence_json=?,updated_at=?
+          extra_reminders_json=?,priority=?,status=?,started_at=?,completed_at=?,recurrence_json=?,assistant_says=?,updated_at=?
         WHERE id=? AND user_id=?
       `).run(body.title ?? current.title, body.notes === undefined ? current.notes : body.notes,
         body.category_id === undefined ? current.category_id : body.category_id,
@@ -177,7 +179,7 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
         body.life_area_source === undefined ? current.life_area_source : body.life_area_source,
         parentId, schedule.due_at, schedule.reminder_at, schedule.extra_reminders_json,
         body.priority === undefined ? current.priority : body.priority, nextStatus,
-        times.startedAt, times.completedAt, repeat.recurrence_json, now(), current.id, USER_ID);
+        times.startedAt, times.completedAt, repeat.recurrence_json, assistantSays, now(), current.id, USER_ID);
       const todo = getTodo(db, current.id);
       if (todo) {
         syncTodoReminders(db, todo);

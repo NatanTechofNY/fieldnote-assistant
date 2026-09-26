@@ -286,9 +286,13 @@
               "additionalProperties": false
             },
             "description": "Executable child todos or null"
+          },
+          "assistant_says": {
+            "type": ["boolean", "null"],
+            "description": "True when the todo is something you say at its time (\"wish Halo happy birthday every morning\"), not a task anyone does; the title is what to say. Null or false otherwise"
           }
         },
-        "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence", "subtasks"],
+        "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence", "subtasks", "assistant_says"],
         "additionalProperties": false
       }
     }
@@ -401,9 +405,13 @@
                   "enum": ["notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence"]
                 },
                 "description": "Nullable fields to set to null; empty when none"
+              },
+              "assistant_says": {
+                "type": ["boolean", "null"],
+                "description": "True to make this something you say at its time, false to make it an ordinary task, or null for unchanged"
               }
             },
-            "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence", "clear_fields"],
+            "required": ["title", "notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence", "clear_fields", "assistant_says"],
             "additionalProperties": false
           },
           "override_user_classification": {
@@ -1235,6 +1243,76 @@
           }
         },
         "required": ["name"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "remember_group_member",
+      "description": "Records who someone in this group chat is, saving them as a trusted contact and in the group's roster memory. Anyone may name themselves; only the owner may name others. Group chats only.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "who": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60,
+            "description": "\"speaker\" for whoever wrote this message, \"the owner\", or a label from groupMembers such as \"+1…88\" or a name"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60,
+            "description": "What to call them, in the chat's own words: \"Halo\", \"Natella\""
+          },
+          "relationship": {
+            "type": ["string", "null"],
+            "maxLength": 120,
+            "description": "Who they are to the others, such as \"the owner's sister\" or \"Natella's boyfriend\", or null to leave it as it is"
+          }
+        },
+        "required": ["who", "name", "relationship"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_conversation",
+      "description": "Reads this conversation's messages over a date range, oldest first, with who said each. Use for \"what did Halo say yesterday\" or \"what did we plan on Friday\".",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": ["string", "null"],
+            "description": "Null for this conversation; outside a group, a threadId from a message search hit"
+          },
+          "from": {
+            "type": "string",
+            "description": "Start: a local YYYY-MM-DD date or an RFC 3339 date-time"
+          },
+          "to": {
+            "type": ["string", "null"],
+            "description": "Inclusive local YYYY-MM-DD end date or RFC 3339 end; null for the whole day of a date-only from, else until now"
+          },
+          "speaker": {
+            "type": ["string", "null"],
+            "maxLength": 60,
+            "description": "Only this person's messages, by the name or label the chat shows; null for everyone"
+          },
+          "limit": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Most messages to return; null for 50. Page with next_from when has_more is true"
+          }
+        },
+        "required": ["thread_id", "from", "to", "speaker", "limit"],
         "additionalProperties": false
       }
     }

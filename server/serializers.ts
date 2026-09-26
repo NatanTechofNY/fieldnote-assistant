@@ -24,6 +24,7 @@ export function todoJson(row: TodoRow): Record<string, unknown> {
     completed_at: row.completed_at,
     recurrence: recurrenceOf(row),
     last_completed_at: row.last_completed_at ?? null,
+    assistant_says: Boolean(row.assistant_says),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

@@ -398,6 +398,31 @@ export function getNotificationPreferences(db: Db): NotificationPreferences {
   };
 }
 
+/** The most trusted contacts the Settings form accepts; the same bound as `notificationInput`. */
+export const MAX_TRUSTED_CONTACTS = 25;
+
+/**
+ * Adds `phone` to the trusted contacts under `name`, or renames the entry it
+ * already has. The recipient is never listed: they are allowed already, and the
+ * Settings form refuses the same entry. Throws when the list is full.
+ */
+export function upsertTrustedContact(db: Db, phone: string, name: string): TrustedContact[] {
+  const preferences = getNotificationPreferences(db);
+  if (phone === preferences.recipientPhone) return preferences.trustedContacts;
+  const contacts = preferences.trustedContacts;
+  const existing = contacts.find(contact => contact.phone === phone);
+  if (existing?.name === name) return contacts;
+  if (!existing && contacts.length >= MAX_TRUSTED_CONTACTS) {
+    throw new Error(`The trusted contacts list is full (${MAX_TRUSTED_CONTACTS}); the owner can make room in Settings`);
+  }
+  const next = existing
+    ? contacts.map(contact => contact.phone === phone ? { phone, name } : contact)
+    : [...contacts, { phone, name }];
+  db.prepare("UPDATE notification_preferences SET trusted_contacts_json=?,updated_at=? WHERE user_id=?")
+    .run(JSON.stringify(next), now(), USER_ID);
+  return next;
+}
+
 function parseTrustedContacts(json: string): TrustedContact[] {
   try {
     const parsed = JSON.parse(json) as unknown;

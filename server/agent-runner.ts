@@ -1,6 +1,7 @@
 import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./algolia.ts";
 import { ensureGroupLifeArea, groupAreas, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
-import { OWNER_SPEAKER_NAME, redactedNumber, speakerLabel } from "./group-thread.ts";
+import { recordGroupParticipants, rosterLine } from "./group-members.ts";
+import { addressesAssistant, OWNER_SPEAKER_NAME, redactedNumber, speakerLabel } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
@@ -135,6 +136,7 @@ const WRITE_TOOLS = new Set([
   "react_to_message", "send_message",
   // Naming the group twice is harmless, but a retry should know it was done.
   "name_group_chat",
+  "remember_group_member",
 ]);
 
 /**
@@ -172,7 +174,8 @@ const PROGRESS_REACTIONS: Record<string, string> = {
   get_memory: "🧠", create_memory: "🧠", update_memory: "🧠", delete_memory: "🧠",
   list_reminders: "⏰", create_reminder: "⏰", update_reminder: "⏰", delete_reminder: "⏰",
   get_agenda: "📅",
-  get_conversation_context: "💬",
+  get_conversation_context: "💬", read_conversation: "💬",
+  remember_group_member: "🧠",
   list_life_areas: "🗂️",
   get_review_evidence: "🪞", get_reflection_evidence: "🪞",
   list_jira_boards: "🎫", list_jira_issues: "🎫", get_jira_issue: "🎫", list_jira_users: "🎫",
@@ -180,8 +183,15 @@ const PROGRESS_REACTIONS: Record<string, string> = {
   search_store_products: "🛒",
 };
 const GENERAL_PROGRESS_REACTION = "🔍";
+/**
+ * Sendblue has no typing indicator for group chats, so a message that is aimed
+ * at the assistant gets this the moment its turn starts instead. It is a
+ * progress mark like the others: a tool's mark replaces it, and it comes off
+ * when the reply goes out.
+ */
+export const WORKING_MARK = "👀";
 /** Every mark the runtime may place, so the archive can tell them from the agent's own reactions. */
-const PROGRESS_MARKS = new Set([...Object.values(PROGRESS_REACTIONS), GENERAL_PROGRESS_REACTION]);
+const PROGRESS_MARKS = new Set([...Object.values(PROGRESS_REACTIONS), GENERAL_PROGRESS_REACTION, WORKING_MARK]);
 
 /**
  * The tapback left on the message once the turn has answered, when the agent
@@ -351,6 +361,7 @@ function threadHistory(db: Db, threadId: string): AgentMessage[] {
         AND status<>'failed'
         AND NOT (role='user' AND COALESCE(json_extract(metadata_json,'$.internal'),0)=1)
         AND json_extract(metadata_json,'$.copyOf') IS NULL
+        AND json_extract(metadata_json,'$.reactionText') IS NULL
       ORDER BY created_at DESC,rowid DESC LIMIT 40
     ) ORDER BY created_at,rowid
   `).all(threadId, cutoff) as Array<{
@@ -571,6 +582,63 @@ function saveInboundMessage(
   return saveChannelMessage(db, threadId, "inbound", "user", body, providerMessageId, { ...metadata, runtimeReactions: [] });
 }
 
+/**
+ * Files a tapback that arrived as text ("Loved “…”") without answering it. It
+ * stays in the archive, so the history page shows what was sent, but is marked
+ * so the window, the history tool, and the index all leave it out: it is a
+ * reaction to a message, not something anyone said.
+ */
+export function archiveReactionText(
+  db: Db,
+  address: string,
+  body: string,
+  providerMessageId: string | undefined,
+  metadata: Record<string, unknown> = {},
+): string {
+  const thread = getOrCreateThread(db, "sms", address);
+  return saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, reactionText: true });
+}
+
+/** How recently the assistant has to have spoken for a message to read as a reply to it. */
+const FOLLOW_UP_WINDOW_MS = 10 * 60_000;
+
+/**
+ * Whether a group message is aimed at the assistant, as far as the server can
+ * tell before the model has read it: it names the assistant, it is an inline
+ * reply to one of the assistant's messages, or the same person is carrying on
+ * a back-and-forth the assistant answered a moment ago. Someone else speaking
+ * up after the assistant's reply is as likely talking to the room. Only these
+ * get the working mark; the model still decides for itself whether to answer.
+ */
+function aimedAtAssistant(
+  db: Db,
+  threadId: string,
+  inboundId: string,
+  text: string,
+  inbound: InboundContext | undefined,
+  speakerPhone: string | undefined,
+): boolean {
+  if (addressesAssistant(text)) return true;
+  const parents = [inbound?.replyTo, inbound?.threadOriginator].filter((handle): handle is string => Boolean(handle));
+  for (const handle of parents) {
+    const parent = db.prepare(`
+      SELECT 1 found FROM channel_messages WHERE thread_id=? AND provider_message_id=? AND role='assistant'
+    `).get(threadId, handle);
+    if (parent) return true;
+  }
+  if (!speakerPhone) return false;
+  const [previous, answered] = db.prepare(`
+    SELECT role,created_at,json_extract(metadata_json,'$.speaker') speaker FROM channel_messages
+    WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
+      AND json_extract(metadata_json,'$.reactionText') IS NULL
+      AND rowid<(SELECT rowid FROM channel_messages WHERE id=?)
+    ORDER BY rowid DESC LIMIT 2
+  `).all(threadId, inboundId) as Array<{ role: string; created_at: string; speaker: string | null }>;
+  return previous?.role === "assistant"
+    && Date.now() - Date.parse(previous.created_at) < FOLLOW_UP_WINDOW_MS
+    && answered?.role === "user" && answered.speaker === speakerPhone;
+}
+
 export function recordOutboundChannelMessage(
   db: Db,
   channel: "sms" | "web",
@@ -750,6 +818,26 @@ function groupTurnSetup(
 }
 
 /**
+ * Who is in the room and when the app writes to it on its own. Without the
+ * roster the agent met each person fresh every day; without the schedule it
+ * told a group asking for a daily good morning that it could not text on its
+ * own, while a morning check-in was already set for 9.
+ */
+function groupRoomContext(db: Db, threadId: string, areaId: string): Record<string, string> {
+  const roster = rosterLine(db, threadId);
+  const times = db.prepare("SELECT morning_checkin_time,evening_checkin_time FROM life_areas WHERE id=?")
+    .get(areaId) as { morning_checkin_time: string | null; evening_checkin_time: string | null } | undefined;
+  const schedule = [
+    times?.morning_checkin_time ? `morning note at ${times.morning_checkin_time}` : null,
+    times?.evening_checkin_time ? `evening question at ${times.evening_checkin_time}` : null,
+  ].filter(Boolean).join(", ");
+  return {
+    ...(roster ? { groupMembers: roster } : {}),
+    groupCheckins: schedule || "none set; the owner can turn them on in the app",
+  };
+}
+
+/**
  * What the provider said about the message that started a turn. `groupId` is
  * set when the text arrived in an iMessage group chat, which changes where the
  * answer and any reminders the turn creates are sent.
@@ -759,6 +847,8 @@ export type InboundContext = {
   replyTo?: string;
   threadOriginator?: string;
   groupId?: string;
+  /** Every number in the group conversation, as the provider listed it; the roster is kept from these. */
+  participants?: string[];
 };
 
 /** What the runner says when the model finished a turn without any text to send. */
@@ -839,6 +929,7 @@ export async function runChannelAgent(
     speaker?: string; speakerName?: string; speakerIsOwner?: boolean; groupName?: string;
   } | undefined;
   const group = options.inbound?.groupId ? groupTurnSetup(db, thread.id, inboundId, speaker?.groupName) : undefined;
+  if (group) recordGroupParticipants(db, thread.id, [...options.inbound?.participants ?? [], speaker?.speaker]);
   const context: ToolTurnContext = {
     channel,
     address,
@@ -846,6 +937,7 @@ export async function runChannelAgent(
     provider: options.inbound?.provider,
     groupId: options.inbound?.groupId,
     ...(group ? { scope: { ...group.scope, lifeAreaIsNew: group.areaIsNew }, speakerIsOwner: speaker?.speakerIsOwner === true } : {}),
+    ...(group && !options.internal && speaker?.speaker ? { speakerPhone: speaker.speaker } : {}),
     // In a group the speaker is whoever wrote — by name, or by the redacted number the
     // transcript uses for someone the owner never named; on the owner's own line or the
     // web it is the owner. An app-composed turn has no speaker.
@@ -906,6 +998,7 @@ export async function runChannelAgent(
           // Stated either way, so "not the owner" is a fact the model was
           // told rather than a field it did not see.
           speakerIsOwner: speaker?.speakerIsOwner === true,
+          ...groupRoomContext(db, thread.id, group.area.id),
         }
         : {}),
     },
@@ -990,6 +1083,12 @@ export async function runChannelAgent(
   const searchParameters = context.scope
     ? groupSearchParameters(context.scope)
     : ownRecordsOnly(context) ? ownSearchParameters(db) : undefined;
+  // A retry that already shows a mark keeps it; the working mark never
+  // replaces a more specific one.
+  if (group && !options.internal && !markShown && markHandle
+    && aimedAtAssistant(db, thread.id, inboundId, body, options.inbound, speaker?.speaker)) {
+    await setMark(WORKING_MARK);
+  }
   const deadline = Date.now() + TURN_BUDGET_MS;
   try {
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
