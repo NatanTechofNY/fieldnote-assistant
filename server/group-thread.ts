@@ -50,7 +50,10 @@ export function addressesAssistant(text: string): boolean {
  * "Loved" is still a message.
  */
 const REACTION_TEXT = [
-  /^(?:Loved|Liked|Disliked|Laughed at|Emphasized|Questioned|Reacted .{1,16} to|Removed (?:a|an) .{1,24} from)\s+[“"][\s\S]*[”"]\s*\.?\s*$/u,
+  // iOS quotes the message in curly quotes; `Liked "The Bear"` in straight ones is a person typing.
+  /^(?:Loved|Liked|Disliked|Laughed at|Emphasized|Questioned|Reacted .{1,16} to|Removed (?:a|an) .{1,24} from)\s+“[\s\S]*”\s*\.?\s*$/u,
+  // A tapback on a picture or a file has nothing to quote.
+  /^(?:Loved|Liked|Disliked|Laughed at|Emphasized|Questioned|Reacted .{1,16} to) (?:an image|a photo|a video|an attachment|a movie|a sticker|an audio message)\s*\.?$/u,
   /^(?:A réagi avec .{1,16} à|A ajouté (?:un|une) « [^»]{1,32} » à|A aimé|N’aime pas|N'aime pas|A ri à propos de|A mis en évidence|A mis en doute|A retiré .{1,40} de)\s+«[\s\S]*»\s*\.?\s*$/u,
 ];
 

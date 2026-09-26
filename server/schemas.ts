@@ -381,10 +381,19 @@ const todoToolFields = {
   assistant_says: z.boolean().nullable().optional(),
 };
 
-/** A date the user named (`2026-09-24`) or an exact instant. */
+/** A real calendar day as `YYYY-MM-DD`; `2026-02-31` is not one. */
+function calendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const [year, month, day] = match.slice(1).map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+/** A date the user named (`2026-09-24`) or an exact instant with its offset. */
 const dateOrInstant = z.string().trim().refine(
-  value => /^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isNaN(Date.parse(value)),
-  "Use a YYYY-MM-DD date or an RFC 3339 date-time",
+  value => calendarDate(value) || iso.safeParse(value).success,
+  "Use a YYYY-MM-DD date or an RFC 3339 date-time with an offset",
 );
 
 const memoryToolFields = {

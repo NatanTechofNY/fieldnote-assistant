@@ -13,8 +13,10 @@ import {
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
-import { rememberGroupMember } from "./group-members.ts";
-import { addressesAssistant, ASSISTANT_NAME, OWNER_SPEAKER_NAME, speakerLabel, speakerNameOf } from "./group-thread.ts";
+import { refreshRosterMemory, rememberGroupMember } from "./group-members.ts";
+import {
+  addressesAssistant, ASSISTANT_NAME, groupIdOfAddress, OWNER_SPEAKER_NAME, speakerLabel, speakerNameOf,
+} from "./group-thread.ts";
 import type { SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset, zonedToInstant } from "./local-time.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
@@ -515,6 +517,7 @@ export async function executeAgentTool(
       throw new Error("Only the owner can rename the group chat");
     }
     renameLifeArea(db, scope.lifeAreaId, groupName);
+    refreshRosterMemory(db, scope.lifeAreaId);
     search.flushSoon();
     return { life_area_id: scope.lifeAreaId, name: groupName };
   }
@@ -682,12 +685,15 @@ export async function executeAgentTool(
   if (name === "get_conversation_context") {
     const threadId = input.thread_id as string;
     const thread = db.prepare(`
-      SELECT t.id,t.channel,${GROUP_NAME_SQL} group_name FROM channel_threads t
+      SELECT t.id,t.channel,t.address,${GROUP_NAME_SQL} group_name FROM channel_threads t
       LEFT JOIN life_areas la ON la.thread_id=t.id
       WHERE t.id=? AND t.user_id=?
-    `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; group_name: string | null } | undefined;
-    // From inside a group, the owner's other conversations do not exist.
-    if (!thread || (scope && thread.id !== scope.threadId)) throw new Error("Conversation not found");
+    `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; address: string; group_name: string | null } | undefined;
+    // From inside a group, the owner's other conversations do not exist; from
+    // a turn about the owner's own day, the groups' do not.
+    if (!thread || (scope && thread.id !== scope.threadId) || (ownOnly && groupIdOfAddress(thread.address))) {
+      throw new Error("Conversation not found");
+    }
     const limit = Math.min(Math.max(Number(input.limit) || 20, 1), 40);
     const rows = db.prepare(`
       SELECT id,role,content,created_at,metadata_json FROM channel_messages
@@ -731,11 +737,12 @@ export async function executeAgentTool(
     if (!threadId) throw new Error("There is no conversation to read here; search the message index instead");
     if (scope && threadId !== scope.threadId) throw new Error("Conversation not found");
     const thread = db.prepare(`
-      SELECT t.id,t.channel,${GROUP_NAME_SQL} group_name FROM channel_threads t
+      SELECT t.id,t.channel,t.address,${GROUP_NAME_SQL} group_name FROM channel_threads t
       LEFT JOIN life_areas la ON la.thread_id=t.id
       WHERE t.id=? AND t.user_id=?
-    `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; group_name: string | null } | undefined;
-    if (!thread) throw new Error("Conversation not found");
+    `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; address: string; group_name: string | null } | undefined;
+    // A turn that reports on the owner's own day does not read a group's chat.
+    if (!thread || (ownOnly && groupIdOfAddress(thread.address))) throw new Error("Conversation not found");
     const timezone = userTimezone(db);
     const dateOnly = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
     // A day the user named runs midnight to midnight on their own clock.
@@ -752,6 +759,10 @@ export async function executeAgentTool(
       // "Until now" includes the message being answered, saved a moment ago.
       : dateOnly(fromValue) ? dayStart(nextDay(fromValue)) : new Date(Date.now() + 1000).toISOString();
     if (to <= from) throw new Error("The end of the range has to come after its start");
+    const wanted = typeof input.speaker === "string" ? input.speaker.trim().toLowerCase() : null;
+    const limit = Number(input.limit) || 50;
+    // Speakers are matched on their label, which is worked out per row, so a
+    // filtered read scans further before it is cut; either way it is bounded.
     const rows = db.prepare(`
       SELECT role,content,created_at,metadata_json FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
@@ -759,19 +770,17 @@ export async function executeAgentTool(
         AND NOT (role='user' AND COALESCE(json_extract(metadata_json,'$.internal'),0)=1)
         AND json_extract(metadata_json,'$.copyOf') IS NULL
         AND json_extract(metadata_json,'$.reactionText') IS NULL
-      ORDER BY created_at,rowid
-    `).all(thread.id, from, to) as Array<{ role: "user" | "assistant"; content: string; created_at: string; metadata_json: string }>;
+      ORDER BY created_at,rowid LIMIT ?
+    `).all(thread.id, from, to, wanted ? 5000 : limit + 1) as Array<{ role: "user" | "assistant"; content: string; created_at: string; metadata_json: string }>;
     // Who said it, by name or redacted number; the assistant's own lines are "you".
     const labelled = rows.map(row => ({
       ...row,
       speaker: row.role === "assistant" ? "you" : speakerLabel(row.metadata_json) ?? OWNER_SPEAKER_NAME,
     }));
-    const wanted = typeof input.speaker === "string" ? input.speaker.trim().toLowerCase() : null;
     const matching = wanted
       ? labelled.filter(row => row.speaker.toLowerCase() === wanted
         || (row.role === "assistant" && ["assistant", ASSISTANT_NAME.toLowerCase()].includes(wanted)))
       : labelled;
-    const limit = Number(input.limit) || 50;
     const MAX_CONTENT = 1000;
     return {
       thread_id: thread.id,
@@ -785,7 +794,8 @@ export async function executeAgentTool(
         content: row.content.length > MAX_CONTENT ? `${row.content.slice(0, MAX_CONTENT)}…` : row.content,
       })),
       has_more: matching.length > limit,
-      ...(matching.length > limit ? { next_from: matching[limit].created_at } : {}),
+      // The next page is the same range from the next message on: pass both back.
+      ...(matching.length > limit ? { next_from: matching[limit].created_at, next_to: to } : {}),
     };
   }
   if (name === "list_todos") {

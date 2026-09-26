@@ -11,7 +11,7 @@
  */
 import { getMemory, id, now, queueIndexJob, USER_ID } from "./db.ts";
 import { getNotificationPreferences, getSendbluePublicConfig, upsertTrustedContact } from "./integrations.ts";
-import { OWNER_SPEAKER_NAME, redactedNumber } from "./group-thread.ts";
+import { ASSISTANT_NAME, OWNER_SPEAKER_NAME, redactedNumber } from "./group-thread.ts";
 import type { Db } from "./types.ts";
 
 export type GroupMemberRow = {
@@ -137,6 +137,31 @@ function resolveMember(db: Db, threadId: string, who: string, speakerPhone: stri
   return { member, currentName: member.is_owner ? member.name : knownName(member, contacts) };
 }
 
+/**
+ * A name or relationship someone typed, made safe to show the agent as a
+ * label: control characters and line breaks gone, and none of the brackets or
+ * quotes the transcript uses to frame who said what, so "Bob] [the owner"
+ * cannot forge a second speaker.
+ */
+function cleanPersonText(raw: string, max: number): string {
+  return raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/[[\]{}<>«»“”"`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max)
+    .trim();
+}
+
+/** Labels the app itself gives out, which nobody in a chat may take as their name. */
+const RESERVED_NAMES = new Set([OWNER_SPEAKER_NAME, "owner", "you", "me", "speaker", "assistant", ASSISTANT_NAME.toLowerCase()]);
+
+/** Whether `name` is one of the app's own labels, or shaped like a number or a redacted number. */
+function reservedName(name: string): boolean {
+  return RESERVED_NAMES.has(name.toLowerCase()) || /^[+\d\s().…-]+$/.test(name);
+}
+
 /** The group's roster memory, created or rewritten to match the member rows. */
 function syncRosterMemory(db: Db, threadId: string, lifeAreaId: string, groupName: string): string {
   const content = [`Who's in the ${groupName} group chat:`, ...rosterEntries(db, threadId).map(entry => `- ${entry}`)].join("\n");
@@ -165,11 +190,31 @@ function syncRosterMemory(db: Db, threadId: string, lifeAreaId: string, groupNam
 }
 
 /**
+ * Rewrites a group's roster memory after its area was renamed, so its title
+ * and heading carry the new name. Nothing is created for a group that has
+ * never had anyone named.
+ */
+export function refreshRosterMemory(db: Db, lifeAreaId: string): void {
+  const area = db.prepare("SELECT name,thread_id FROM life_areas WHERE id=? AND user_id=?")
+    .get(lifeAreaId, USER_ID) as { name: string; thread_id: string | null } | undefined;
+  if (!area?.thread_id) return;
+  const exists = db.prepare("SELECT 1 found FROM memories WHERE user_id=? AND life_area_id=? AND tags_json LIKE ?")
+    .get(USER_ID, lifeAreaId, `%"${ROSTER_TAG}"%`);
+  if (exists) syncRosterMemory(db, area.thread_id, lifeAreaId, area.name);
+}
+
+/**
  * Records who someone in the group is. The owner may name anyone; anyone else
  * may only say who they are themselves, and only the owner renames someone who
- * already has a name. A member other than the owner becomes a trusted contact
- * under that name, and every message they have written in this thread is
- * relabelled and queued for the index so recall reads them by name.
+ * already has a name or changes how they are related to the others. A member
+ * other than the owner becomes a trusted contact under that name, and every
+ * message they have written in this thread is relabelled and queued for the
+ * index so recall reads them by name.
+ *
+ * A name is a label every later turn reads the speaker by, so the app's own
+ * labels ("the owner", "you", the assistant's name, a number) and a name
+ * someone else here already goes by are refused: taken, they would let one
+ * person's messages read as another's.
  */
 export function rememberGroupMember(
   db: Db,
@@ -180,36 +225,44 @@ export function rememberGroupMember(
   if (!turn.speakerIsOwner && member.phone !== turn.speakerPhone) {
     throw new Error("Only the owner can say who someone else is; ask that person to say it themselves");
   }
-  if (!turn.speakerIsOwner && currentName && currentName.toLowerCase() !== input.name.toLowerCase()) {
+  const name = cleanPersonText(input.name, 60);
+  if (!name) throw new Error("That name is empty once cleaned up; ask what they want to be called");
+  if (reservedName(name)) throw new Error(`"${name}" is a label the app uses itself; ask for the name they go by`);
+  if (!turn.speakerIsOwner && currentName && currentName.toLowerCase() !== name.toLowerCase()) {
     throw new Error(`This person is already saved as ${currentName}; only the owner can rename them`);
   }
+  const contacts = getNotificationPreferences(db).trustedContacts;
+  const taken = groupMembers(db, turn.threadId).some(other =>
+    other.phone !== member.phone && knownName(other, contacts)?.toLowerCase() === name.toLowerCase())
+    || (!member.is_owner && contacts.some(contact => contact.phone !== member.phone && contact.name.toLowerCase() === name.toLowerCase()));
+  if (taken) throw new Error(`Someone else already goes by ${name}; ask for a name that tells them apart`);
+  const offered = input.relationship ? cleanPersonText(input.relationship, 120) || null : null;
+  // Only the owner rewrites how someone is related to the others; a person may
+  // say it of themselves while nothing is on record.
+  const relationship = turn.speakerIsOwner ? offered ?? member.relationship : member.relationship ?? offered;
   const area = db.prepare("SELECT name FROM life_areas WHERE id=? AND user_id=?").get(turn.lifeAreaId, USER_ID) as { name: string } | undefined;
   return db.transaction(() => {
     const timestamp = now();
-    db.prepare(`
-      UPDATE group_members SET name=?,relationship=COALESCE(?,relationship),updated_at=? WHERE thread_id=? AND phone=?
-    `).run(input.name, input.relationship ?? null, timestamp, turn.threadId, member.phone);
+    db.prepare("UPDATE group_members SET name=?,relationship=?,updated_at=? WHERE thread_id=? AND phone=?")
+      .run(name, relationship, timestamp, turn.threadId, member.phone);
     let trusted = false;
     if (!member.is_owner) {
-      upsertTrustedContact(db, member.phone, input.name);
+      upsertTrustedContact(db, member.phone, name);
       trusted = true;
-      const messages = db.prepare(`
-        SELECT id FROM channel_messages
-        WHERE thread_id=? AND role='user' AND json_extract(metadata_json,'$.speaker')=?
-      `).all(turn.threadId, member.phone) as Array<{ id: string }>;
-      const relabel = db.prepare(`
-        UPDATE channel_messages SET metadata_json=json_set(COALESCE(NULLIF(metadata_json,''),'{}'),'$.speakerName',?),updated_at=?
-        WHERE id=?
-      `);
-      for (const message of messages) {
-        relabel.run(input.name, timestamp, message.id);
-        queueIndexJob(db, "channel_message", message.id);
+      // Only a new name has anything to relabel; saying it again changes no message.
+      if (currentName !== name) {
+        const relabelled = db.prepare(`
+          UPDATE channel_messages SET metadata_json=json_set(COALESCE(NULLIF(metadata_json,''),'{}'),'$.speakerName',?),updated_at=?
+          WHERE thread_id=? AND role='user' AND json_extract(metadata_json,'$.speaker')=?
+          RETURNING id
+        `).all(name, timestamp, turn.threadId, member.phone) as Array<{ id: string }>;
+        for (const message of relabelled) queueIndexJob(db, "channel_message", message.id);
       }
     }
     const memoryId = syncRosterMemory(db, turn.threadId, turn.lifeAreaId, area?.name ?? "group");
     return {
-      name: input.name,
-      relationship: input.relationship ?? member.relationship,
+      name,
+      relationship,
       is_owner: Boolean(member.is_owner),
       trusted_contact: trusted,
       roster: rosterEntries(db, turn.threadId),

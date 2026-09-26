@@ -25,6 +25,7 @@
           "extra_reminders",
           "recurrence",
           "is_recurring",
+          "assistant_says",
           "last_completed_at"
         ],
         "attributesToHighlight": [],
@@ -68,6 +69,7 @@
             "extra_reminders",
             "recurrence",
             "is_recurring",
+            "assistant_says",
             "last_completed_at"
           ],
           "constraint": {
@@ -88,6 +90,7 @@
               "extra_reminders",
               "recurrence",
               "is_recurring",
+              "assistant_says",
               "last_completed_at"
             ]
           }

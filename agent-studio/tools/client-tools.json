@@ -1309,7 +1309,7 @@
             "type": ["integer", "null"],
             "minimum": 1,
             "maximum": 100,
-            "description": "Most messages to return; null for 50. Page with next_from when has_more is true"
+            "description": "Most messages to return; null for 50. When has_more is true, call again with from=next_from and to=next_to"
           }
         },
         "required": ["thread_id", "from", "to", "speaker", "limit"],

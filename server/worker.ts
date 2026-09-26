@@ -4,7 +4,8 @@ import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
-  archiveReactionText, failAgentTurn, liftProgressMark, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent,
+  archiveReactionText, failAgentTurn, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
+  recordOutboundProviderMessage, runSmsAgent,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
@@ -439,7 +440,12 @@ async function composeSaidMessage(
       userMessageMetadata: { kind: "assistant_say", todoId: reminder.todo_id, ...(groupId ? { groupId } : {}) },
       assistantMetadata: { kind: "assistant_say", reminderId: reminder.id, todoId: reminder.todo_id },
     });
-    if (!turn.text) throw new Error("The message came back empty");
+    // A turn that ends without words hands back the runner's own fallback line,
+    // which is not something to send a room on anyone's birthday.
+    if (!turn.text || turn.text === NO_TEXT_FALLBACK) {
+      failAgentTurn(db, turn);
+      throw new Error("The message came back empty");
+    }
     return { text: turn.text, turn };
   } catch (error) {
     if (reminder.attempts < SAID_COMPOSE_ATTEMPTS) throw error;
@@ -449,13 +455,21 @@ async function composeSaidMessage(
 }
 
 /**
- * A said todo has done its job once the message is out: the occurrence is
- * logged as done, so it is not left overdue on the board, and a repeating one
- * comes back on its own for the next day.
+ * A said todo has done its job once its last message is out: the occurrence
+ * is logged as done, so it is not left overdue on the board, and a repeating
+ * one comes back on its own for the next day. While another of its texts is
+ * still to come ("say it at 8 and again at noon") it stays open, since
+ * closing it would cancel that text.
  */
-function completeSaidOccurrence(db: Db, search: SearchWriter, todoId: string): void {
+function completeSaidOccurrence(db: Db, search: SearchWriter, todoId: string, reminderId: string): void {
   const current = getTodo(db, todoId);
   if (!current || current.status === "done" || current.status === "cancelled") return;
+  // A sibling already due has been said by this send; only a later one is still to come.
+  const stillToSay = db.prepare(`
+    SELECT 1 found FROM reminders
+    WHERE todo_id=? AND id<>? AND kind<>'due' AND status IN ('pending','failed') AND scheduled_for>?
+  `).get(todoId, reminderId, now());
+  if (stillToSay) return;
   const timestamp = now();
   db.transaction(() => {
     db.prepare("UPDATE todos SET status='done',completed_at=?,updated_at=? WHERE id=? AND user_id=?")
@@ -477,6 +491,46 @@ async function deliverReminder(
   runAgent: typeof runSmsAgent = runSmsAgent,
   timezone = "UTC",
 ): Promise<void> {
+  const release = (error: unknown) => {
+    const delayMinutes = Math.min(60, 2 ** Math.min(reminder.attempts + 1, 6));
+    db.prepare(`
+      UPDATE reminders SET status='failed',claimed_at=NULL,available_at=?,last_error=?,updated_at=?
+      WHERE id=?
+    `).run(
+      new Date(Date.now() + delayMinutes * 60_000).toISOString(),
+      error instanceof Error ? error.message.slice(0, 1000) : "SMS delivery failed",
+      now(),
+      reminder.id,
+    );
+  };
+  /*
+   * A todo asked for in a group chat is reminded about in that chat, so
+   * everyone who heard the ask hears the reminder; anything else goes to the
+   * recipient's own number. The group id is read off the thread address so
+   * the reminder needs no column of its own. Only iMessage has groups: with
+   * Sendblue disconnected the reminder would fail on every retry, so it goes
+   * to the recipient instead of nowhere.
+   */
+  const groupId = reminder.reply_address ? groupIdOfAddress(reminder.reply_address) : undefined;
+  const groupBound = Boolean(groupId) && isSmsProviderConnected(db, "sendblue");
+  const target = groupBound ? (reminder.reply_address as string) : recipient;
+  /*
+   * A said todo is written before the send is claimed. Composing is a whole
+   * agent turn, and a claim held across it would turn a restart mid-turn into
+   * "outcome unknown, not resent" for a message nobody wrote. It is also
+   * re-read first: a sibling reminder delivered earlier in the same batch may
+   * have closed the todo and taken this row with it.
+   */
+  let said: Awaited<ReturnType<typeof composeSaidMessage>> | null = null;
+  if (reminder.todo_assistant_says) {
+    if (!db.prepare("SELECT 1 found FROM reminders WHERE id=? AND status IN ('pending','failed')").get(reminder.id)) return;
+    try {
+      said = await composeSaidMessage(db, search, reminder, target, groupBound ? groupId : undefined, timezone, runAgent);
+    } catch (error) {
+      release(error);
+      return;
+    }
+  }
   /*
    * The intent to send is recorded before the provider call, so a crash between
    * Twilio accepting the message and the reminder being marked sent cannot
@@ -494,6 +548,7 @@ async function deliverReminder(
     reminder.scheduled_for, timestamp, timestamp,
   );
   if (!claimed.changes) {
+    if (said?.turn) failAgentTurn(db, said.turn);
     db.prepare(`
       UPDATE reminders SET status='sent',claimed_at=NULL,
         last_error='Delivery outcome unknown; not resent',updated_at=? WHERE id=?
@@ -501,20 +556,6 @@ async function deliverReminder(
     return;
   }
   try {
-    /*
-     * A todo asked for in a group chat is reminded about in that chat, so
-     * everyone who heard the ask hears the reminder; anything else goes to the
-     * recipient's own number. The group id is read off the thread address so
-     * the reminder needs no column of its own. Only iMessage has groups: with
-     * Sendblue disconnected the reminder would fail on every retry, so it goes
-     * to the recipient instead of nowhere.
-     */
-    const groupId = reminder.reply_address ? groupIdOfAddress(reminder.reply_address) : undefined;
-    const groupBound = Boolean(groupId) && isSmsProviderConnected(db, "sendblue");
-    const target = groupBound ? (reminder.reply_address as string) : recipient;
-    const said = reminder.todo_assistant_says
-      ? await composeSaidMessage(db, search, reminder, target, groupBound ? groupId : undefined, timezone, runAgent)
-      : null;
     let message: Awaited<ReturnType<typeof send>>;
     if (said?.turn) {
       try {
@@ -542,19 +583,18 @@ async function deliverReminder(
     db.prepare(`
       UPDATE scheduled_dispatches SET status='sent',provider_message_id=?,updated_at=? WHERE id=?
     `).run(message.sid, now(), dispatchId);
-    if (reminder.todo_assistant_says) completeSaidOccurrence(db, search, reminder.todo_id);
   } catch (error) {
-    const delayMinutes = Math.min(60, 2 ** Math.min(reminder.attempts + 1, 6));
-    db.prepare(`
-      UPDATE reminders SET status='failed',claimed_at=NULL,available_at=?,last_error=?,updated_at=?
-      WHERE id=?
-    `).run(
-      new Date(Date.now() + delayMinutes * 60_000).toISOString(),
-      error instanceof Error ? error.message.slice(0, 1000) : "SMS delivery failed",
-      now(),
-      reminder.id,
-    );
+    release(error);
     db.prepare("DELETE FROM scheduled_dispatches WHERE id=?").run(dispatchId);
+    return;
+  }
+  // Delivered and on record; a failure here must not reopen the send.
+  if (said) {
+    try {
+      completeSaidOccurrence(db, search, reminder.todo_id, reminder.id);
+    } catch (error) {
+      console.error(`Logging said todo ${reminder.todo_id} as done failed`, error);
+    }
   }
 }
 

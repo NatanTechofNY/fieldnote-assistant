@@ -44,7 +44,7 @@ export function digestTodoLines(
   const local = (value: string) => localParts(new Date(value), timezone);
   const todos = (db.prepare(`
     SELECT id,title,status,priority,due_at FROM todos
-    WHERE user_id=? AND ${OWN_AREA_CLAUSE("todos")} ORDER BY due_at IS NULL,due_at,title
+    WHERE user_id=? AND ${OWN_AREA_CLAUSE("todos")} AND assistant_says=0 ORDER BY due_at IS NULL,due_at,title
   `).all(USER_ID) as DigestTodoRow[]).filter(todo => OPEN_STATUSES.has(todo.status));
   /*
    * `due` rows mirror `due_at` rather than representing a notification, so

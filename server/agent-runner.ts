@@ -627,16 +627,24 @@ function aimedAtAssistant(
     if (parent) return true;
   }
   if (!speakerPhone) return false;
-  const [previous, answered] = db.prepare(`
-    SELECT role,created_at,json_extract(metadata_json,'$.speaker') speaker FROM channel_messages
+  // The last few rows before this one, newest first, read off the thread's
+  // (thread_id, created_at) index rather than a sort of the whole thread.
+  const earlier = db.prepare(`
+    SELECT role,created_at,json_extract(metadata_json,'$.speaker') speaker,
+      COALESCE(json_extract(metadata_json,'$.internal'),0) internal
+    FROM channel_messages
     WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
       AND json_extract(metadata_json,'$.reactionText') IS NULL
-      AND rowid<(SELECT rowid FROM channel_messages WHERE id=?)
-    ORDER BY rowid DESC LIMIT 2
-  `).all(threadId, inboundId) as Array<{ role: string; created_at: string; speaker: string | null }>;
-  return previous?.role === "assistant"
-    && Date.now() - Date.parse(previous.created_at) < FOLLOW_UP_WINDOW_MS
-    && answered?.role === "user" && answered.speaker === speakerPhone;
+      AND created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?
+    ORDER BY created_at DESC,rowid DESC LIMIT 6
+  `).all(threadId, inboundId, inboundId) as Array<{ role: string; created_at: string; speaker: string | null; internal: number }>;
+  const latest = earlier[0];
+  if (latest?.role !== "assistant" || Date.now() - Date.parse(latest.created_at) >= FOLLOW_UP_WINDOW_MS) return false;
+  // Past the assistant's reply, which may have been two bubbles, to what it answered.
+  const answered = earlier.find(row => row.role === "user");
+  // A scheduled check-in asked the room something; whoever answers it is talking to the assistant.
+  if (answered?.internal) return true;
+  return answered?.speaker === speakerPhone;
 }
 
 export function recordOutboundChannelMessage(
@@ -1051,7 +1059,7 @@ export async function runChannelAgent(
    * Switching marks is one send: the new tapback replaces the old one on the
    * device, so only the archive has to be told the old entry is gone.
    */
-  const setMark = async (reaction: string | undefined): Promise<void> => {
+  const applyMark = async (reaction: string | undefined): Promise<void> => {
     if (!markHandle || markShown === reaction) return;
     if (reaction && agentReacted()) return;
     try {
@@ -1067,6 +1075,14 @@ export async function runChannelAgent(
     } catch (error) {
       console.warn("Runtime tapback failed:", error instanceof Error ? error.message : error);
     }
+  };
+  // Mark changes go out one at a time and in order, so the working mark can be
+  // sent without holding up the first completion and still land before
+  // whatever replaces it. `applyMark` never rejects.
+  let markQueue: Promise<void> = Promise.resolve();
+  const setMark = (reaction: string | undefined): Promise<void> => {
+    markQueue = markQueue.then(() => applyMark(reaction));
+    return markQueue;
   };
   // What the turn has done so far, for the closing mark. A write an earlier
   // attempt landed counts: the retry that answers is confirming that write.
@@ -1087,7 +1103,7 @@ export async function runChannelAgent(
   // replaces a more specific one.
   if (group && !options.internal && !markShown && markHandle
     && aimedAtAssistant(db, thread.id, inboundId, body, options.inbound, speaker?.speaker)) {
-    await setMark(WORKING_MARK);
+    void setMark(WORKING_MARK);
   }
   const deadline = Date.now() + TURN_BUDGET_MS;
   try {

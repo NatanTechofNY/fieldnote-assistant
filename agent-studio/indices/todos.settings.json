@@ -10,7 +10,8 @@
     "category_id",
     "life_area_id",
     "parent_id",
-    "is_recurring"
+    "is_recurring",
+    "filterOnly(assistant_says)"
   ],
   "customRanking": [
     "desc(updated_at)"
@@ -33,6 +34,7 @@
     "extra_reminders",
     "recurrence",
     "is_recurring",
+    "assistant_says",
     "last_completed_at"
   ],
   "attributesToHighlight": [],
