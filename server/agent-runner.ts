@@ -937,7 +937,7 @@ export async function runChannelAgent(
     speaker?: string; speakerName?: string; speakerIsOwner?: boolean; groupName?: string;
   } | undefined;
   const group = options.inbound?.groupId ? groupTurnSetup(db, thread.id, inboundId, speaker?.groupName) : undefined;
-  if (group) recordGroupParticipants(db, thread.id, [...options.inbound?.participants ?? [], speaker?.speaker]);
+  if (group) recordGroupParticipants(db, thread.id, group.area.id, options.inbound?.participants, speaker?.speaker);
   const context: ToolTurnContext = {
     channel,
     address,

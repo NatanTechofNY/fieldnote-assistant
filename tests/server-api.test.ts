@@ -6971,6 +6971,14 @@ describe("Sendblue provider", () => {
     await runSmsAgent(db, search, address, "morning", "SB_morning_n", rosterTurn(next.fetcher, WIFE, "Natella"));
     const nextTurn = ((next.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
     assert.equal(nextTurn.groupMembers, "the owner; Natella: the owner's sister; Halo: Natella's boyfriend");
+
+    // Halo leaves: the next message's participant list no longer has him.
+    const after = agentCallingMany([], "ok");
+    const leftOptions = rosterTurn(after.fetcher, WIFE, "Natella");
+    await runSmsAgent(db, search, address, "he left lol", "SB_he_left", { ...leftOptions, inbound: { ...leftOptions.inbound, participants: [RECIPIENT, WIFE, LINE] } });
+    const afterTurn = ((after.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+    assert.equal(afterTurn.groupMembers, "the owner; Natella: the owner's sister", "someone who left is not described as in the room");
+    assert.doesNotMatch(roster()[0].content, /Halo/, "and the roster memory follows");
   });
 
   it("files a tapback that arrived as text without answering it", async () => {
@@ -7210,11 +7218,21 @@ describe("Sendblue provider", () => {
     const second = await executeAgentTool(db, search, "read_conversation", {
       thread_id: thread.id, from: first.next_from, to: first.next_to, limit: 4,
     }, owner) as { messages: Array<{ content: string }>; has_more: boolean };
-    // next_from is the first message not yet returned, inclusive; rows saved in
-    // the same millisecond as it may repeat, which the test's burst does.
-    assert.deepEqual(second.messages.slice(-2).map(message => message.content), ["three", "re three"]);
-    assert.ok(!second.messages.some(message => message.content === "one"), "the next page picks up where the first stopped");
+    assert.deepEqual(second.messages.map(message => message.content), ["three", "re three"], "exactly where the first page stopped, even when rows share a millisecond");
     assert.equal(second.has_more, false);
+    // Six rows saved in one millisecond still page one at a time without repeating.
+    db.prepare("UPDATE channel_messages SET created_at=? WHERE thread_id=?").run(new Date().toISOString(), thread.id);
+    const seen: string[] = [];
+    let page = { from, to: null as string | null };
+    for (let guard = 0; guard < 10; guard += 1) {
+      const result = await executeAgentTool(db, search, "read_conversation", { thread_id: thread.id, ...page, limit: 1 }, owner) as {
+        messages: Array<{ content: string }>; has_more: boolean; next_from?: string; next_to?: string;
+      };
+      seen.push(...result.messages.map(message => message.content));
+      if (!result.has_more) break;
+      page = { from: result.next_from!, to: result.next_to! };
+    }
+    assert.deepEqual(seen, ["one", "re one", "two", "re two", "three", "re three"]);
     await assert.rejects(executeAgentTool(db, search, "read_conversation", { thread_id: thread.id, from: "2026-02-31" }, owner), /YYYY-MM-DD/);
   });
 

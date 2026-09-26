@@ -751,7 +751,11 @@ export async function executeAgentTool(
       const [year, month, day] = date.split("-").map(Number);
       return new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
     };
-    const fromValue = input.from as string;
+    // A `next_from` cursor is the next row's instant and rowid, so a page
+    // resumes exactly there even when several rows share a millisecond.
+    const cursor = /^(.+)#(\d+)$/.exec(input.from as string);
+    const fromValue = cursor ? cursor[1] : input.from as string;
+    const afterRowid = cursor ? Number(cursor[2]) : 0;
     const toValue = (input.to as string | null | undefined) ?? null;
     const from = dateOnly(fromValue) ? dayStart(fromValue) : new Date(fromValue).toISOString();
     const to = toValue
@@ -764,14 +768,16 @@ export async function executeAgentTool(
     // Speakers are matched on their label, which is worked out per row, so a
     // filtered read scans further before it is cut; either way it is bounded.
     const rows = db.prepare(`
-      SELECT role,content,created_at,metadata_json FROM channel_messages
+      SELECT role,content,created_at,metadata_json,rowid FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
-        AND created_at>=? AND created_at<?
+        AND (created_at>? OR (created_at=? AND rowid>=?)) AND created_at<?
         AND NOT (role='user' AND COALESCE(json_extract(metadata_json,'$.internal'),0)=1)
         AND json_extract(metadata_json,'$.copyOf') IS NULL
         AND json_extract(metadata_json,'$.reactionText') IS NULL
       ORDER BY created_at,rowid LIMIT ?
-    `).all(thread.id, from, to, wanted ? 5000 : limit + 1) as Array<{ role: "user" | "assistant"; content: string; created_at: string; metadata_json: string }>;
+    `).all(thread.id, from, from, afterRowid, to, wanted ? 5000 : limit + 1) as Array<{
+      role: "user" | "assistant"; content: string; created_at: string; metadata_json: string; rowid: number;
+    }>;
     // Who said it, by name or redacted number; the assistant's own lines are "you".
     const labelled = rows.map(row => ({
       ...row,
@@ -795,7 +801,7 @@ export async function executeAgentTool(
       })),
       has_more: matching.length > limit,
       // The next page is the same range from the next message on: pass both back.
-      ...(matching.length > limit ? { next_from: matching[limit].created_at, next_to: to } : {}),
+      ...(matching.length > limit ? { next_from: `${matching[limit].created_at}#${matching[limit].rowid}`, next_to: to } : {}),
     };
   }
   if (name === "list_todos") {

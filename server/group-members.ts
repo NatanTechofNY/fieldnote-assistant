@@ -33,21 +33,39 @@ const E164 = /^\+[1-9]\d{7,14}$/;
  * Files every number in the conversation as a member of the group's thread.
  * The Sendblue line itself is in the list and is left out; the recipient is
  * marked as the owner. Existing rows keep their names.
+ *
+ * `participants` is the provider's full list when it sent one, and then it is
+ * the truth: someone no longer on it has left the group, and is dropped so the
+ * room is not described with them still in it. `speaker` is always kept, as
+ * whoever wrote the message is in the room whatever the list said.
  */
-export function recordGroupParticipants(db: Db, threadId: string, phones: Array<string | undefined>): void {
+export function recordGroupParticipants(
+  db: Db,
+  threadId: string,
+  lifeAreaId: string,
+  participants: string[] | undefined,
+  speaker: string | undefined,
+): void {
   const ownerPhone = getNotificationPreferences(db).recipientPhone;
   const linePhone = getSendbluePublicConfig(db).fromPhone;
   const timestamp = now();
+  const present = [...new Set([...participants ?? [], speaker])]
+    .filter((phone): phone is string => Boolean(phone) && E164.test(phone as string) && phone !== linePhone);
   const upsert = db.prepare(`
     INSERT INTO group_members(thread_id,phone,name,relationship,is_owner,created_at,updated_at)
     VALUES(?,?,NULL,NULL,?,?,?)
     ON CONFLICT(thread_id,phone) DO UPDATE SET is_owner=excluded.is_owner,updated_at=excluded.updated_at
     WHERE group_members.is_owner<>excluded.is_owner
   `);
-  for (const phone of new Set(phones)) {
-    if (!phone || !E164.test(phone) || phone === linePhone) continue;
-    upsert.run(threadId, phone, phone === ownerPhone ? 1 : 0, timestamp, timestamp);
-  }
+  db.transaction(() => {
+    for (const phone of present) upsert.run(threadId, phone, phone === ownerPhone ? 1 : 0, timestamp, timestamp);
+    if (!participants?.length || !present.length) return;
+    const left = db.prepare(`
+      DELETE FROM group_members WHERE thread_id=? AND phone NOT IN (${present.map(() => "?").join(",")}) RETURNING name
+    `).all(threadId, ...present) as Array<{ name: string | null }>;
+    // The roster memory says who is here, so a departure rewrites it.
+    if (left.length) refreshRosterMemory(db, lifeAreaId);
+  })();
 }
 
 export function groupMembers(db: Db, threadId: string): GroupMemberRow[] {

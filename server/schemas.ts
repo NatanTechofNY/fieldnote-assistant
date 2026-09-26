@@ -396,6 +396,12 @@ const dateOrInstant = z.string().trim().refine(
   "Use a YYYY-MM-DD date or an RFC 3339 date-time with an offset",
 );
 
+/** A range start: a date, an instant, or a `next_from` cursor (`<instant>#<rowid>`) handed back by the tool. */
+const rangeStart = z.string().trim().refine(
+  value => calendarDate(value) || iso.safeParse(value).success || /^(.+)#\d+$/.test(value) && iso.safeParse(value.replace(/#\d+$/, "")).success,
+  "Use a YYYY-MM-DD date, an RFC 3339 date-time with an offset, or next_from as returned",
+);
+
 const memoryToolFields = {
   kind: memoryKind.optional(),
   title: z.string().trim().max(300).nullable().optional(),
@@ -579,7 +585,7 @@ export const toolInput = {
   }).strict(),
   read_conversation: z.object({
     thread_id: z.string().min(1).max(100).nullable().optional(),
-    from: dateOrInstant,
+    from: rangeStart,
     to: dateOrInstant.nullable().optional(),
     speaker: z.string().trim().min(1).max(60).nullable().optional(),
     limit: z.coerce.number().int().min(1).max(100).nullable().optional(),
