@@ -1235,6 +1235,9 @@ export async function runChannelAgent(
       db.prepare("UPDATE channel_messages SET status='failed',updated_at=? WHERE id=?")
         .run(now(), inboundId);
     }
+    // A working mark still in flight lands before the failure is reported, so
+    // the archive shows it and a give-up can take it down.
+    await markQueue;
     throw error;
   }
 }

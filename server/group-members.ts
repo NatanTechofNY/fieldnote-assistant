@@ -20,6 +20,7 @@ export type GroupMemberRow = {
   name: string | null;
   relationship: string | null;
   is_owner: 0 | 1;
+  left_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -35,9 +36,11 @@ const E164 = /^\+[1-9]\d{7,14}$/;
  * marked as the owner. Existing rows keep their names.
  *
  * `participants` is the provider's full list when it sent one, and then it is
- * the truth: someone no longer on it has left the group, and is dropped so the
- * room is not described with them still in it. `speaker` is always kept, as
- * whoever wrote the message is in the room whatever the list said.
+ * the truth: someone no longer on it has left the group, and is marked so the
+ * room is not described with them still in it. The row is kept, name and
+ * relationship included, so someone who rejoins is known again. `speaker` is
+ * always present, as whoever wrote the message is in the room whatever the
+ * list said.
  */
 export function recordGroupParticipants(
   db: Db,
@@ -54,22 +57,29 @@ export function recordGroupParticipants(
   const upsert = db.prepare(`
     INSERT INTO group_members(thread_id,phone,name,relationship,is_owner,created_at,updated_at)
     VALUES(?,?,NULL,NULL,?,?,?)
-    ON CONFLICT(thread_id,phone) DO UPDATE SET is_owner=excluded.is_owner,updated_at=excluded.updated_at
-    WHERE group_members.is_owner<>excluded.is_owner
+    ON CONFLICT(thread_id,phone) DO UPDATE SET is_owner=excluded.is_owner,left_at=NULL,updated_at=excluded.updated_at
+    WHERE group_members.is_owner<>excluded.is_owner OR group_members.left_at IS NOT NULL
+    RETURNING phone
   `);
   db.transaction(() => {
-    for (const phone of present) upsert.run(threadId, phone, phone === ownerPhone ? 1 : 0, timestamp, timestamp);
-    if (!participants?.length || !present.length) return;
-    const left = db.prepare(`
-      DELETE FROM group_members WHERE thread_id=? AND phone NOT IN (${present.map(() => "?").join(",")}) RETURNING name
-    `).all(threadId, ...present) as Array<{ name: string | null }>;
-    // The roster memory says who is here, so a departure rewrites it.
-    if (left.length) refreshRosterMemory(db, lifeAreaId);
+    // Only a row that came back or changed returns; a quiet no-op returns nothing.
+    let changed = present.filter(phone => upsert.get(threadId, phone, phone === ownerPhone ? 1 : 0, timestamp, timestamp)).length > 0;
+    if (participants?.length && present.length) {
+      const left = db.prepare(`
+        UPDATE group_members SET left_at=?,updated_at=?
+        WHERE thread_id=? AND left_at IS NULL AND phone NOT IN (${present.map(() => "?").join(",")})
+        RETURNING phone
+      `).all(timestamp, timestamp, threadId, ...present);
+      changed ||= left.length > 0;
+    }
+    // The roster memory says who is here, so a departure or a return rewrites it.
+    if (changed) refreshRosterMemory(db, lifeAreaId);
   })();
 }
 
+/** Who is in the group now; someone who left is kept on file but not listed. */
 export function groupMembers(db: Db, threadId: string): GroupMemberRow[] {
-  return db.prepare("SELECT * FROM group_members WHERE thread_id=? ORDER BY is_owner DESC,rowid")
+  return db.prepare("SELECT * FROM group_members WHERE thread_id=? AND left_at IS NULL ORDER BY is_owner DESC,rowid")
     .all(threadId) as GroupMemberRow[];
 }
 

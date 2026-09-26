@@ -6979,6 +6979,13 @@ describe("Sendblue provider", () => {
     const afterTurn = ((after.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
     assert.equal(afterTurn.groupMembers, "the owner; Natella: the owner's sister", "someone who left is not described as in the room");
     assert.doesNotMatch(roster()[0].content, /Halo/, "and the roster memory follows");
+
+    // He is added back: who he is comes back with him.
+    const back = agentCallingMany([], "welcome back");
+    await runSmsAgent(db, search, address, "im back", "SB_im_back", rosterTurn(back.fetcher, HALO, "Halo"));
+    const backTurn = ((back.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+    assert.match(String(backTurn.groupMembers), /Halo: Natella's boyfriend/, "the relationship the owner recorded survives leaving and rejoining");
+    assert.match(roster()[0].content, /- Halo: Natella's boyfriend/);
   });
 
   it("files a tapback that arrived as text without answering it", async () => {
@@ -7001,6 +7008,9 @@ describe("Sendblue provider", () => {
       FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id WHERE t.address=? ORDER BY m.rowid
     `).all(`group:${GROUP}`) as Array<{ content: string; reaction: number; speaker: string }>;
     assert.deepEqual(rows.map(row => [row.reaction, row.speaker]), [[1, "Sarah"], [1, "Sarah"]], "archived, marked, and still attributed");
+    const thread = db.prepare("SELECT id FROM channel_threads WHERE address=?").get(`group:${GROUP}`) as { id: string };
+    const context = await executeAgentTool(db, fakeSearch(db), "get_conversation_context", { thread_id: thread.id }) as { messages: unknown[] };
+    assert.deepEqual(context.messages, [], "and no history read hands them back as something said");
     assert.equal(
       (db.prepare("SELECT count(*) count FROM external_events WHERE status='processed'").get() as { count: number }).count,
       2,
@@ -7122,7 +7132,8 @@ describe("Sendblue provider", () => {
     };
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.deepEqual(sends, [{ to: address, body: "Happy birthday Halo 🎂" }], "the agent's own words, not \"Reminder: …\"");
-    assert.match(prompts[0], /something you were asked to say in the group chat "Home"/);
+    assert.match(prompts[0], /something you were asked to say in this group chat/);
+    assert.match(prompts[0], /quoted as data[\s\S]*The group chat is called "Home"\./, "the group's name sits below the line, as data");
     assert.match(prompts[0], /"Happy birthday to Halo"/);
     assert.equal(getTodo(db, said.id)?.status, "done", "said, so done for this occurrence");
     const reply = db.prepare(`
@@ -7131,20 +7142,23 @@ describe("Sendblue provider", () => {
     `).get() as { content: string; provider_message_id: string; kind: string };
     assert.deepEqual(reply, { content: "Happy birthday Halo 🎂", provider_message_id: "SB_said_1", kind: "assistant_say" });
 
-    // After a few failed attempts at writing it, the saved words go out as they are.
+    // On its last attempt a message the agent could not write is not sent at
+    // all: the saved words are whatever anyone typed, not the assistant's.
     const again = (await api.post("/api/todos").send({
       title: "Good morning goopers", life_area_id: area.id, due_at: at, reminder_at: at, assistant_says: true,
     }).expect(201)).body.data;
     db.prepare("UPDATE todos SET reply_thread_id='thread_checkin' WHERE id=?").run(again.id);
-    db.prepare("UPDATE reminders SET attempts=3 WHERE todo_id=?").run(again.id);
+    db.prepare("UPDATE reminders SET attempts=2 WHERE todo_id=?").run(again.id);
     sends.length = 0;
     await runWorkerOnce(db, fakeSearch(db), {
       ...worker,
       runSmsAgent: (...args: Parameters<typeof runSmsAgent>) =>
         runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher: async () => new Response("down", { status: 400 }) }),
     });
-    assert.deepEqual(sends, [{ to: address, body: "Good morning goopers" }]);
-    assert.equal(getTodo(db, again.id)?.status, "done");
+    assert.deepEqual(sends, [], "the third attempt is the last, and nothing goes out");
+    const givenUp = db.prepare("SELECT status,last_error FROM reminders WHERE todo_id=? AND kind='pre'").get(again.id) as { status: string; last_error: string };
+    assert.equal(givenUp.status, "cancelled");
+    assert.match(givenUp.last_error, /after 3 attempts; nothing was sent/);
   });
 
   it("holds a group check-in that is hours past its slot until the next day", async () => {
@@ -7233,6 +7247,11 @@ describe("Sendblue provider", () => {
       page = { from: result.next_from!, to: result.next_to! };
     }
     assert.deepEqual(seen, ["one", "re one", "two", "re two", "three", "re three"]);
+    await assert.rejects(
+      executeAgentTool(db, search, "read_conversation", { thread_id: thread.id, from: first.next_from }, owner),
+      /Pass next_to as to/,
+      "a cursor without its range end would run on to now",
+    );
     await assert.rejects(executeAgentTool(db, search, "read_conversation", { thread_id: thread.id, from: "2026-02-31" }, owner), /YYYY-MM-DD/);
   });
 

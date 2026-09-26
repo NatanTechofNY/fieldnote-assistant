@@ -403,14 +403,18 @@ function reminderBody(db: Db, reminder: ReminderRow, groupBound: boolean): strin
   return lines.join("\n");
 }
 
-/** How many attempts a said todo gets at being written by the agent before its title goes out as is. */
+/** How many attempts a said todo gets at being written by the agent before that occurrence is given up. */
 const SAID_COMPOSE_ATTEMPTS = 3;
+
+/** Thrown once a said todo's attempts are spent: nothing is sent for that occurrence. */
+class SaidGivenUp extends Error {}
 
 /**
  * The message for a todo the assistant was asked to say, written by the agent
  * on the thread it goes to. A failed composition is retried with the
- * reminder's own backoff; after a few tries the title goes out as it was
- * saved, since a plain "Happy birthday, Halo" beats silence on the day.
+ * reminder's own backoff. After the last attempt nothing is sent: the title
+ * is whatever anyone in the group saved, and sending it word for word would
+ * put their text in the assistant's mouth.
  */
 async function composeSaidMessage(
   db: Db,
@@ -420,7 +424,7 @@ async function composeSaidMessage(
   groupId: string | undefined,
   timezone: string,
   runAgent: typeof runSmsAgent,
-): Promise<{ text: string; turn?: Awaited<ReturnType<typeof runSmsAgent>> }> {
+): Promise<{ text: string; turn: Awaited<ReturnType<typeof runSmsAgent>> }> {
   const title = reminder.todo_title || "";
   try {
     const place = groupId
@@ -448,9 +452,9 @@ async function composeSaidMessage(
     }
     return { text: turn.text, turn };
   } catch (error) {
-    if (reminder.attempts < SAID_COMPOSE_ATTEMPTS) throw error;
-    console.warn("Sending a said todo as saved after the agent could not write it:", error instanceof Error ? error.message : error);
-    return { text: title };
+    // `attempts` on the claimed row is the count before this claim.
+    if (reminder.attempts + 1 < SAID_COMPOSE_ATTEMPTS) throw error;
+    throw new SaidGivenUp(`Could not write the message after ${SAID_COMPOSE_ATTEMPTS} attempts; nothing was sent`, { cause: error });
   }
 }
 
@@ -527,6 +531,12 @@ async function deliverReminder(
     try {
       said = await composeSaidMessage(db, search, reminder, target, groupBound ? groupId : undefined, timezone, runAgent);
     } catch (error) {
+      if (error instanceof SaidGivenUp) {
+        // Settled rather than retried; the owner sees why on the reminder, and a repeating one comes back tomorrow.
+        db.prepare("UPDATE reminders SET status='cancelled',claimed_at=NULL,last_error=?,updated_at=? WHERE id=?")
+          .run(error.message, now(), reminder.id);
+        return;
+      }
       release(error);
       return;
     }
@@ -567,10 +577,10 @@ async function deliverReminder(
       // The runner already archived the reply on the thread; this pins the provider's id to it.
       recordOutboundProviderMessage(db, said.turn.threadId, message.sid, message.status, undefined, said.turn.replyMessageId);
     } else {
-      const content = said?.text ?? reminderBody(db, reminder, groupBound);
+      const content = reminderBody(db, reminder, groupBound);
       message = await send(db, target, content, groupBound ? { groupId } : {});
       recordOutboundChannelMessage(db, "sms", target, content, message.sid, message.status, {
-        kind: said ? "assistant_say" : "reminder",
+        kind: "reminder",
         reminderId: reminder.id,
         todoId: reminder.todo_id,
       });

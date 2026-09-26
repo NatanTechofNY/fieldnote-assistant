@@ -247,6 +247,7 @@ CREATE TABLE IF NOT EXISTS group_members (
   name TEXT,
   relationship TEXT,
   is_owner INTEGER NOT NULL DEFAULT 0 CHECK(is_owner IN (0,1)),
+  left_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY(thread_id, phone)
@@ -501,6 +502,8 @@ function migrateMessaging(db: Db): void {
   if (!columns(db, "todos").has("reply_thread_id")) {
     db.exec("ALTER TABLE todos ADD COLUMN reply_thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL");
   }
+  // Someone who left a group keeps their row, so a rejoin brings back who they are.
+  if (!columns(db, "group_members").has("left_at")) db.exec("ALTER TABLE group_members ADD COLUMN left_at TEXT");
   // A todo that is something for the assistant to say rather than for anyone to do.
   if (!columns(db, "todos").has("assistant_says")) {
     db.exec("ALTER TABLE todos ADD COLUMN assistant_says INTEGER NOT NULL DEFAULT 0 CHECK(assistant_says IN (0,1))");

@@ -297,6 +297,9 @@ export type ToolTurnContext = {
  * group, anyone in it — so "no tools" cannot be left to the prompt. Digests
  * and reflection drafts are app-composed too, but are meant to read.
  */
+/** How many rows a speaker-filtered `read_conversation` looks through per call before handing back a cursor. */
+const SPEAKER_SCAN_LIMIT = 5000;
+
 const NO_TOOL_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "checkin_ask_draft", "assistant_say"]);
 
 /**
@@ -698,6 +701,7 @@ export async function executeAgentTool(
     const rows = db.prepare(`
       SELECT id,role,content,created_at,metadata_json FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant')
+        AND json_extract(metadata_json,'$.reactionText') IS NULL
       ORDER BY created_at,rowid
     `).all(threadId) as Array<{
       id: string;
@@ -757,6 +761,8 @@ export async function executeAgentTool(
     const fromValue = cursor ? cursor[1] : input.from as string;
     const afterRowid = cursor ? Number(cursor[2]) : 0;
     const toValue = (input.to as string | null | undefined) ?? null;
+    // Without it the next page would quietly run on to now, past the range that was asked for.
+    if (cursor && !toValue) throw new Error("Pass next_to as to when paging with next_from");
     const from = dateOnly(fromValue) ? dayStart(fromValue) : new Date(fromValue).toISOString();
     const to = toValue
       ? dateOnly(toValue) ? dayStart(nextDay(toValue)) : new Date(toValue).toISOString()
@@ -775,7 +781,7 @@ export async function executeAgentTool(
         AND json_extract(metadata_json,'$.copyOf') IS NULL
         AND json_extract(metadata_json,'$.reactionText') IS NULL
       ORDER BY created_at,rowid LIMIT ?
-    `).all(thread.id, from, from, afterRowid, to, wanted ? 5000 : limit + 1) as Array<{
+    `).all(thread.id, from, from, afterRowid, to, wanted ? SPEAKER_SCAN_LIMIT : limit + 1) as Array<{
       role: "user" | "assistant"; content: string; created_at: string; metadata_json: string; rowid: number;
     }>;
     // Who said it, by name or redacted number; the assistant's own lines are "you".
@@ -799,9 +805,13 @@ export async function executeAgentTool(
         speaker: row.speaker,
         content: row.content.length > MAX_CONTENT ? `${row.content.slice(0, MAX_CONTENT)}…` : row.content,
       })),
-      has_more: matching.length > limit,
       // The next page is the same range from the next message on: pass both back.
-      ...(matching.length > limit ? { next_from: `${matching[limit].created_at}#${matching[limit].rowid}`, next_to: to } : {}),
+      ...(matching.length > limit
+        ? { has_more: true, next_from: `${matching[limit].created_at}#${matching[limit].rowid}`, next_to: to }
+        // A speaker read that stopped at its scan bound has not seen the rest of the range yet.
+        : wanted && rows.length === SPEAKER_SCAN_LIMIT
+          ? { has_more: true, next_from: `${rows.at(-1)!.created_at}#${rows.at(-1)!.rowid + 1}`, next_to: to }
+          : { has_more: false }),
     };
   }
   if (name === "list_todos") {
