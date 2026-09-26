@@ -78,6 +78,8 @@ The **Settings** page (`/settings`) configures encrypted Twilio and Sendblue cre
 
 Over iMessage the assistant can also send pictures: a demo-only shopping pair, `search_store_products` and `send_product_cards`, searches a small Walgreens-styled over-the-counter catalog (its own Algolia index, seeded from `server/catalog/walgreens-products.json`) and texts each pick as an image card with a price and a store link. It browses; it never buys.
 
+With a Bright Data token (`BRIGHTDATA_API_TOKEN`), the assistant can also search the web and read the pages a search returned, for public facts such as opening hours or news, on every channel including group chats. It runs server-side with a daily lookup cap, and the assistant can only read pages its own search returned; see [Web](docs/TOOL_ENDPOINT_MAPPING.md#web).
+
 See [`docs/SMS_AND_EVENTS.md`](docs/SMS_AND_EVENTS.md) for tunnels, provider consent requirements, and recovery.
 
 ## Deployment

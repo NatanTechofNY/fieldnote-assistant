@@ -19,6 +19,8 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       // A miss and an unknown tool are both caller mistakes. Leaving them to the
       // generic handler reported them as 500s, which told the agent to retry a
       // request that could never succeed and buried real faults in the logs.
+      // Bright Data's own wording ("zone not found") is an upstream refusal, not a missing record.
+      if (/^Bright Data /.test(message)) return failure(res, 502, message);
       if (/ not found(?:$|\. )/i.test(message)) return failure(res, 404, message);
       if (/^Unsupported tool: /.test(message)) return failure(res, 400, message);
       // A repeating todo's refusals — filed under a task, given subtasks, or
@@ -36,11 +38,17 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       }
       // An unconfigured integration is the same shape of problem: retrying cannot
       // help, and the agent should say the tool is unavailable instead.
-      if (/ is not configured$/i.test(message)) return failure(res, 503, message);
+      if (/ is not configured$|^Web access is turned off$/i.test(message)) return failure(res, 503, message);
       // An upstream refusal names its own cause — a rotated token, a missing
       // license, a rate limit — and the generic handler would replace all of that
       // with "Internal server error", leaving the agent nothing to report.
       if (/^Atlassian /.test(message)) return failure(res, 502, message);
+      // A page no search returned, or one outside the public web, is refused
+      // for what it is; the day's cap is spent until tomorrow.
+      if (/^Only (?:pages returned by web_search|https pages|public web pages) /.test(message)) {
+        return failure(res, 400, message);
+      }
+      if (/^Web access has reached its limit/.test(message)) return failure(res, 429, message);
       throw error;
     }
   });

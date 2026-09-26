@@ -1,13 +1,13 @@
 import { type Tools } from "react-instantsearch";
 import {
-  BookText, Check, Database, LoaderCircle, MessageSquareText, ShoppingBag, SquareKanban, TriangleAlert,
+  BookText, Check, Database, Globe, LoaderCircle, MessageSquareText, ShoppingBag, SquareKanban, TriangleAlert,
 } from "lucide-react";
 
 type ToolLayoutProps = Parameters<NonNullable<Tools[string]["layoutComponent"]>>[0];
 
-/** The Atlassian and shopping tools read outside SQLite, so the card names
+/** The Atlassian, shopping, and web tools read outside SQLite, so the card names
  *  which system answered rather than assuming the local database. */
-type ToolSource = "SQLite" | "Jira" | "Confluence" | "Walgreens" | "Messages";
+type ToolSource = "SQLite" | "Jira" | "Confluence" | "Walgreens" | "Messages" | "Web";
 
 const sourceIcon: Record<ToolSource, typeof Database> = {
   SQLite: Database,
@@ -15,6 +15,7 @@ const sourceIcon: Record<ToolSource, typeof Database> = {
   Confluence: BookText,
   Walgreens: ShoppingBag,
   Messages: MessageSquareText,
+  Web: Globe,
 };
 
 export const toolActivityMeta: Record<string, { active: string; done: string; source: ToolSource }> = {
@@ -47,6 +48,8 @@ export const toolActivityMeta: Record<string, { active: string; done: string; so
   list_confluence_comments: { active: "Checking Confluence comments", done: "Confluence comments checked", source: "Confluence" },
   search_store_products: { active: "Browsing the Walgreens shelf", done: "Products found", source: "Walgreens" },
   send_product_cards: { active: "Sending product cards", done: "Product cards sent", source: "Walgreens" },
+  web_search: { active: "Searching the web", done: "Web results found", source: "Web" },
+  read_web_page: { active: "Reading a web page", done: "Web page read", source: "Web" },
   // Both refuse on the web channel; a handler here means the refusal reaches
   // the agent as a tool result it can answer in words, rather than a stall.
   send_message: { active: "Sending a text", done: "Text sent", source: "Messages" },
@@ -68,7 +71,7 @@ function toolResultDetail(output: unknown): string | null {
         : record.title;
     }
     const counts = [
-      "todos", "reminders", "subtasks", "issues", "boards", "pages", "spaces", "comments", "users", "products", "cards",
+      "todos", "reminders", "subtasks", "issues", "boards", "pages", "spaces", "comments", "users", "products", "cards", "results",
     ].reduce((total, key) => {
       const value = record[key];
       return total + (Array.isArray(value) ? value.length : 0);

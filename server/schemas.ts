@@ -602,6 +602,11 @@ export const toolInput = {
     product_ids: z.array(entityId).min(1).max(3),
     note: z.string().trim().max(300).nullable().optional(),
   }),
+  web_search: z.object({
+    query: z.string().trim().min(1).max(300),
+    limit: resultLimit(8),
+  }),
+  read_web_page: z.object({ url: z.string().trim().url().max(2000) }),
 } as const;
 
 export type ToolName = keyof typeof toolInput;

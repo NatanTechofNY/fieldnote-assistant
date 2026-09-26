@@ -183,7 +183,8 @@ function ToolResultChannel({ settleRef }: { settleRef: RefObject<SettleToolCall 
 
 // Reads can be replayed safely; a write may have committed before the response
 // was lost, so retrying it would duplicate the record.
-const isReadOnlyTool = (name: string) => /^(get|list)_/.test(name);
+const READ_ONLY_TOOLS = new Set(["search_store_products", "web_search", "read_web_page"]);
+const isReadOnlyTool = (name: string) => /^(get|list)_/.test(name) || READ_ONLY_TOOLS.has(name);
 const isTransportError = (error: unknown) =>
   error instanceof TypeError || (error instanceof DOMException && error.name === "AbortError");
 
