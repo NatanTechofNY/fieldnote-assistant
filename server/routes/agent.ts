@@ -38,7 +38,7 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       }
       // An unconfigured integration is the same shape of problem: retrying cannot
       // help, and the agent should say the tool is unavailable instead.
-      if (/ is not configured$/i.test(message)) return failure(res, 503, message);
+      if (/ is not configured$|^Web access is turned off$/i.test(message)) return failure(res, 503, message);
       // An upstream refusal names its own cause — a rotated token, a missing
       // license, a rate limit — and the generic handler would replace all of that
       // with "Internal server error", leaving the agent nothing to report.

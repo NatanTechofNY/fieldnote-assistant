@@ -27,7 +27,7 @@ import { sendSendblueReaction } from "./sendblue-service.ts";
 import { completeParentIfSettled, completionStats, hasSubtasks, startParentIfPending, syncOccurrenceCompletion } from "./todo-status.ts";
 import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 import {
-  assertPublicUrl, readWebPage, rememberResults, searchWeb, takeWebCall, wasReturned, webConfig,
+  assertPublicUrl, readWebPage, rememberResults, searchWeb, takeWebCall, wasReturned, webConfig, WebServiceError,
 } from "./web-service.ts";
 
 /**
@@ -284,6 +284,12 @@ export type ToolTurnContext = {
    * said everything through it has answered and owes no closing bubble.
    */
   sentText?: boolean;
+  /**
+   * Set once a web tool has put someone else's text in front of the model this
+   * turn. From then on deletes are refused until the user asks again, so a page
+   * cannot talk the model into one with a `confirmed` flag it sets itself.
+   */
+  readWeb?: boolean;
   /** How a tool that texts mid-turn sends; the active provider unless a test supplies one. */
   sendSms?: SmsSender;
   /**
@@ -327,6 +333,22 @@ const OWNER_ONLY_TOOLS = new Set([
   "list_jira_boards", "list_jira_issues", "get_jira_issue", "list_jira_users",
   "list_confluence_spaces", "list_confluence_pages", "get_confluence_page", "list_confluence_comments",
 ]);
+
+const DELETE_TOOLS = new Set(["delete_todo", "delete_memory", "delete_reminder"]);
+
+/**
+ * One counted lookup: the call is returned to the day's allowance when it
+ * failed without Bright Data doing the work, and kept when it timed out.
+ */
+async function countedWebCall<T>(db: Db, context: ToolTurnContext | undefined, call: () => Promise<T>): Promise<T> {
+  const release = takeWebCall(userTimezone(db), Boolean(context?.scope));
+  try {
+    return await call();
+  } catch (error) {
+    if (!(error instanceof WebServiceError && error.timedOut)) release();
+    throw error;
+  }
+}
 
 /**
  * Whether the turn's speaker may record only their own mood on a shared entry:
@@ -490,6 +512,11 @@ export async function executeAgentTool(
   }
   const scope = context?.scope;
   if (scope && OWNER_ONLY_TOOLS.has(name)) throw new Error(`${name} is not available in a group chat`);
+  if (context?.readWeb && DELETE_TOOLS.has(name)) {
+    throw new Error(
+      "This turn read a web page, so a delete needs the user's own go-ahead: ask them, and delete on their reply. Explicit confirmation is required",
+    );
+  }
   const ownOnly = ownRecordsOnly(context);
 
   if (name === "send_message") {
@@ -601,20 +628,21 @@ export async function executeAgentTool(
    */
   if (name === "web_search") {
     webConfig();
-    takeWebCall(userTimezone(db));
-    const results = await searchWeb(input.query as string, Math.min(Math.max(Number(input.limit) || 5, 1), 8));
+    const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 8);
+    const results = await countedWebCall(db, context, () => searchWeb(input.query as string, limit));
     rememberResults(context?.threadId ?? "web", results);
+    if (context) context.readWeb = true;
     return { source: "web", untrusted: true, results };
   }
   if (name === "read_web_page") {
+    webConfig();
     const url = input.url as string;
     assertPublicUrl(url);
     if (!wasReturned(context?.threadId ?? "web", url)) {
       throw new Error("Only pages returned by web_search can be read; search first and pass one of its result URLs exactly");
     }
-    webConfig();
-    takeWebCall(userTimezone(db));
-    const page = await readWebPage(url);
+    const page = await countedWebCall(db, context, () => readWebPage(url));
+    if (context) context.readWeb = true;
     return { source: "web", untrusted: true, url, ...page };
   }
 
