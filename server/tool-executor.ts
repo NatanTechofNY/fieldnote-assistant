@@ -26,6 +26,9 @@ import { toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import { completeParentIfSettled, completionStats, hasSubtasks, startParentIfPending, syncOccurrenceCompletion } from "./todo-status.ts";
 import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
+import {
+  assertPublicUrl, readWebPage, rememberResults, searchWeb, takeWebCall, wasReturned, webConfig,
+} from "./web-service.ts";
 
 /**
  * Writes need only the flush; the catalog search also reads Algolia when it is
@@ -588,6 +591,31 @@ export async function executeAgentTool(
     // Who was passed over is kept beside why, so a suppressed request from the
     // owner can be found in the archive.
     return { quiet: true, reason: input.reason as string, speaker_is_owner: context.speakerIsOwner === true };
+  }
+
+  /*
+   * The web tools read public pages, never the user's records, so a group may
+   * use them too. What they return is someone else's text: it is marked
+   * untrusted, and a read is limited to links a search in the same
+   * conversation returned.
+   */
+  if (name === "web_search") {
+    webConfig();
+    takeWebCall(userTimezone(db));
+    const results = await searchWeb(input.query as string, Math.min(Math.max(Number(input.limit) || 5, 1), 8));
+    rememberResults(context?.threadId ?? "web", results);
+    return { source: "web", untrusted: true, results };
+  }
+  if (name === "read_web_page") {
+    const url = input.url as string;
+    assertPublicUrl(url);
+    if (!wasReturned(context?.threadId ?? "web", url)) {
+      throw new Error("Only pages returned by web_search can be read; search first and pass one of its result URLs exactly");
+    }
+    webConfig();
+    takeWebCall(userTimezone(db));
+    const page = await readWebPage(url);
+    return { source: "web", untrusted: true, url, ...page };
   }
 
   /*

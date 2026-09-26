@@ -181,6 +181,7 @@ const PROGRESS_REACTIONS: Record<string, string> = {
   list_jira_boards: "🎫", list_jira_issues: "🎫", get_jira_issue: "🎫", list_jira_users: "🎫",
   list_confluence_spaces: "📄", list_confluence_pages: "📄", get_confluence_page: "📄", list_confluence_comments: "📄",
   search_store_products: "🛒",
+  web_search: "🌐", read_web_page: "🌐",
 };
 const GENERAL_PROGRESS_REACTION = "🔍";
 /**

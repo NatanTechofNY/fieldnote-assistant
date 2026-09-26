@@ -181,6 +181,8 @@ For every object in `client-tools.json`:
 4. Confirm every property is listed in `required`, optional values use a nullable type, and every object sets `additionalProperties` to false.
 5. Save with the exact function name.
 
+Web access is two of these client-side tools, `web_search` and `read_web_page`. The app's server calls Bright Data's hosted MCP server itself, so the server's checks apply to them. In Bright Data's MCP setup, the free Search & Extract group is all it needs; it calls only Search Engine and Scrape as Markdown. Put the Bright Data API token in `BRIGHTDATA_API_TOKEN` in `.env`, restart the server, and run **Sync Agent config** to publish the tools and the prompt's Web rules. Do not also add the MCP server to the agent as an MCP tool: Agent Studio would run it outside the executor, with no group scope, URL check, or daily cap. See [Web](TOOL_ENDPOINT_MAPPING.md#web).
+
 Implement every mapping in `docs/TOOL_ENDPOINT_MAPPING.md`. The application handler registry must use the exact names and argument shapes. A safe handler must:
 
 - bind all local calls to `devcon-demo`, never model input;

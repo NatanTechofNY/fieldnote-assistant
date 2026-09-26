@@ -2,9 +2,9 @@
 
 ## How a tool call actually executes
 
-The agent has **32 tools**: 31 declared `client_side` in [`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json), plus one hosted search tool declared in [`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json).
+The agent has **39 tools**: 38 declared `client_side` in [`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json), plus one hosted search tool declared in [`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json).
 
-Despite the `client_side` type, none of them run in a browser. All 31 resolve to a single function, `executeAgentTool()` in [`server/tool-executor.ts`](../server/tool-executor.ts), which talks to SQLite (or, for Atlassian and Sendblue, straight out to that provider's API). Only the transport differs:
+Despite the `client_side` type, none of them run in a browser. All 38 resolve to a single function, `executeAgentTool()` in [`server/tool-executor.ts`](../server/tool-executor.ts), which talks to SQLite (or, for Atlassian, Sendblue, and Bright Data, straight out to that provider's API). Only the transport differs:
 
 | Channel | Path to the executor |
 |---|---|
@@ -55,11 +55,13 @@ The fixed local identity is `USER_ID` (`process.env.DEMO_USER_ID || "devcon-demo
 | `stay_quiet` | turn state | — |
 | `search_store_products` | read (catalog) | — |
 | `send_product_cards` | **write** (SMS media) | — |
+| `web_search` | read (public web) | — |
+| `read_web_page` | read (public web) | — |
 | `personal_data_search` | read | hosted by Algolia |
 
 `delete_todo`, `delete_memory`, and `delete_reminder` all require `confirmed === true` and throw otherwise.
 
-**Group scope.** When the turn came from an iMessage group chat, `ToolTurnContext.scope` names the group's life area and thread, and every tool above honours it: the by-id reads treat a todo or memory from another area as not found, the lists and `get_agenda` return only the area's rows, `list_life_areas` returns only that area, `get_conversation_context` and `read_conversation` open only the group's own thread, `create_*` and `update_*` file under the area whatever `life_area_id` was passed and drop any `category_id`, `get_todo` lists only the subtasks filed in the area and `set_todo_status` never closes a parent filed outside it, `name_group_chat` after the area's first name is honoured only for a message from the owner (`speakerIsOwner`), and `get_reflection_evidence`, `get_review_evidence`, and the eight Atlassian tools are refused. The REST routes have no scope; the owner sees everything from the app. See [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#group-chats).
+**Group scope.** When the turn came from an iMessage group chat, `ToolTurnContext.scope` names the group's life area and thread, and every tool above honours it: the by-id reads treat a todo or memory from another area as not found, the lists and `get_agenda` return only the area's rows, `list_life_areas` returns only that area, `get_conversation_context` and `read_conversation` open only the group's own thread, `create_*` and `update_*` file under the area whatever `life_area_id` was passed and drop any `category_id`, `get_todo` lists only the subtasks filed in the area and `set_todo_status` never closes a parent filed outside it, `name_group_chat` after the area's first name is honoured only for a message from the owner (`speakerIsOwner`), and `get_reflection_evidence`, `get_review_evidence`, and the eight Atlassian tools are refused. The two web tools stay available in a group, since they read nothing of the owner's; their links are kept per thread, so a group cannot read a page the owner's search found (see [Web](#web)). The REST routes have no scope; the owner sees everything from the app. See [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#group-chats).
 
 There is no drift in either direction: every tool in the JSON has a `toolInput` schema, an executor branch, and a UI activity label, and there are no handlers without a tool. `list_memories` is a removed legacy tool that the sync still names so it can be deleted from the published agent config.
 
@@ -176,7 +178,7 @@ Two tools act on the conversation rather than on the user's records, and so are 
 - `react_to_message({ reaction })` → `POST https://api.sendblue.co/api/send-reaction`, targeting the inbound `message_handle`. The value is one of `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`, or exactly one emoji, with a `-` prefix to remove one sent earlier. [`server/schemas.ts`](../server/schemas.ts) checks the shape before the request goes out. Sendblue answers `422` for an SMS or RCS target, one of our own outbound messages, or a line that cannot deliver reactions; the reason reaches the model as a failed tool result so it can answer in words instead. The tool is listed in `WRITE_TOOLS`, so a retried turn sees the reaction it already sent rather than sending a second. A successful reaction also sets `reacted` on the turn context; a turn that reacted and then produced no text is delivered as the reaction alone rather than the fallback sentence (see [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#reactions-and-threads)).
 - `reply_in_thread()` sends nothing. It records on the turn context that the answer should be delivered as an inline reply, and [`server/worker.ts`](../server/worker.ts) passes that handle to `sendSms()`, which adds `reply_to` to the send. Sendblue refuses an inline reply outright rather than downgrading it, so `sendSendblueSms()` retries once without `reply_to`: an unthreaded answer beats none.
 
-The runner also places tapbacks of its own: a progress mark while the turn's working tools run — 📋, 🧠, ⏰, 📅, 💬, 🗂️, 🪞, 🎫, 📄, or 🛒 for the store the round is reading, 🔍 when it spans several — and, unless the agent reacted itself, a closing mark in its place when the answer is in: ✅ after a confirmed record write, `like` after lookups only. Both come off before `react_to_message` lands; see [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#reactions-and-threads). They are not tools, and the model is told not to send the progress marks itself.
+The runner also places tapbacks of its own: a progress mark while the turn's working tools run — 📋, 🧠, ⏰, 📅, 💬, 🗂️, 🪞, 🎫, 📄, 🛒, or 🌐 for the store the round is reading, 🔍 when it spans several — and, unless the agent reacted itself, a closing mark in its place when the answer is in: ✅ after a confirmed record write, `like` after lookups only. Both come off before `react_to_message` lands; see [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#reactions-and-threads). They are not tools, and the model is told not to send the progress marks itself.
 
 Two more tools use the same turn context, on any SMS conversation rather than iMessage only:
 
@@ -202,6 +204,21 @@ The catalog is a checked-in file, [`server/catalog/walgreens-products.json`](../
 
 The worker passes its own `sendSms` into the turn context, so a test that captures the reply captures the cards too. Run `npm run catalog:check` before the demo: it confirms every image file exists locally, requests each image URL with several anonymous library user agents (`axios`, `python-requests`, `node`, `curl`) and fails on anything that is not a 200 with an `image/*` content type for all of them, and probes each product link for hard failures only, since retail sites answer bots with 403 that still resolve for a person tapping the link.
 
+## Web
+
+Two read-only tools reach the public web through Bright Data's hosted MCP server ([`server/web-service.ts`](../server/web-service.ts)). The app's server is the MCP client, with `@modelcontextprotocol/sdk` over Streamable HTTP; the MCP server is not added to the Agent Studio agent, where it would run outside the executor and none of the checks below would cover it. Each call opens a session, calls one tool, and closes. Nothing is stored or indexed. Configure it with `BRIGHTDATA_API_TOKEN`, the Bright Data API token, which is sent as the `token` query parameter the hosted server expects and is scrubbed from any error text. Without it both tools answer `Web access is not configured` (503). Only the free-tier Search & Extract tools are called.
+
+- `web_search({ query, limit })` → MCP `search_engine` with `engine: "google"`. It returns up to `limit` (default 5, max 8) organic results as `{ title, url, snippet }`, dropping any that is not `https` and cutting snippets at 300 characters. Google results arrive as JSON; if they ever arrive as markdown, the links are read out of it instead.
+- `read_web_page({ url })` → MCP `scrape_as_markdown`, cut at 6,000 characters with `truncated: true` when it was cut.
+
+Both results carry `source: "web"` and `untrusted: true`, and the prompt treats page text as data rather than instructions. Three limits are enforced by the server rather than the prompt:
+
+1. **A page is read only if a search returned it.** Every `web_search` records its result URLs for 30 minutes, keyed by the turn's thread (`"web"` for the browser chat), and `read_web_page` refuses any other URL with `Only pages returned by web_search can be read; …` (400). The model has the owner's records in context, and a URL it composed itself — a result with a query string appended — is how a page read would carry them to a server of someone else's choosing. Keying by thread also means a group cannot read a page the owner's search found.
+2. **Only public https pages.** A non-`https` URL, `localhost`, `.local`/`.internal` hosts, and hosts written as IP addresses are refused (400), whatever a search returned.
+3. **A daily cap.** Both tools share one in-process counter, `BRIGHTDATA_DAILY_LIMIT` lookups per local day (default 100). Past it they answer `Web access has reached its limit of … lookups for today` (429) without calling Bright Data. The app is a single process, so the counter is the whole count; a restart resets it. A refused read does not count against it.
+
+Upstream failures, including a tool result the MCP server marks `isError`, come back as `Bright Data …` messages (502). Both tools are allowed in group chats; neither is in `OWNER_ONLY_TOOLS`.
+
 ## Digest briefs
 
 A brief is a user-authored standing instruction with its own send time, stored in `digest_briefs` and delivered by `runWorkerOnce`. There are **no agent tools** for briefs; they are UI-managed and agent-composed.
@@ -219,12 +236,15 @@ Failure is `{ "success": false, "error": "<message>" }` — **a plain string, no
 | Thrown message matches | Status |
 |---|---|
 | `/user-classified\|override confirmation\|confirmation is required/` | 409 |
+| `/^Bright Data /` | 502, checked before the not-found rule so "zone not found" is not a 404 |
 | `/ not found$/` | 404 |
 | `/^Unsupported tool: /` | 400 |
 | `/^This turn has no iMessage /` | 400 |
 | `/^This is not a text conversation\|^This conversation is not a group chat\|^There is no conversation to read here/` | 400 |
 | `/ is not configured$/` | 503 |
 | `/^Atlassian /` | 502, with the upstream message intact |
+| `/^Only (pages returned by web_search\|https pages\|public web pages) /` | 400 |
+| `/^Web access has reached its limit/` | 429 |
 | anything else | 500 |
 
 The server-side agent loop wraps a throw as `{ success: false, error: message }` and hands that back to the model, so it can say what went wrong rather than retrying blindly.
