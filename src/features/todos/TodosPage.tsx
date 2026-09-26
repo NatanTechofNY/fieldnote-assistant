@@ -13,7 +13,7 @@ import { areaFilterParams, inAreaFilter } from "../../lib/area-filter";
 import { useAreaFilter } from "../../lib/use-area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { CompleteParentDialog } from "./CompleteParentDialog";
-import { SubtaskCheck, SubtaskState } from "./SubtaskCheck";
+import { SubtaskCheck, SubtaskProgress, SubtaskState } from "./SubtaskCheck";
 import { TodoModal } from "./TodoModal";
 import { CalendarView } from "./calendar/CalendarView";
 import { describeRecurrence } from "../../lib/recurrence";
@@ -248,7 +248,10 @@ function TodoTable({ todos, children, onOpen, onStatus }: {
               </td>
               <td className="cell-quiet cell-optional">{todo.priority ? `! ${todo.priority}` : "—"}</td>
               <td className="cell-quiet cell-optional">{subtasks.length
-                ? <button type="button" className="subtask-count" aria-expanded={isOpen} onClick={() => toggle(todo.id)}>{done}/{subtasks.length}</button>
+                ? <button type="button" className="subtask-count" aria-expanded={isOpen} onClick={() => toggle(todo.id)}>
+                  {done}/{subtasks.length}
+                  <SubtaskProgress done={done} going={subtasks.filter(t => t.status === "in_progress").length} total={subtasks.length} compact/>
+                </button>
                 : "—"}</td>
               <td className="cell-actions"><AttachButton item={todoAttachment(todo, subtasks)}/></td>
             </tr>
@@ -403,10 +406,7 @@ function DraggableTodo({ todo, subtasks, onOpen, onStatus }: { todo: Todo; subta
         : <>{todo.due_at && <span>Due {friendlyDueDate(todo.due_at, timezone)}</span>} {todo.reminder_at && <span title="Reminder"><BellRing size={11}/>{friendlyDate(todo.reminder_at, timezone)}{todo.extra_reminders?.length ? ` +${todo.extra_reminders.length}` : ""}</span>}</>} {todo.priority && <span>! {todo.priority}</span>}
     </div></div><AttachButton item={todoAttachment(todo, subtasks)} size={13}/></div>
     {subtasks.length > 0 && <div className="card-subtasks" onDoubleClick={event => event.stopPropagation()}>
-      <div className="progress">
-        <span style={{ width: `${(done / subtasks.length) * 100}%` }}/>
-        {going > 0 && <span className="progress-going" style={{ width: `${(going / subtasks.length) * 100}%` }}/>}
-      </div>
+      <SubtaskProgress done={done} going={going} total={subtasks.length}/>
       <button type="button" className="subtask-summary" aria-expanded={isOpen} onClick={() => setIsOpen(open => !open)}>
         <ChevronRight size={12}/>{done}/{subtasks.length} subtasks{going > 0 && <span className="subtask-going"> · {going} in progress</span>}
       </button>

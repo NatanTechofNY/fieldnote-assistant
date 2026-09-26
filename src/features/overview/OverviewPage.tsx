@@ -11,6 +11,7 @@ import { PageHead } from "../../components/layout/PageHead";
 import { Empty, ErrorState, Loading, MemoryIcon, MoodPill } from "../../components/ui";
 import { friendlyDate, friendlyDueDate, useTimezone } from "../../lib/timezone";
 import { reminderKindLabels, statusMeta } from "../../lib/todo-meta";
+import { SubtaskProgress } from "../todos/SubtaskCheck";
 import { MoodTrend } from "./MoodTrend";
 import { TodayHero } from "./TodayHero";
 
@@ -127,7 +128,11 @@ function TodoRow({ todo, progress }: { todo: Todo; progress?: { done: number; to
   const Icon = meta.icon;
   return <div className="list-row">
     <Icon size={18} style={{ color: meta.color }} />
-    <div className="list-main"><strong>{todo.title}</strong><small>{friendlyDueDate(todo.due_at, timezone)}{progress?.total ? ` · ${progress.done}/${progress.total} subtasks` : ""}</small></div>
+    <div className="list-main">
+      <strong>{todo.title}</strong>
+      <small>{friendlyDueDate(todo.due_at, timezone)}{progress?.total ? ` · ${progress.done}/${progress.total} subtasks` : ""}</small>
+      {progress && <SubtaskProgress done={progress.done} total={progress.total} compact/>}
+    </div>
     {todo.status === "blocked" && <span className="badge warn">Blocked</span>}
     {todo.priority && <span className="badge">{todo.priority}</span>}
   </div>;

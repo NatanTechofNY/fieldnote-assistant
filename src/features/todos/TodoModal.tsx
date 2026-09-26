@@ -11,7 +11,7 @@ import { friendlyDate, friendlyDueDate, toZonedDateTimeLocal, useTimezone, zoned
 import { boardStatuses, statusMeta } from "../../lib/todo-meta";
 import { invalidateContent } from "../../lib/invalidate";
 import { CompleteParentDialog } from "./CompleteParentDialog";
-import { SubtaskCheck, SubtaskState } from "./SubtaskCheck";
+import { SubtaskCheck, SubtaskProgress, SubtaskState } from "./SubtaskCheck";
 
 type RepeatMode = "never" | "daily" | "interval" | "weekly";
 
@@ -200,6 +200,7 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
             <span className="eyebrow">Subtasks</span>
             {subtasks.length > 0 && <span className="subtask-tally">{doneCount} of {subtasks.length} done</span>}
           </div>
+          <SubtaskProgress done={doneCount} going={subtasks.filter(subtask => subtask.status === "in_progress").length} total={subtasks.length}/>
           {/* Steps under a step would be stored happily and drawn nowhere, so a
               task filed under another one is not offered a list. */}
           {nested && <p className="subtask-empty">Filed under another task, so this one carries no checklist of its own.</p>}

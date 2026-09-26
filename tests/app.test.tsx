@@ -2239,6 +2239,8 @@ it("shows which of a card's subtasks are in progress", async () => {
     expect(check).toHaveAttribute("data-status", "in_progress");
     expect(within(card).getByText("In progress")).toBeInTheDocument();
     expect(within(card).getByText("· 1 in progress")).toBeInTheDocument();
+    const bar = within(card).getByRole("progressbar", { name: "0 of 1 subtasks done" });
+    expect(bar.querySelector(".progress-going")).toHaveStyle({ width: "100%" });
   } finally {
     step.status = "pending";
   }
@@ -2249,6 +2251,7 @@ it("manages a task's subtasks from the editor", async () => {
   await userEvent.click(await screen.findByRole("button", { name: "Prepare the DevCon demo" }));
   const dialog = await screen.findByRole("dialog");
   expect(within(dialog).getByText("1 of 1 done")).toBeInTheDocument();
+  expect(within(dialog).getByRole("progressbar", { name: "1 of 1 subtasks done" })).toHaveAttribute("aria-valuenow", "1");
   expect(within(dialog).getByText("Write the outline")).toBeInTheDocument();
   // Nesting is only ever drawn one level deep, so a parent cannot be filed away.
   expect(within(dialog).getByLabelText("Parent")).toBeDisabled();

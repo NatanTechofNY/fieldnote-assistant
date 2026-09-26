@@ -37,6 +37,23 @@ export function SubtaskCheck({ todo, onToggle, disabled }: { todo: Todo; onToggl
   ><Box size={14} style={marked ? { color: statusMeta[todo.status].color } : undefined}/></button>;
 }
 
+/**
+ * How far through its steps a task is: done in green, started in the
+ * in-progress colour behind it. Shared by every view that counts a task's steps.
+ * A compact bar sits inside or beside a count that already says it in words,
+ * so it is hidden from assistive tech rather than read twice.
+ */
+export function SubtaskProgress({ done, going = 0, total, compact }: { done: number; going?: number; total: number; compact?: boolean }) {
+  if (!total) return null;
+  const semantics = compact
+    ? { "aria-hidden": true }
+    : { role: "progressbar", "aria-label": `${done} of ${total} subtasks done`, "aria-valuemin": 0, "aria-valuemax": total, "aria-valuenow": done };
+  return <span className={`progress${compact ? " compact" : ""}`} {...semantics}>
+    <span style={{ width: `${(done / total) * 100}%` }}/>
+    {going > 0 && <span className="progress-going" style={{ width: `${(going / total) * 100}%` }}/>}
+  </span>;
+}
+
 /** The status word beside a step's title, for the states the box alone is too small to carry. */
 export function SubtaskState({ todo }: { todo: Todo }) {
   if (!MARKED_STATES.has(todo.status)) return null;

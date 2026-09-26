@@ -717,6 +717,9 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 .progress { display:flex; margin-top:8px; height:3px; border-radius:var(--radius-pill); background:var(--surface-active); overflow:hidden; }
 .progress > span { display:block; height:100%; background:var(--success); }
 .progress > .progress-going { background:var(--status-progress); opacity:.7; }
+.progress.compact { margin-top:4px; max-width:120px; }
+.subtask-count:has(.progress) { display:inline-flex; flex-direction:column; align-items:stretch; }
+.subtask-count .progress.compact { min-width:36px; }
 
 /* The subtask checklist, shared by the board card and the task editor. Ticking
    one writes the same status the board's own columns do. */
@@ -2288,6 +2291,7 @@ tr:hover .attach-button,
    rather than folded behind a count. */
 .subtask-editor { padding:12px; margin-bottom:12px; border:1px solid var(--border); border-radius:var(--radius); }
 .subtask-editor-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+.subtask-editor-head + .progress { margin:0 0 8px; }
 .subtask-tally { color:var(--text-tertiary); font-size:11px; }
 .subtask-editor .subtask-list { gap:2px; }
 .subtask-editor .subtask-name { color:var(--text); font-size:13px; }
