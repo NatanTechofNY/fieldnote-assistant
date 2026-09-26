@@ -14,11 +14,12 @@ import { localParts } from "./local-time.ts";
 const MCP_URL = "https://mcp.brightdata.com/mcp";
 /**
  * One budget for the whole call — initialize, the initialized notification,
- * and the tool call — under the browser's 20s tool deadline with room for the
- * round trip back. The unlocker solves bot checks before it answers, so a tight
- * budget would fail pages that are merely guarded.
+ * and the tool call — under the 35s the browser gives a web tool
+ * (`WEB_TOOL_TIMEOUT_MS` in `src/api.ts`). A Google search through the unlocker
+ * was measured at 14–16s on its own, so the 20s every other tool gets is not
+ * enough.
  */
-const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 /**
  * The SDK reads and parses a whole response before anything here can cut it,
  * so a page is refused past this size rather than held in memory to keep 6 KB.
@@ -32,7 +33,29 @@ const DEFAULT_DAILY_LIMIT = 100;
 /** The part of the day's lookups every group chat together may use; the rest is the owner's. */
 const GROUP_SHARE = 0.25;
 
-export type WebResult = { title: string; url: string; snippet: string };
+/**
+ * `url` is null for a result Google links only through its own redirect — a
+ * local listing's hours or address — which is worth its snippet but has no page
+ * that can be read.
+ */
+export type WebResult = { title: string; url: string | null; snippet: string };
+
+/**
+ * The hosted server wraps every result in a security notice naming a random id,
+ * with the content between `=====UNTRUSTED_<id>_BEGIN=====` and the matching
+ * END marker. Only markers carrying the announced id count, and the last END is
+ * the real one, so a page that prints a fake marker cannot end the content early.
+ */
+export function unwrapUntrusted(text: string): string {
+  const id = text.match(/^SECURITY NOTICE:[^\n]*?\(id ([0-9a-f]+)\)/)?.[1];
+  if (!id) return text;
+  const begin = `=====UNTRUSTED_${id}_BEGIN=====`;
+  const end = `=====UNTRUSTED_${id}_END=====`;
+  const start = text.indexOf(begin);
+  const stop = text.lastIndexOf(end);
+  if (start === -1 || stop <= start) return text;
+  return text.slice(start + begin.length, stop).trim();
+}
 
 /**
  * Every failure this module reports. Its message is already free of the token
@@ -125,7 +148,7 @@ async function callTool(
       if (text.length > maxChars) break;
     }
     if (result.isError) throw new WebServiceError(`Bright Data ${what} failed: ${scrub(text).slice(0, 300) || "no detail"}`);
-    return text;
+    return unwrapUntrusted(text);
   } catch (error) {
     const own = ownError(error);
     if (own) throw own;
@@ -153,14 +176,18 @@ export async function searchWeb(query: string, limit: number): Promise<WebResult
     organic = [...raw.matchAll(/\[([^\]\n]{1,300})\]\((https:\/\/[^)\s]+)\)/g)]
       .map(match => ({ title: match[1], link: match[2] }));
   }
-  return organic
-    .map(hit => ({
-      title: String(hit.title ?? "").trim(),
-      url: String(hit.link ?? hit.url ?? "").trim(),
-      snippet: String(hit.description ?? hit.snippet ?? "").trim().slice(0, SNIPPET_LIMIT),
-    }))
-    .filter(hit => hit.title && isPublicUrl(hit.url))
-    .slice(0, limit);
+  const results: WebResult[] = [];
+  for (const hit of organic) {
+    const title = String(hit.title ?? "").trim();
+    const link = String(hit.link ?? hit.url ?? "").trim();
+    const snippet = String(hit.description ?? hit.snippet ?? "").trim().slice(0, SNIPPET_LIMIT);
+    if (!title) continue;
+    if (isPublicUrl(link)) results.push({ title, url: link, snippet });
+    // A relative link is Google's own redirect; the snippet is the answer.
+    else if (link.startsWith("/") && snippet) results.push({ title, url: null, snippet });
+    if (results.length >= limit) break;
+  }
+  return results;
 }
 
 /** One page as markdown, cut to a size a text-message turn can afford. */
@@ -188,8 +215,8 @@ export function rememberResults(key: string, results: WebResult[]): void {
   }
   if (!results.length) return;
   const links = returned.get(key) ?? new Map<string, number>();
-  for (const result of results) links.set(result.url, now + RESULT_TTL_MS);
-  returned.set(key, links);
+  for (const result of results) if (result.url) links.set(result.url, now + RESULT_TTL_MS);
+  if (links.size) returned.set(key, links);
 }
 
 export function wasReturned(key: string, url: string): boolean {
