@@ -207,16 +207,33 @@ export async function readWebPage(url: string): Promise<{ text: string; truncate
 const returned = new Map<string, Map<string, number>>();
 
 export function rememberResults(key: string, results: WebResult[]): void {
+  rememberLinks(key, results.flatMap(result => result.url ? [result.url] : []));
+}
+
+/** Makes `urls` readable in this conversation for the next half hour. */
+export function rememberLinks(key: string, urls: string[]): void {
   const now = Date.now();
   // A sweep on every write keeps threads that stopped searching from staying in memory.
   for (const [thread, links] of returned) {
     for (const [link, expires] of links) if (expires <= now) links.delete(link);
     if (!links.size) returned.delete(thread);
   }
-  if (!results.length) return;
+  if (!urls.length) return;
   const links = returned.get(key) ?? new Map<string, number>();
-  for (const result of results) if (result.url) links.set(result.url, now + RESULT_TTL_MS);
+  for (const url of urls) links.set(url, now + RESULT_TTL_MS);
   if (links.size) returned.set(key, links);
+}
+
+/**
+ * The https links a person wrote in `text`, with the sentence punctuation that
+ * trails a pasted link taken off. A link someone shares is as safe to read as a
+ * search result: the model did not compose it, so it cannot carry the owner's
+ * records out in its query string.
+ */
+export function linksIn(text: string): string[] {
+  const links = [...text.matchAll(/https:\/\/[^\s<>"'`]+/gi)]
+    .map(match => match[0].replace(/[.,!?;:)\]}"'’”]+$/u, ""));
+  return [...new Set(links.filter(isPublicUrl))];
 }
 
 export function wasReturned(key: string, url: string): boolean {

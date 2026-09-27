@@ -27,8 +27,28 @@ import { sendSendblueReaction } from "./sendblue-service.ts";
 import { completeParentIfSettled, completionStats, hasSubtasks, startParentIfPending, syncOccurrenceCompletion } from "./todo-status.ts";
 import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 import {
-  assertPublicUrl, readWebPage, rememberResults, searchWeb, takeWebCall, wasReturned, webConfig, WebServiceError,
+  assertPublicUrl, linksIn, readWebPage, rememberResults, searchWeb, takeWebCall, wasReturned, webConfig, WebServiceError,
 } from "./web-service.ts";
+
+/** How far back a link someone pasted in the thread stays readable. */
+const SHARED_LINK_WINDOW_MS = 24 * 60 * 60_000;
+
+/**
+ * Whether a person in this conversation wrote `url` themselves: the message
+ * being answered, or one of the thread's own recent messages. Only what people
+ * wrote counts, never the assistant's replies, which the model composed.
+ */
+function sharedInThread(db: Db, context: ToolTurnContext | undefined, url: string): boolean {
+  if (!context) return false;
+  if (context.inboundText && linksIn(context.inboundText).includes(url)) return true;
+  const since = new Date(Date.now() - SHARED_LINK_WINDOW_MS).toISOString();
+  const rows = db.prepare(`
+    SELECT content FROM channel_messages
+    WHERE thread_id=? AND role='user' AND direction='inbound' AND created_at>=? AND content LIKE ?
+    ORDER BY created_at DESC LIMIT 50
+  `).all(context.threadId, since, "%https://%") as Array<{ content: string }>;
+  return rows.some(row => linksIn(row.content).includes(url));
+}
 
 /**
  * Writes need only the flush; the catalog search also reads Algolia when it is
@@ -624,7 +644,7 @@ export async function executeAgentTool(
    * The web tools read public pages, never the user's records, so a group may
    * use them too. What they return is someone else's text: it is marked
    * untrusted, and a read is limited to links a search in the same
-   * conversation returned.
+   * conversation returned or a person in it sent.
    */
   if (name === "web_search") {
     webConfig();
@@ -642,12 +662,16 @@ export async function executeAgentTool(
     webConfig();
     const url = input.url as string;
     assertPublicUrl(url);
-    if (!wasReturned(context?.threadId ?? "web", url)) {
-      throw new Error("Only pages returned by web_search can be read; search first and pass one of its result URLs exactly");
+    const shared = sharedInThread(db, context, url);
+    if (!shared && !wasReturned(context?.threadId ?? "web", url)) {
+      throw new Error("Only pages returned by web_search or links someone in this conversation sent can be read; pass one of those URLs exactly");
     }
     const page = await countedWebCall(db, context, () => readWebPage(url));
     if (context) context.readWeb = true;
-    const hint = page.text ? undefined : "The page returned no text; answer from the search snippets or read another result";
+    const hint = page.text ? undefined
+      : shared
+        ? "The page returned no text (video sites often do). Go by what the link itself shows — the site, the path, the words in it — and never say you cannot open links"
+        : "The page returned no text; answer from the search snippets or read another result";
     return { source: "web", untrusted: true, url, ...page, ...(hint ? { hint } : {}) };
   }
 

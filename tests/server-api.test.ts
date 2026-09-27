@@ -2642,7 +2642,7 @@ describe("web tools", () => {
         (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
       const refusedBefore = await call("read_web_page", { url: "https://pharmacy.example.com/main-st" }, 400);
-      assert.match(refusedBefore.error, /^Only pages returned by web_search can be read/);
+      assert.match(refusedBefore.error, /^Only pages returned by web_search or links someone in this conversation sent can be read/);
       assert.equal(stub.seen.length, 0, "a refused read never reaches Bright Data");
 
       await call("web_search", { query: "main st pharmacy", limit: null });
@@ -2655,7 +2655,7 @@ describe("web tools", () => {
       });
 
       const composed = await call("read_web_page", { url: "https://pharmacy.example.com/main-st?note=wife-birthday" }, 400);
-      assert.match(composed.error, /search first/, "a returned URL with data appended is a different URL");
+      assert.match(composed.error, /pass one of those URLs exactly/, "a returned URL with data appended is a different URL");
       await call("read_web_page", { url: "http://insecure.example.net/" }, 400);
       await call("read_web_page", { url: "https://localhost/admin" }, 400);
       await call("read_web_page", { url: "https://169.254.169.254/latest/meta-data" }, 400);
@@ -2683,6 +2683,38 @@ describe("web tools", () => {
         url: string;
       };
       assert.equal(groupRead.url, "https://news.example.org/story");
+    } finally {
+      stub.restore();
+    }
+  });
+
+  it("reads a link someone in the conversation pasted, and nothing the assistant wrote", async () => {
+    process.env.BRIGHTDATA_API_TOKEN = "bd_test_token";
+    const stub = stubBrightData();
+    try {
+      const { db } = fixture();
+      const stamp = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+        VALUES('thread_links',?,'sms','+15550100','alg_cnv_links',?,?)
+      `).run(USER_ID, stamp, stamp);
+      const insert = db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,'received','{}',?,?)
+      `);
+      insert.run("msg_link_user", "thread_links", "inbound", "user", "look at this https://www.reddit.com/r/x/s/5DkL1Fo9wU!", stamp, stamp);
+      insert.run("msg_link_bot", "thread_links", "outbound", "assistant", "see https://evil.example.com/?leak=1", stamp, stamp);
+      const context: ToolTurnContext = { channel: "sms", address: "+15550100", threadId: "thread_links", inboundText: "and https://lnkd.in/p/g6PNsYk9." };
+
+      const earlier = await executeAgentTool(db, { flushSoon() {} }, "read_web_page", { url: "https://www.reddit.com/r/x/s/5DkL1Fo9wU" }, context) as { url: string };
+      assert.equal(earlier.url, "https://www.reddit.com/r/x/s/5DkL1Fo9wU", "trailing punctuation is not part of a pasted link");
+      const current = await executeAgentTool(db, { flushSoon() {} }, "read_web_page", { url: "https://lnkd.in/p/g6PNsYk9" }, context) as { url: string };
+      assert.equal(current.url, "https://lnkd.in/p/g6PNsYk9");
+      await assert.rejects(
+        executeAgentTool(db, { flushSoon() {} }, "read_web_page", { url: "https://evil.example.com/?leak=1" }, context),
+        /links someone in this conversation sent/,
+        "a link the assistant wrote is one the model composed",
+      );
     } finally {
       stub.restore();
     }
