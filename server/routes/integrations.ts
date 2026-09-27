@@ -9,7 +9,8 @@ import { isSmsProviderConnected } from "../messaging.ts";
 import { atlassianConfigInput, notificationInput, ownerSoulInput, sendblueConfigInput, smsProviderInput, taskPreferencesInput, twilioConfigInput } from "../schemas.ts";
 import { ownerSoul, setOwnerSoul } from "../soul.ts";
 import { followUpsEnabled, setFollowUpsEnabled } from "../follow-ups.ts";
-import { composeProfileTurn, ownerProfile, PROFILE_MAX, setOwnerProfile } from "../profile.ts";
+import { composeProfileTurn, ownerProfile, PROFILE_MAX, profileState, setOwnerProfile } from "../profile.ts";
+import { NO_TEXT_FALLBACK } from "../agent-runner.ts";
 import { configureSendblueWebhooks, enableSendblueAcknowledgements, newSendblueWebhookSecret, SENDBLUE_INBOUND_PATH, SENDBLUE_STATUS_PATH, sendSendblueSms, validateSendblueConfig } from "../sendblue-service.ts";
 import { executeAgentTool } from "../tool-executor.ts";
 import { configureTwilioWebhook, sendTwilioSms, validateTwilioConfig } from "../twilio-service.ts";
@@ -161,13 +162,16 @@ export function registerIntegrationRoutes({ app, db, search, draftWithAgent }: R
   });
   // Rewrites the profile from the owner's facts now, rather than waiting for the night.
   app.post("/api/integrations/profile/refresh", async (_req, res) => {
+    // With nothing to write from, the model would only invent one.
+    if (profileState(db) === "empty") return failure(res, 409, "There are no facts saved about you yet to write a profile from");
     let text: string;
     try {
       text = await draftWithAgent(composeProfileTurn(db), "profile:owner", { context: { kind: "profile_refresh" } });
     } catch (error) {
-      return failure(res, 502, error instanceof Error ? error.message : "The assistant could not write the profile");
+      console.warn("Profile rewrite failed:", error instanceof Error ? error.message : error);
+      return failure(res, 502, "The assistant could not write the profile right now; try again in a minute");
     }
-    if (!text.trim()) return failure(res, 502, "The assistant returned no profile");
+    if (!text.trim() || text === NO_TEXT_FALLBACK) return failure(res, 502, "The assistant returned no profile; try again in a minute");
     setOwnerProfile(db, text);
     return success(res, ownerProfile(db));
   });

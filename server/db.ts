@@ -217,6 +217,7 @@ CREATE TABLE IF NOT EXISTS notification_preferences (
   soul TEXT,
   life_profile TEXT,
   life_profile_updated_at TEXT,
+  life_profile_source TEXT,
   follow_ups_enabled INTEGER NOT NULL DEFAULT 1 CHECK(follow_ups_enabled IN (0,1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -900,6 +901,17 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
   }
   // Set once a todo has been followed up on, so a dropped thread is raised once, not every morning.
   if (!columns(db, "todos").has("followed_up_at")) db.exec("ALTER TABLE todos ADD COLUMN followed_up_at TEXT");
+  // A todo moved to a new time — by the tool or the app — can be asked about
+  // again at that time. A trigger, so no write path can forget to clear it.
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS todos_follow_up_moved AFTER UPDATE OF due_at ON todos
+    WHEN NEW.due_at IS NOT OLD.due_at AND NEW.followed_up_at IS NOT NULL
+    BEGIN UPDATE todos SET followed_up_at=NULL WHERE id=NEW.id; END
+  `);
+  // The fact set the profile was last written from, so a delete or a move is noticed too.
+  if (!columns(db, "notification_preferences").has("life_profile_source")) {
+    db.exec("ALTER TABLE notification_preferences ADD COLUMN life_profile_source TEXT");
+  }
   // NeuralSearch is opt-in: it is a paid add-on, so an application without the
   // entitlement gets plain keyword search rather than a failed setup.
   const searchPreferenceTimestamp = now();

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { Check, RotateCcw } from "lucide-react";
 
 /** Matches `SOUL_MAX` (and `PROFILE_MAX`) on the server; the server is the one that refuses. */
@@ -15,7 +15,10 @@ export function SoulEditor({
   name, value, placeholder, saving, onSave,
   title = "Soul", setLabel = "Shaped", emptyLabel = "Default voice", saveLabel = "Save Soul",
   hint = "Blank uses the assistant's default voice. It also updates itself when you give it feedback in chat.",
+  action,
 }: {
+  /** One more button beside Save, held off while there is an unsaved draft it would overwrite. */
+  action?: { label: string; icon: ReactNode; pending: boolean; onClick: () => void };
   /** Names the field for assistive tech and tests, e.g. `Soul for Home`. */
   name: string;
   value: string | null;
@@ -54,6 +57,17 @@ export function SoulEditor({
         {custom ? `${text.trim().length} / ${SOUL_MAX}` : hint}
       </small>
       <span className="ask-editor-actions">
+        {action && (
+          <button
+            className="button ghost"
+            type="button"
+            disabled={dirty || saving || action.pending}
+            title={dirty ? "Save or discard your edits first" : undefined}
+            onClick={action.onClick}
+          >
+            {action.icon}{action.label}
+          </button>
+        )}
         {value && (
           <button className="button ghost" type="button" disabled={saving} onClick={() => { setText(""); onSave(null); }}>
             <RotateCcw size={13}/>Reset

@@ -14,41 +14,57 @@ import type { Db } from "./types.ts";
 const GRACE_MS = 10 * 60 * 60_000;
 /** Older than this, it is not a thread they dropped yesterday but a backlog, which the digest covers. */
 const LOOKBACK_MS = 4 * 24 * 60 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
+/** Wider than any UTC offset, so the text prefilter on the indexed column never drops a row the exact check keeps. */
+const OFFSET_MARGIN_MS = 15 * 60 * 60_000;
 const MAX_ITEMS = 3;
 
-/** The local time the follow-up goes out, inside the usual quiet-hours gate. */
+/** The follow-up goes out in this local window, inside the usual quiet-hours gate; a day that misses it skips. */
 export const FOLLOW_UP_TIME = "10:00";
+export const FOLLOW_UP_UNTIL = "12:00";
 
-export type FollowUpItem = { id: string; title: string; due_at: string };
+export type FollowUpItem = { id: string; title: string; due_at: string; dateOnly: boolean };
 
 /**
  * Open, one-off todos of the owner's whose time passed yesterday or so and
- * that have never been followed up on. A step is left out when its parent is
- * in the list, so one question covers the whole job.
+ * that have never been followed up on. A todo with a date and no clock time
+ * is stored at local midnight and means "that day", so it counts as due at
+ * the end of it. A step is left out when its parent is in the list, so one
+ * question covers the whole job; a blocked todo is waiting on something, and
+ * is not asked about.
  */
-export function followUpCandidates(db: Db, at = new Date()): FollowUpItem[] {
-  const until = new Date(at.getTime() - GRACE_MS).toISOString();
-  const since = new Date(at.getTime() - LOOKBACK_MS).toISOString();
+export function followUpCandidates(db: Db, timezone: string, at = new Date()): FollowUpItem[] {
+  const until = at.getTime() - GRACE_MS;
+  const since = at.getTime() - LOOKBACK_MS;
   const rows = db.prepare(`
     SELECT t.id,t.title,t.due_at,t.parent_id FROM todos t
-    WHERE t.user_id=? AND t.status IN ('pending','in_progress','blocked')
+    WHERE t.user_id=? AND t.status IN ('pending','in_progress')
       AND t.recurrence_json IS NULL AND t.assistant_says=0 AND t.followed_up_at IS NULL
       AND t.due_at IS NOT NULL AND ${OWN_AREA_CLAUSE("t")}
-      -- Compared as instants: due_at carries the owner's offset, and as text
-      -- "21:00-04:00" sorts before "00:30Z" the next day, hours before it is due.
-      AND julianday(t.due_at)<=julianday(?) AND julianday(t.due_at)>=julianday(?)
-    ORDER BY julianday(t.due_at) DESC
-  `).all(USER_ID, until, since) as Array<FollowUpItem & { parent_id: string | null }>;
-  const ids = new Set(rows.map(row => row.id));
-  return rows.filter(row => !row.parent_id || !ids.has(row.parent_id)).slice(0, MAX_ITEMS)
-    .map(({ id, title, due_at }) => ({ id, title, due_at }));
+      AND t.due_at<=? AND t.due_at>=?
+  `).all(
+    USER_ID,
+    new Date(until + OFFSET_MARGIN_MS).toISOString(),
+    new Date(since - DAY_MS - OFFSET_MARGIN_MS).toISOString(),
+  ) as Array<{ id: string; title: string; due_at: string; parent_id: string | null }>;
+  // Compared as instants: due_at carries the owner's offset, and as text
+  // "21:00-04:00" sorts before "00:30Z" the next day, hours before it is due.
+  const due = rows.map(row => {
+    const instant = Date.parse(row.due_at);
+    const dateOnly = localParts(new Date(instant), timezone).time === "00:00";
+    return { ...row, dateOnly, effective: dateOnly ? instant + DAY_MS : instant };
+  }).filter(row => row.effective <= until && row.effective >= since)
+    .sort((a, b) => b.effective - a.effective);
+  const ids = new Set(due.map(row => row.id));
+  return due.filter(row => !row.parent_id || !ids.has(row.parent_id)).slice(0, MAX_ITEMS)
+    .map(({ id, title, due_at, dateOnly }) => ({ id, title, due_at, dateOnly }));
 }
 
 /** The instruction the follow-up text is written from. */
 export function composeFollowUpTurn(items: FollowUpItem[], context: { date: string; timezone: string }): string {
   const lines = items.map(item => {
     const due = localParts(new Date(item.due_at), context.timezone);
-    return `- "${item.title}" (was due ${due.date} ${due.time})`;
+    return `- "${item.title}" (was due ${item.dateOnly ? due.date : `${due.date} ${due.time}`})`;
   });
   return [
     "Write me one short text following up on what I said I would do and have not marked done.",
@@ -61,7 +77,10 @@ export function composeFollowUpTurn(items: FollowUpItem[], context: { date: stri
   ].join("\n");
 }
 
-/** Each is asked about once; a later morning never brings it up again. */
+/**
+ * Each is asked about once for the time it had; moving a todo clears the
+ * mark (a trigger on due_at), so a rescheduled one can be asked about again.
+ */
 export function markFollowedUp(db: Db, items: FollowUpItem[]): void {
   const stamp = now();
   const mark = db.prepare("UPDATE todos SET followed_up_at=? WHERE id=? AND user_id=?");

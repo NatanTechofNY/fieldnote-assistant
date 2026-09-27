@@ -186,7 +186,10 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   });
   const profile = useMutation({
     mutationFn: (next: string | null) => api.updateProfile(next),
-    onSuccess: () => { refresh(); notify("Profile saved"); },
+    onSuccess: (saved) => {
+      refresh();
+      notify(saved.profile ? "Profile saved" : "Profile cleared; it will be rewritten from your memories tonight");
+    },
     onError: (mutationError: Error) => notify(mutationError.message),
   });
   const refreshProfile = useMutation({
@@ -290,12 +293,14 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
           placeholder={"People: wife Cementa; sister Natella…\nLife & work: …\nRoutines & preferences: …"}
           saving={profile.isPending || refreshProfile.isPending}
           onSave={next => profile.mutate(next)}
+          action={{
+            label: "Rewrite now",
+            icon: refreshProfile.isPending ? <LoaderCircle className="spin" size={13}/> : <RefreshCw size={13}/>,
+            pending: refreshProfile.isPending,
+            onClick: () => refreshProfile.mutate(),
+          }}
         />
         <div className="toolbar-actions">
-          <button className="button ghost" type="button" disabled={refreshProfile.isPending} onClick={() => refreshProfile.mutate()}>
-            {refreshProfile.isPending ? <LoaderCircle className="spin" size={13}/> : <RefreshCw size={13}/>}
-            Rewrite profile now
-          </button>
           <label className="toggle-row compact">
             <input
               type="checkbox"

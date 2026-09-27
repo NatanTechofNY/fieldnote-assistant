@@ -355,7 +355,7 @@ const NO_TOOL_APP_TURNS = new Set([
  * chat — the reverse of a group turn's fence. The owner asking on their own
  * line is not fenced: "did we clean the kitchen?" is theirs to ask.
  */
-const OWN_RECORDS_APP_TURNS = new Set(["daily_digest", "digest_brief"]);
+const OWN_RECORDS_APP_TURNS = new Set(["daily_digest", "digest_brief", "follow_up", "profile_refresh"]);
 
 export function ownRecordsOnly(context: ToolTurnContext | undefined): boolean {
   return !context?.scope && Boolean(context?.appTurn && OWN_RECORDS_APP_TURNS.has(context.appTurn));
