@@ -6688,7 +6688,7 @@ describe("Sendblue provider", () => {
       else process.env.OPENAI_API_KEY = before;
     }
     assert.deepEqual(bodies, ["[Image: A cat asleep in a laundry basket.]"]);
-    assert.deepEqual(seen, [photo, "https://api.openai.com/v1/chat/completions"]);
+    assert.deepEqual(seen, [photo, "https://us.api.openai.com/v1/chat/completions"]);
 
     // A retry answers the words it archived the first time; nothing is fetched or paid for again.
     db.prepare(`
@@ -6730,9 +6730,9 @@ describe("Sendblue provider", () => {
       assert.equal(withMediaLines("look", ["[Image: x]"]), "look\n[Image: x]");
       assert.deepEqual(mediaUrlsOf({ NumMedia: "2", MediaUrl0: "https://api.twilio.com/m/0", MediaUrl1: "http://insecure/1" }), ["https://api.twilio.com/m/0"]);
 
-      // A key from a data-residency project goes to its region's host.
+      // The US host is the default; OPENAI_BASE_URL points elsewhere.
       process.env.OPENAI_API_KEY = "sk-proj-test";
-      process.env.OPENAI_BASE_URL = "https://us.api.openai.com/v1/";
+      process.env.OPENAI_BASE_URL = "https://api.openai.com/v1/";
       const asked: string[] = [];
       const regional: typeof fetch = async input => {
         asked.push(String(input));
@@ -6742,7 +6742,7 @@ describe("Sendblue provider", () => {
       };
       try {
         assert.deepEqual(await describeMedia(["https://cdn.example/logo.png"], regional), ["[Image: A logo.]"]);
-        assert.equal(asked[1], "https://us.api.openai.com/v1/chat/completions");
+        assert.equal(asked[1], "https://api.openai.com/v1/chat/completions");
       } finally {
         delete process.env.OPENAI_API_KEY;
         delete process.env.OPENAI_BASE_URL;

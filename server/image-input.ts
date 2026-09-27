@@ -10,11 +10,12 @@
 import { publicFetch, readCapped } from "./public-fetch.ts";
 
 /**
- * A key from a project with data residency is only accepted at that region's
- * host — `https://us.api.openai.com/v1` — and answers 401 anywhere else.
+ * The US regional host by default: a key from a project with US data
+ * residency is only accepted there, and answers 401 anywhere else.
+ * `OPENAI_BASE_URL` points elsewhere, e.g. `https://api.openai.com/v1`.
  */
 const openaiUrl = () =>
-  `${(process.env.OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "")}/chat/completions`;
+  `${(process.env.OPENAI_BASE_URL?.trim() || "https://us.api.openai.com/v1").replace(/\/+$/, "")}/chat/completions`;
 const DEFAULT_MODEL = "gpt-4o-mini";
 /** Every other thread waits behind this, so a slow picture gives up rather than stall the worker. */
 const TIMEOUT_MS = 12_000;
