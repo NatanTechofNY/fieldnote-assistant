@@ -1411,7 +1411,9 @@ export async function runChannelAgent(
       )) {
         saveToolTrace(db, thread.id, part);
         // Hosted search hits arrive already answered, so this is where one from a group is seen.
-        noteGroupContent(context, part.output);
+        // The continued message also hands back every client tool answered in an earlier round,
+        // under its own name, so the group directory is still not a read of every group.
+        noteGroupContent(context, part.output, String(part.type).slice(5));
       }
       const toolParts = response.parts.filter(part =>
         typeof part.type === "string"

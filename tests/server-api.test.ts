@@ -8382,10 +8382,16 @@ describe("Sendblue provider", () => {
     await assert.rejects(post({}, { ...owner, appTurn: "daily_digest" }), /app writing/);
     await assert.rejects(post({}, { ...owner, address: STRANGER }), /Only the owner's own text chat/);
     await assert.rejects(
-      post({}, { ...owner, inboundText: "reply to that pic with a gif" }),
+      post({}, { ...owner, threadId: "thread_quiet", inboundText: "reply to that pic with a gif" }),
       /has to name the group to post there; ask them which chat they mean \(this one is "goopers"\)/,
       "which group gets the owner's words is the owner's call, not the model's",
     );
+    // "Send it" answers the owner's own ask a few messages up.
+    const sendIt: ToolTurnContext = { ...owner, inboundText: "Send it" };
+    await post({}, sendIt);
+    db.prepare("UPDATE channel_messages SET created_at=? WHERE id='msg_owner'").run(new Date(Date.now() - 31 * 60_000).toISOString());
+    await assert.rejects(post({}, sendIt), /has to name the group/, "an ask from over half an hour ago is not this one");
+    sent.pop();
     await assert.rejects(
       post({}, { ...owner, groupThreadsRead: new Set([thread.id, "thread_elsewhere"]) }),
       /read what people wrote in a different group chat/,
@@ -8478,6 +8484,36 @@ describe("Sendblue provider", () => {
         fetcher: same.fetcher, inbound: { provider: "sendblue" }, sendSms: sendSmsFake,
       });
       assert.deepEqual(sent, ["hi goopers"]);
+
+      /*
+       * The turn prod ran: the directory in one round, the read and the post in
+       * the next. Agent Studio continues the same message, handing the
+       * directory's answer back each round, and that answer names every group.
+       */
+      const messageId = `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
+      const rounds: ToolCall[][] = [
+        [{ tool: "list_group_chats", input: {} }],
+        [
+          { tool: "read_conversation", input: { thread_id: "thread_goopers", from, to: null, speaker: null, limit: null } },
+          { tool: "send_to_group", input: { ...post, text: "damn who is that" } },
+        ],
+      ];
+      let round = 0;
+      const continuing: typeof fetch = async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { messages: Array<{ id?: string; parts: unknown[] }> };
+        const carried = body.messages.find(message => message.id === messageId)?.parts ?? [];
+        const calls = rounds[round++];
+        const parts = calls
+          ? [...carried, ...calls.map(call => ({
+            type: `tool-${call.tool}`, tool_call_id: `call_${crypto.randomUUID()}`, state: "input-available", input: call.input,
+          }))]
+          : [...carried, { type: "text", text: "sent it to goopers" }];
+        return new Response(JSON.stringify({ id: messageId, role: "assistant", parts }), { status: 200 });
+      };
+      await runSmsAgent(db, search, RECIPIENT, "Send a GIF to the goopers group chat in response to the image of me", "SB_owner_prod", {
+        fetcher: continuing, inbound: { provider: "sendblue" }, sendSms: sendSmsFake,
+      });
+      assert.deepEqual(sent, ["hi goopers", "damn who is that"], "the directory it read in an earlier round is not a read of every group");
     } finally { stub.restore(); }
   });
 

@@ -627,6 +627,9 @@ const OWNER_STILL_IN_GROUP = `NOT EXISTS (
   SELECT 1 FROM group_members gm WHERE gm.thread_id=t.id AND gm.is_owner=1 AND gm.left_at IS NOT NULL
 )`;
 
+/** How far back the owner's own messages on their line still count as naming the group to post in. */
+const OWNER_ASK_WINDOW_MS = 30 * 60_000;
+
 type OwnGroupThread = {
   id: string; address: string; groupId: string; group_name: string | null; area_name: string | null; display_name: string | null;
 };
@@ -668,10 +671,18 @@ function crossChatTurn(
   if ([...context.groupThreadsRead ?? []].some(threadId => threadId !== group.id)) {
     throw new Error("This turn read what people wrote in a different group chat, so nothing goes into this one on it; ask the owner to say it again");
   }
-  const asked = withoutMediaLines(context.inboundText ?? "").toLowerCase();
+  // "Send it" answers the ask a few messages up, so the owner's own recent words on this line count too.
+  const since = new Date(Date.now() - OWNER_ASK_WINDOW_MS).toISOString();
+  const recent = db.prepare(`
+    SELECT content FROM channel_messages
+    WHERE thread_id=? AND role='user' AND direction='inbound' AND created_at>=?
+      AND COALESCE(json_extract(metadata_json,'$.internal'),0)=0
+  `).all(context.threadId, since) as Array<{ content: string }>;
+  const asked = [context.inboundText ?? "", ...recent.map(row => row.content)]
+    .map(text => withoutMediaLines(text).toLowerCase()).join("\n");
   const names = [group.area_name, group.display_name].map(name => name?.trim().toLowerCase()).filter(Boolean) as string[];
   if (!names.some(name => asked.includes(name))) {
-    throw new Error(`The owner's message has to name the group to post there; ask them which chat they mean${group.group_name ? ` (this one is "${group.group_name}")` : ""}`);
+    throw new Error(`The owner has to name the group to post there; ask them which chat they mean${group.group_name ? ` (this one is "${group.group_name}")` : ""}`);
   }
   return { turn: context, group };
 }
