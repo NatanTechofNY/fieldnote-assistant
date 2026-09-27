@@ -1509,7 +1509,9 @@ it("offers the origin the app is served from as the webhook URL", async () => {
   } finally {
     Object.defineProperty(window, "location", { configurable: true, value: original });
   }
-});
+  // Typing a whole URL key by key runs past the default 5s under CI coverage;
+  // cut off, the `finally` never ran and the next test saw this origin.
+}, 20_000);
 
 it("keeps the webhook field empty in development, where the origin is plain HTTP", async () => {
   window.localStorage.clear();
