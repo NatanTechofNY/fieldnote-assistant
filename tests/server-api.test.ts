@@ -28,6 +28,7 @@ import { composeDigestTurn } from "../server/daily-digest.ts";
 import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } from "../server/event-ingestion.ts";
 import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
 import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } from "../server/group-thread.ts";
+import { describeMedia, mediaUrlsOf, withMediaLines } from "../server/image-input.ts";
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
@@ -6371,6 +6372,63 @@ describe("Sendblue provider", () => {
         "no reaction is taken back; only the give-up line goes out",
       );
     } finally { stub.restore(); }
+  });
+
+  /*
+   * Agent Studio takes only text on a user message, so a picture reaches the
+   * agent as a description. A picture sent with no words is still a message.
+   */
+  it("describes a picture someone sends and hands the agent the description", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const before = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-test";
+    const photo = "https://cdn.sendblue.example/photo.jpg";
+    const payload = groupMessage(WIFE, "", { media_url: photo, message_handle: "SB_photo_only" });
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(payload).expect(200);
+    await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`)
+      .send(groupMessage(WIFE, "", { message_handle: "SB_nothing" })).expect(400);
+
+    const seen: string[] = [];
+    let visionBody: { messages: Array<{ content: unknown }> } | undefined;
+    const network: typeof fetch = async (input, init) => {
+      const url = String(input);
+      seen.push(url);
+      if (url === photo) return new Response(new Uint8Array([0xff, 0xd8, 0xff]), { headers: { "content-type": "image/jpeg" } });
+      visionBody = JSON.parse(String(init?.body));
+      return json({ choices: [{ message: { content: "A cat asleep in a laundry basket." } }] });
+    };
+    const bodies: string[] = [];
+    try {
+      await runWorkerOnce(db, fakeSearch(db), {
+        runSmsAgent: async (...args: Parameters<typeof runSmsAgent>) => {
+          bodies.push(args[3]);
+          assert.deepEqual((args[5]?.userMessageMetadata as { mediaUrls?: string[] }).mediaUrls, [photo]);
+          return { text: "", threadId: "thread" } as Awaited<ReturnType<typeof runSmsAgent>>;
+        },
+        pollGranola: async () => ({ fetched: 0, queued: 0 }),
+        startTypingIndicator: () => () => {},
+        fetch: network,
+      });
+    } finally {
+      if (before === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = before;
+    }
+    assert.deepEqual(bodies, ["[Image: A cat asleep in a laundry basket.]"]);
+    assert.deepEqual(seen, [photo, "https://api.openai.com/v1/chat/completions"]);
+    assert.match(JSON.stringify(visionBody?.messages[1].content), /data:image\/jpeg;base64,/, "the picture is sent as bytes, not a link the model fetches");
+  });
+
+  it("tells the agent a picture came when there is no way to see it", async () => {
+    const before = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      assert.deepEqual(await describeMedia(["https://cdn.example/a.jpg"]), ["[Picture attached — you cannot see pictures right now]"]);
+      assert.equal(withMediaLines("look", ["[Image: x]"]), "look\n[Image: x]");
+      assert.deepEqual(mediaUrlsOf({ NumMedia: "2", MediaUrl0: "https://api.twilio.com/m/0", MediaUrl1: "http://insecure/1" }), ["https://api.twilio.com/m/0"]);
+    } finally {
+      if (before !== undefined) process.env.OPENAI_API_KEY = before;
+    }
   });
 
   /*
