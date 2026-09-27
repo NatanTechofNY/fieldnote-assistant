@@ -8,6 +8,8 @@ import { disconnectAtlassian, disconnectGranola, disconnectSendblue, disconnectT
 import { isSmsProviderConnected } from "../messaging.ts";
 import { atlassianConfigInput, notificationInput, ownerSoulInput, sendblueConfigInput, smsProviderInput, taskPreferencesInput, twilioConfigInput } from "../schemas.ts";
 import { ownerSoul, setOwnerSoul } from "../soul.ts";
+import { followUpsEnabled, setFollowUpsEnabled } from "../follow-ups.ts";
+import { composeProfileTurn, ownerProfile, PROFILE_MAX, setOwnerProfile } from "../profile.ts";
 import { configureSendblueWebhooks, enableSendblueAcknowledgements, newSendblueWebhookSecret, SENDBLUE_INBOUND_PATH, SENDBLUE_STATUS_PATH, sendSendblueSms, validateSendblueConfig } from "../sendblue-service.ts";
 import { executeAgentTool } from "../tool-executor.ts";
 import { configureTwilioWebhook, sendTwilioSms, validateTwilioConfig } from "../twilio-service.ts";
@@ -16,7 +18,7 @@ import type { RouteContext } from "./context.ts";
 
 const TEST_MESSAGE = "Fieldnote SMS is connected. Your reminders are ready.";
 
-export function registerIntegrationRoutes({ app, db, search }: RouteContext): void {
+export function registerIntegrationRoutes({ app, db, search, draftWithAgent }: RouteContext): void {
   app.get("/api/integrations", (_req, res) => success(res, {
     secretStorageReady: Boolean(process.env.SETTINGS_ENCRYPTION_KEY),
     twilio: getTwilioPublicConfig(db),
@@ -26,6 +28,8 @@ export function registerIntegrationRoutes({ app, db, search }: RouteContext): vo
     notifications: getNotificationPreferences(db),
     tasks: getTaskPreferences(db),
     soul: ownerSoul(db),
+    profile: ownerProfile(db),
+    followUps: followUpsEnabled(db),
     /* The asks the check-ins use when the owner has not reworded them, shown beside the override fields. */
     checkinDefaults: CHECKIN_DEFAULTS,
     webhookPaths: {
@@ -150,6 +154,27 @@ export function registerIntegrationRoutes({ app, db, search }: RouteContext): vo
     success(res, saveTaskPreferences(db, taskPreferencesInput.parse(req.body))));
   app.put("/api/integrations/soul", (req, res) =>
     success(res, { soul: setOwnerSoul(db, ownerSoulInput.parse(req.body).soul) }));
+  app.put("/api/integrations/profile", (req, res) => {
+    const { profile } = z.object({ profile: z.string().max(PROFILE_MAX).nullable() }).strict().parse(req.body);
+    setOwnerProfile(db, profile);
+    return success(res, ownerProfile(db));
+  });
+  // Rewrites the profile from the owner's facts now, rather than waiting for the night.
+  app.post("/api/integrations/profile/refresh", async (_req, res) => {
+    let text: string;
+    try {
+      text = await draftWithAgent(composeProfileTurn(db), "profile:owner", { context: { kind: "profile_refresh" } });
+    } catch (error) {
+      return failure(res, 502, error instanceof Error ? error.message : "The assistant could not write the profile");
+    }
+    if (!text.trim()) return failure(res, 502, "The assistant returned no profile");
+    setOwnerProfile(db, text);
+    return success(res, ownerProfile(db));
+  });
+  app.put("/api/integrations/follow-ups", (req, res) => {
+    const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(req.body);
+    return success(res, { followUps: setFollowUpsEnabled(db, enabled) });
+  });
   app.post("/api/integrations/granola/connect", async (req, res) => {
     const body = z.object({ apiKey: z.string().min(10).max(500) }).strict().parse(req.body);
     const response = await fetch("https://public-api.granola.ai/v1/notes?page_size=1", {

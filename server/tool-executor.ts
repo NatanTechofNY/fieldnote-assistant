@@ -345,7 +345,9 @@ export type ToolTurnContext = {
 /** How many rows a speaker-filtered `read_conversation` looks through per call before handing back a cursor. */
 const SPEAKER_SCAN_LIMIT = 5000;
 
-const NO_TOOL_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "checkin_ask_draft", "assistant_say"]);
+const NO_TOOL_APP_TURNS = new Set([
+  "group_morning", "group_evening", "evening_checkin", "checkin_ask_draft", "assistant_say", "follow_up", "profile_refresh",
+]);
 
 /**
  * App-composed turns that report on the owner's own day. A group's work is its
