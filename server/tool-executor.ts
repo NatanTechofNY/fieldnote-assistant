@@ -47,6 +47,7 @@ function sharedInThread(db: Db, context: ToolTurnContext | undefined, url: strin
   const rows = db.prepare(`
     SELECT content FROM channel_messages
     WHERE thread_id=? AND role='user' AND direction='inbound' AND created_at>=? AND content LIKE ?
+      AND COALESCE(json_extract(metadata_json,'$.internal'),0)=0
     ORDER BY created_at DESC LIMIT 50
   `).all(context.threadId, since, "%https://%") as Array<{ content: string }>;
   return rows.some(row => linksIn(row.content).includes(url));
@@ -358,6 +359,9 @@ const OWNER_ONLY_TOOLS = new Set([
 
 const DELETE_TOOLS = new Set(["delete_todo", "delete_memory", "delete_reminder"]);
 
+/** Tools that put something in the chat besides the turn's own reply. */
+const SENDING_TOOLS = new Set(["send_message", "send_image", "send_product_cards"]);
+
 /**
  * One counted lookup: the call is returned to the day's allowance when it
  * failed without Bright Data doing the work, and kept when it timed out.
@@ -540,6 +544,11 @@ export async function executeAgentTool(
     );
   }
   const ownOnly = ownRecordsOnly(context);
+  // Staying quiet in a group is final: the text after it is dropped, and so is
+  // anything sent another way.
+  if (scope && context?.stayedQuiet && SENDING_TOOLS.has(name)) {
+    throw new Error("You chose to stay quiet on this message; nothing more goes out this turn");
+  }
 
   if (name === "send_message") {
     // One bubble now, ahead of the turn's own reply: an emoji, an "on it", a

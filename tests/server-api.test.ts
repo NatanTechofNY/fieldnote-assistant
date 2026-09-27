@@ -30,11 +30,16 @@ import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } f
 import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } from "../server/group-thread.ts";
 import { describeMedia, mediaUrlsOf, withMediaLines } from "../server/image-input.ts";
 import { relevantFacts } from "../server/memory-context.ts";
+import { setHostResolver } from "../server/public-fetch.ts";
+
+// No test reaches real DNS: every host is public unless a test says otherwise.
+setHostResolver(async () => ["93.184.216.34"]);
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { executeAgentTool, type ToolTurnContext } from "../server/tool-executor.ts";
 import { resetWebState } from "../server/web-service.ts";
+import { rememberImages } from "../server/image-output.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
 import { TransientFailure } from "../server/transient.ts";
 import { sendTwilioSms } from "../server/twilio-service.ts";
@@ -2710,6 +2715,10 @@ describe("web tools", () => {
       `);
       insert.run("msg_link_user", "thread_links", "inbound", "user", "look at this https://www.reddit.com/r/x/s/5DkL1Fo9wU!", stamp, stamp);
       insert.run("msg_link_bot", "thread_links", "outbound", "assistant", "see https://evil.example.com/?leak=1", stamp, stamp);
+      db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+        VALUES('msg_link_app','thread_links','inbound','user','Digest context https://app.example.com/x','received','{"internal":true}',?,?)
+      `).run(stamp, stamp);
       const context: ToolTurnContext = { channel: "sms", address: "+15550100", threadId: "thread_links", inboundText: "and https://lnkd.in/p/g6PNsYk9." };
 
       const earlier = await executeAgentTool(db, { flushSoon() {} }, "read_web_page", { url: "https://www.reddit.com/r/x/s/5DkL1Fo9wU" }, context) as { url: string };
@@ -2720,6 +2729,11 @@ describe("web tools", () => {
         executeAgentTool(db, { flushSoon() {} }, "read_web_page", { url: "https://evil.example.com/?leak=1" }, context),
         /links someone in this conversation sent/,
         "a link the assistant wrote is one the model composed",
+      );
+      await assert.rejects(
+        executeAgentTool(db, { flushSoon() {} }, "read_web_page", { url: "https://app.example.com/x" }, context),
+        /links someone in this conversation sent/,
+        "an instruction the app composed is not a person sending a link",
       );
     } finally {
       stub.restore();
@@ -2794,6 +2808,37 @@ describe("web tools", () => {
       await assert.rejects(
         executeAgentTool(db, { flushSoon() {} }, "send_image", { url: "https://pics.example.com/pixel", caption: null }, context),
         /Only a picture find_gif returned/,
+      );
+
+      // A page can name any host; our server checks each hop before it asks.
+      setHostResolver(async host => host === "intranet.example.com" ? ["10.0.0.5"] : ["93.184.216.34"]);
+      try {
+        rememberImages("thread_gif", ["https://intranet.example.com/cat.jpg", "https://pics.example.com/bounce.jpg"]);
+        await assert.rejects(
+          executeAgentTool(db, { flushSoon() {} }, "send_image", { url: "https://intranet.example.com/cat.jpg", caption: null }, context),
+          /does not point at a public address/,
+        );
+        const bouncing = globalThis.fetch;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith("/bounce.jpg")
+          ? new Response(null, { status: 302, headers: { location: "https://intranet.example.com/secret.jpg" } })
+          : bouncing(input, init)) as typeof fetch;
+        try {
+          await assert.rejects(
+            executeAgentTool(db, { flushSoon() {} }, "send_image", { url: "https://pics.example.com/bounce.jpg", caption: null }, context),
+            /does not point at a public address/,
+            "a redirect to a private host is refused too",
+          );
+        } finally { globalThis.fetch = bouncing; }
+      } finally {
+        setHostResolver(async () => ["93.184.216.34"]);
+      }
+
+      // Once a group turn stayed quiet, nothing else goes out.
+      await assert.rejects(
+        executeAgentTool(db, { flushSoon() {} }, "send_image", { url: gifUrl, caption: null }, {
+          ...context, groupId: "g", scope: { lifeAreaId: "area_x", threadId: "thread_gif" }, stayedQuiet: true,
+        }),
+        /You chose to stay quiet/,
       );
 
       // The browser has nowhere to put an attachment.
@@ -6504,6 +6549,17 @@ describe("Sendblue provider", () => {
     await post("tired, 3", "SB_evening_answer");
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.deepEqual(answered.at(-1), "tired, 3");
+
+    // A reminder the app just sent into the chat is answered with a bare "done".
+    db.prepare("UPDATE channel_messages SET created_at=? WHERE id='msg_evening'").run(new Date(Date.now() - 7 * 3600_000).toISOString());
+    const later = new Date(Date.now() + 1000).toISOString();
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('msg_reminder','thread_named','outbound','assistant','Reminder: laundry','sent','{"kind":"reminder"}',?,?)
+    `).run(later, later);
+    await post("done", "SB_reminder_done");
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(answered.at(-1), "done");
 
     assert.equal(addressesAssistant("Goop, stop", "goop"), true);
     assert.equal(addressesAssistant("goopy mood", "goop"), false, "a word that merely contains the nickname is not the name");

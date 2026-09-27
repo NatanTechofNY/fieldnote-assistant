@@ -8,6 +8,7 @@
  * choosing in its query string.
  */
 
+import { publicFetch } from "./public-fetch.ts";
 import { rememberLinks, wasReturned } from "./web-service.ts";
 
 const GIPHY_URL = "https://api.giphy.com/v1/gifs/search";
@@ -97,10 +98,19 @@ export async function assertSendableImage(url: string, fetcher: typeof fetch = f
     throw new Error("The link must end in .jpg, .png, .gif, or .webp to go out as a picture; pick another");
   }
   const signal = AbortSignal.timeout(TIMEOUT_MS);
-  let response = await fetcher(url, { method: "HEAD", signal, redirect: "follow" });
+  // The link came off someone else's page, so every hop is checked before our
+  // server requests it.
+  const check = async (method: string) => {
+    try {
+      return await publicFetch(url, { method, signal }, fetcher);
+    } catch (error) {
+      throw new Error(`That picture link cannot be used (${error instanceof Error ? error.message : String(error)}); pick another`, { cause: error });
+    }
+  };
+  let response = await check("HEAD");
   // Some image hosts answer HEAD with 403 or 405 and GET with the picture.
   if (!response.ok) {
-    response = await fetcher(url, { method: "GET", signal, redirect: "follow" });
+    response = await check("GET");
     void response.body?.cancel();
   }
   if (!response.ok) throw new Error(`The picture could not be fetched (HTTP ${response.status}); pick another`);

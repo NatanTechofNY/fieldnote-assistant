@@ -617,14 +617,18 @@ function repliesToAssistant(db: Db, threadId: string, inbound: InboundContext | 
 
 /** How long after the evening question the answers to it are still coming in. */
 const EVENING_ANSWER_WINDOW_MS = 6 * 60 * 60_000;
+/** How long a reminder or morning note in the chat can still be answered with a bare "done". */
+const PROMPTED_ANSWER_WINDOW_MS = 2 * 60 * 60_000;
 
 /**
  * Files a group message without answering it, when the group has asked the
  * assistant to stay out until named and this message does not name it or
  * reply to it. Returns false — nothing filed — when the message is for it after
- * all. The evening question is the one exception: answers to it are the day's
- * shared journal entry, which only the assistant writes, so for a few hours
- * after it went out every message still reaches the agent.
+ * all. Two exceptions, both the app asking the room something: answers to the
+ * evening question are the day's shared journal entry, which only the
+ * assistant writes, so for a few hours after it went out every message still
+ * reaches the agent; and when the last thing the assistant said was a reminder
+ * or the morning note, "done" or "push it to Monday" is an answer to it.
  */
 export function holdUntilNamed(
   db: Db,
@@ -647,6 +651,15 @@ export function holdUntilNamed(
     LIMIT 1
   `).get(thread.id, since);
   if (eveningAsked) return false;
+  const lastSaid = db.prepare(`
+    SELECT json_extract(metadata_json,'$.kind') kind,created_at FROM channel_messages
+    WHERE thread_id=? AND role='assistant' AND status<>'failed'
+    ORDER BY created_at DESC,rowid DESC LIMIT 1
+  `).get(thread.id) as { kind: string | null; created_at: string } | undefined;
+  if (lastSaid && ["reminder", "group_morning"].includes(lastSaid.kind ?? "")
+    && Date.now() - Date.parse(lastSaid.created_at) < PROMPTED_ANSWER_WINDOW_MS) {
+    return false;
+  }
   saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, heldUntilNamed: true });
   return true;
 }

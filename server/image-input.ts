@@ -7,6 +7,8 @@
  * again. Without a key the agent is told a picture came that it cannot see.
  */
 
+import { publicFetch, readCapped } from "./public-fetch.ts";
+
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_MODEL = "gpt-4o-mini";
 const TIMEOUT_MS = 20_000;
@@ -48,18 +50,15 @@ async function download(
   signal: AbortSignal,
   fetcher: typeof fetch,
 ): Promise<{ type: string; bytes: Buffer } | { type: string; bytes?: undefined }> {
-  const response = await fetcher(url, { signal, redirect: "follow" });
+  // A provider's own CDN in practice, but the link is still one we did not choose.
+  const response = await publicFetch(url, { signal }, fetcher);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const type = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
   if (!type.startsWith("image/")) {
     await response.body?.cancel();
     return { type };
   }
-  const declared = Number(response.headers.get("content-length") || 0);
-  if (declared > MAX_IMAGE_BYTES) throw new Error("image is larger than 10 MB");
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error("image is larger than 10 MB");
-  return { type, bytes };
+  return { type, bytes: await readCapped(response, MAX_IMAGE_BYTES) };
 }
 
 async function describeOne(url: string, fetcher: typeof fetch): Promise<string> {

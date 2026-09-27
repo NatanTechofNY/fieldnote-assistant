@@ -175,7 +175,7 @@ const checkinPrompt = z.string().trim().min(1, "Write the ask, or clear it to us
 /** A Soul rides on every turn's context, so it stays a short list of rules rather than an essay. */
 export const SOUL_MAX = 1200;
 const soulText = z.string().trim().max(SOUL_MAX, `Keep the Soul under ${SOUL_MAX} characters`);
-const assistantNickname = z.string().trim().min(1).max(40)
+const assistantNickname = z.string().trim().min(2, "A nickname needs at least two letters").max(40)
   .regex(/^[\p{L}\p{N}][\p{L}\p{N} .'-]*$/u, "A nickname is letters, numbers, and spaces");
 
 /** A request for the agent to draft an ask: which one, what it should be like, and the group when it is a group's. */
