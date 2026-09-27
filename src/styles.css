@@ -1894,9 +1894,9 @@ tr:hover .attach-button,
 .feature-ledger-grid footer svg { transition:transform .2s ease; }
 .feature-ledger-grid article:hover footer svg { transform:translateX(3px); }
 
-/* Panel three: four doors, every other one dropped so the row reads as a wave
+/* Panel three: the doors, every other one dropped so the rows read as a wave
    and tinted dark so no card is a copy of its neighbour. */
-.doors-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; }
+.doors-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
 .door-card {
   position:relative; display:flex; flex-direction:column; min-height:304px; padding:22px; overflow:hidden;
   border:1px solid var(--border); border-radius:var(--radius-lg); box-shadow:var(--shadow-sm);
@@ -1925,7 +1925,7 @@ tr:hover .attach-button,
 .door-card > small { display:block; margin-top:auto; padding-top:20px; color:var(--text-tertiary); font-size:11.5px; line-height:1.65; }
 .doors-security { display:flex; align-items:center; gap:8px; margin:18px 0 0; color:var(--text-tertiary); font-size:12px; }
 .doors-security svg { color:var(--success); }
-/* Four across needs the room. Two keeps the wave and the copy readable, and the
+/* Three across needs the room. Two keeps the wave and the copy readable, and the
    range is bounded so the one-column rule further down still wins on a phone. */
 @media (min-width: 1051px) and (max-width: 1360px) {
   .doors-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }

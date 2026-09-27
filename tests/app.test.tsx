@@ -1966,9 +1966,12 @@ it("explains searchable conversations and the core feature loops", async () => {
   // The heading carries a deliberate line break, so match across its elements.
   expect(screen.getByRole("heading", { name: /One private system\.\s*Four useful loops\./ })).toBeInTheDocument();
   expect(screen.getByText("Remember the conversation")).toBeInTheDocument();
-  expect(screen.getByText("Four doors into the same system.")).toBeInTheDocument();
+  expect(screen.getByText("Six doors into the same system.")).toBeInTheDocument();
   expect(screen.getByText("iMessage with Sendblue")).toBeInTheDocument();
   expect(screen.getByText(/answer with a tapback or reply inside a thread/)).toBeInTheDocument();
+  expect(screen.getByText("Share it in a group chat")).toBeInTheDocument();
+  expect(screen.getByText(/never reaches your own todos and memories/)).toBeInTheDocument();
+  expect(screen.getByText("Look it up on the web")).toBeInTheDocument();
   expect(screen.getByText("Read from Atlassian")).toBeInTheDocument();
   expect(screen.getByText(/A brief you write in your own words runs on its own schedule/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: /Recall/ }));
