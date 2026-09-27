@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, MessageSquareText, Moon, PenLine, Sun } from "lucide-react";
+import { AtSign, Copy, MessageSquareText, Moon, PenLine, Sparkles, Sun } from "lucide-react";
 import { api } from "../../api";
-import type { IntegrationState, LifeArea } from "../../types";
+import type { IntegrationState, LifeArea, ReplyMode } from "../../types";
 import { AskEditor } from "./AskEditor";
+import { SoulEditor } from "./SoulEditor";
 
 type CheckinPatch = {
   id: string;
@@ -12,6 +13,9 @@ type CheckinPatch = {
   checkin_copy_to_owner?: boolean;
   morning_checkin_prompt?: string | null;
   evening_checkin_prompt?: string | null;
+  soul?: string | null;
+  assistant_nickname?: string | null;
+  reply_mode?: ReplyMode;
 };
 
 /**
@@ -119,8 +123,69 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
           <small className="field-hint">Write <code>{"{group}"}</code> anywhere to stand for the group&rsquo;s current name.</small>
         </div>
       </details>
+      <details className="checkin-wording">
+        <summary>
+          <Sparkles size={13} aria-hidden="true"/>
+          <span>Voice</span>
+          <small>
+            {group.reply_mode === "named_only" ? "Answers only when named" : "Answers when it is spoken to"}
+            {group.assistant_nickname ? ` · goes by ${group.assistant_nickname}` : ""}
+            {" · "}how the assistant talks here, shaped by the group&rsquo;s feedback
+          </small>
+        </summary>
+        <div className="checkin-wording-body">
+          <label className={`life-area-checkin ${group.reply_mode === "named_only" ? "on" : ""}`} title="Stays out of the chat until someone says its name or replies to it">
+            <input
+              type="checkbox"
+              checked={group.reply_mode === "named_only"}
+              aria-label={`Answer only when named in ${group.name}`}
+              onChange={event => checkin.mutate({ id: group.id, reply_mode: event.target.checked ? "named_only" : "normal" })}
+            />
+            <AtSign size={12} aria-hidden="true"/>
+            <span>Answer only when named</span>
+          </label>
+          <NicknameField
+            group={group}
+            saving={checkin.isPending}
+            onSave={nickname => checkin.mutate({ id: group.id, assistant_nickname: nickname })}
+          />
+          <SoulEditor
+            name={`Soul for ${group.name}`}
+            value={group.soul ?? null}
+            placeholder={"- One short line at most.\n- No follow-up questions.\n- Jokes are fine; no bits."}
+            saving={checkin.isPending}
+            onSave={soul => checkin.mutate({ id: group.id, soul })}
+          />
+        </div>
+      </details>
     </div>)}
   </div>;
+}
+
+/** What the group calls the assistant; it answers to this like its own name. Saves on leave or Enter. */
+function NicknameField({ group, saving, onSave }: {
+  group: LifeArea;
+  saving: boolean;
+  onSave: (nickname: string | null) => void;
+}) {
+  const value = group.assistant_nickname ?? null;
+  const [state, setState] = useState({ base: value, typed: value ?? "" });
+  const typed = state.base === value ? state.typed : (value ?? "");
+  const commit = () => { if ((typed.trim() || null) !== value) onSave(typed.trim() || null); };
+  return <label className="nickname-field">
+    <span>Goes by</span>
+    <input
+      className="input"
+      value={typed}
+      maxLength={40}
+      disabled={saving}
+      placeholder="Fieldnote"
+      aria-label={`Nickname in ${group.name}`}
+      onChange={event => setState({ base: value, typed: event.target.value })}
+      onBlur={commit}
+      onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); commit(); } }}
+    />
+  </label>;
 }
 
 /**

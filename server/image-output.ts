@@ -42,7 +42,7 @@ export async function searchGifs(query: string, limit: number, fetcher: typeof f
   try {
     response = await fetcher(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   } catch (error) {
-    throw new Error(`GIPHY did not answer: ${error instanceof Error ? error.message : String(error)}`.replaceAll(apiKey, "…"));
+    throw new Error(`GIPHY did not answer: ${error instanceof Error ? error.message : String(error)}`.replaceAll(apiKey, "…"), { cause: error });
   }
   if (!response.ok) throw new Error(`GIPHY search failed (${response.status})`);
   const json = await response.json() as {

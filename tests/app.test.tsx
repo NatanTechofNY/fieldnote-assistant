@@ -208,6 +208,8 @@ let digestBriefs: Array<Record<string, unknown> & { id: string }> = [];
  * uses a tool is scripted as two entries.
  */
 let agentStream: Array<Array<Record<string, unknown>>> = [];
+const soulSaves: Array<string | null> = [];
+let ownerSoul: string | null = null;
 /** What `/api/agent/context` answers: the owner's Soul and the facts for the draft. */
 let turnMemory: { soul: string | null; ownerFacts: Array<{ title: string | null; content: string; tags: string[] }> } = { soul: null, ownerFacts: [] };
 
@@ -232,6 +234,8 @@ function resetAtlassianFixtures() {
   };
   digestBriefs = [];
   turnMemory = { soul: null, ownerFacts: [] };
+  ownerSoul = null;
+  soulSaves.length = 0;
 }
 
 vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -249,6 +253,9 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       success: true,
       data: todo({ id, title: "Review RFC for Alex", status }),
     }));
+  }
+  if (url.endsWith("/api/admin/memories/tag-preferences")) {
+    return new Response(JSON.stringify({ success: true, data: { applied: true, count: 2, memories: [] } }));
   }
   if (url.includes("/api/admin/algolia/neural-search")) {
     const { enabled } = JSON.parse(String(init?.body ?? "{}")) as { enabled: boolean };
@@ -684,10 +691,17 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     notificationSaves.push(body);
     return new Response(JSON.stringify({ success: true, data: { ...body, smsProvider: "twilio", optedOutAt: null } }));
   }
+  if (url.endsWith("/api/integrations/soul")) {
+    const { soul } = JSON.parse(String(init?.body ?? "{}")) as { soul: string | null };
+    soulSaves.push(soul);
+    ownerSoul = soul;
+    return new Response(JSON.stringify({ success: true, data: { soul } }));
+  }
   if (url.endsWith("/api/integrations")) return new Response(JSON.stringify({
     success: true,
     data: {
       secretStorageReady: true,
+      soul: ownerSoul,
       twilio: { configured: false, status: "disconnected" },
       sendblue: { configured: false, status: "disconnected" },
       granola: { configured: false, status: "disconnected" },
@@ -1575,6 +1589,55 @@ it("saves the owner's evening check-in time with the SMS schedule", async () => 
   await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
   await waitFor(() => expect(notificationSaves).toHaveLength(3));
   expect(notificationSaves[2].eveningCheckinPrompt).toBe("Ask me for a high and a low, then a mood 1–5.");
+});
+
+/** A group's voice: whether it waits to be named, what it is called there, and its Soul. */
+it("shapes a group's voice from the Group chats section", async () => {
+  window.localStorage.clear();
+  lifeAreaPatches.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Group chats"));
+
+  const named = await screen.findByLabelText("Answer only when named in Home");
+  expect(named).not.toBeChecked();
+  await userEvent.click(named);
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { reply_mode: "named_only" } }));
+
+  const nickname = screen.getByLabelText("Nickname in Home");
+  await userEvent.type(nickname, "Goop{Enter}");
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { assistant_nickname: "Goop" } }));
+
+  const soul = screen.getByLabelText("Soul for Home");
+  fireEvent.change(soul, { target: { value: "- One line.\n- No follow-up questions. " } });
+  await userEvent.click(within(soul.closest(".ask-editor") as HTMLElement).getByRole("button", { name: /Save Soul/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { soul: "- One line.\n- No follow-up questions." } }));
+  await userEvent.click(await within(soul.closest(".ask-editor") as HTMLElement).findByRole("button", { name: /Reset/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { soul: null } }));
+});
+
+/** The owner's own Soul sits in its own section, with the preference backfill beside it. */
+it("saves the owner's Soul and tags preference memories", async () => {
+  window.localStorage.clear();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText(/How the assistant talks with you/));
+  const soul = await screen.findByLabelText("Your Soul");
+  fireEvent.change(soul, { target: { value: "- Dry humour is fine." } });
+  await userEvent.click(within(soul.closest(".ask-editor") as HTMLElement).getByRole("button", { name: /Save Soul/ }));
+  await waitFor(() => expect(soulSaves).toEqual(["- Dry humour is fine."]));
+  await userEvent.click(screen.getByRole("button", { name: /Tag preference memories/ }));
+  expect(await screen.findByText("Tagged 2 memories as preferences")).toBeInTheDocument();
 });
 
 /**
