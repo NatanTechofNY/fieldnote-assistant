@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AtSign, Copy, MessageSquareText, Moon, PenLine, Sparkles, Sun } from "lucide-react";
+import { AtSign, Copy, LoaderCircle, MessageSquareText, Moon, PenLine, RefreshCw, Sparkles, Sun } from "lucide-react";
 import { api } from "../../api";
 import type { IntegrationState, LifeArea, ReplyMode } from "../../types";
 import { AskEditor } from "./AskEditor";
@@ -36,6 +36,19 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
   const checkin = useMutation({
     mutationFn: ({ id, ...fields }: CheckinPatch) => api.updateLifeArea(id, fields),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["life-areas"] }),
+    onError: (error: Error) => notify(error.message),
+  });
+  const profile = useMutation({
+    mutationFn: ({ id, profile: text }: { id: string; profile: string | null }) => api.updateGroupProfile(id, text),
+    onSuccess: (saved) => {
+      void queryClient.invalidateQueries({ queryKey: ["life-areas"] });
+      notify(saved.profile ? "Profile saved" : "Profile cleared; it will be rewritten tonight");
+    },
+    onError: (error: Error) => notify(error.message),
+  });
+  const rewrite = useMutation({
+    mutationFn: (id: string) => api.refreshGroupProfile(id),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["life-areas"] }); notify("Profile rewritten from the group's memories"); },
     onError: (error: Error) => notify(error.message),
   });
   if (!groups.length) {
@@ -155,6 +168,24 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
             placeholder={"- One short line at most.\n- No follow-up questions.\n- Jokes are fine; no bits."}
             saving={checkin.isPending}
             onSave={soul => checkin.mutate({ id: group.id, soul })}
+          />
+          <SoulEditor
+            name={`Profile for ${group.name}`}
+            title="Profile"
+            setLabel={group.profile_updated_at ? `Updated ${new Date(group.profile_updated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : "Written"}
+            emptyLabel="Not written yet"
+            saveLabel="Save profile"
+            hint="What the assistant knows about the people here. It rewrites this overnight from the group's memories and who's in it; edit it to correct anything."
+            value={group.profile ?? null}
+            placeholder={"People: Natella — the owner's sister; Halo — Natella's boyfriend, birthday Nov 26…\nShared: …\nPreferences: …"}
+            saving={profile.isPending || rewrite.isPending}
+            onSave={text => profile.mutate({ id: group.id, profile: text })}
+            action={{
+              label: "Rewrite now",
+              icon: rewrite.isPending ? <LoaderCircle className="spin" size={13}/> : <RefreshCw size={13}/>,
+              pending: rewrite.isPending,
+              onClick: () => rewrite.mutate(group.id),
+            }}
           />
         </div>
       </details>

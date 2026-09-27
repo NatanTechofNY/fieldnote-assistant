@@ -1724,7 +1724,8 @@ it("schedules a group's check-ins, and a copy to the owner, from the Group chats
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({
     id: "area_group", body: { morning_checkin_prompt: "Drafted for: Sarah and me running the house" },
   }));
-});
+  // A long walk through the settings: past the default 5s on a loaded CI runner.
+}, 20_000);
 
 it("fills the brief form from the end-of-day template and flags a send time inside quiet hours", async () => {
   window.localStorage.clear();

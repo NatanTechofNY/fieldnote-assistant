@@ -31,7 +31,7 @@ import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } fr
 import { describeMedia, mediaUrlsOf, withMediaLines } from "../server/image-input.ts";
 import { relevantFacts } from "../server/memory-context.ts";
 import { assertPublicHost, setHostResolver } from "../server/public-fetch.ts";
-import { ownerProfile, profileState } from "../server/profile.ts";
+import { groupProfile, groupProfileState, ownerProfile, profileState } from "../server/profile.ts";
 
 /** Runs `run` with these variables set (undefined unsets one), then puts back whatever was there before. */
 async function withEnv<T>(vars: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
@@ -6603,7 +6603,7 @@ describe("Sendblue provider", () => {
       VALUES('thread_facts',?,'sms',?,'alg_cnv_facts',?,?)
     `).run(USER_ID, address, stamp, stamp);
     const area = ensureGroupLifeArea(db, "thread_facts", "Home");
-    db.prepare("UPDATE life_areas SET soul='- One line.',assistant_nickname='Goop',reply_mode='normal' WHERE id=?").run(area.id);
+    db.prepare("UPDATE life_areas SET soul='- One line.',assistant_nickname='Goop',reply_mode='normal',profile='People: Halo, Sarah.' WHERE id=?").run(area.id);
     db.prepare("UPDATE notification_preferences SET soul='- Dry humour.',life_profile='People: wife Sarah.' WHERE user_id=?").run(USER_ID);
     const memory = db.prepare(`
       INSERT INTO memories(id,user_id,title,content,kind,life_area_id,tags_json,created_at,updated_at)
@@ -6628,13 +6628,43 @@ describe("Sendblue provider", () => {
     assert.deepEqual(inGroup.groupFacts?.map(fact => fact.content), ["Halo hates pineapple on pizza", "Sarah prefers mornings"]);
     assert.equal(inGroup.ownerFacts, undefined, "the owner's records never reach a group");
     assert.equal((contexts[0] as { profile?: string }).profile, undefined, "nor does the owner's profile");
+    assert.equal((contexts[0] as { groupProfile?: string }).groupProfile, "People: Halo, Sarah.", "the group's own profile does");
 
     await runSmsAgent(db, fakeSearch(db), RECIPIENT, "pizza tonight?", "SB_pizza_own", { fetcher: capture, inbound: { provider: "sendblue" } });
     const own = contexts[1] as { soul?: string; ownerFacts?: Array<{ content: string }>; groupFacts?: unknown };
     assert.equal(own.soul, "- Dry humour.");
     assert.equal((contexts[1] as { profile?: string }).profile, "People: wife Sarah.");
+    assert.equal((contexts[1] as { groupProfile?: string }).groupProfile, undefined, "a group's profile stays in its group");
     assert.deepEqual(own.ownerFacts?.map(fact => fact.content), ["The owner loves pizza from Joe's", "Keep replies short"]);
     assert.equal(own.groupFacts, undefined);
+  });
+
+  it("writes a group's profile with its search fenced to the group and none of the owner's context", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_gpf',?,'sms','group:gpf','alg_cnv_gpf',?,?)
+    `).run(USER_ID, stamp, stamp);
+    const area = ensureGroupLifeArea(db, "thread_gpf", "Family");
+    db.prepare("UPDATE notification_preferences SET soul='- Owner only.',life_profile='People: owner things.' WHERE user_id=?").run(USER_ID);
+    let body: { algolia?: { searchParameters?: Record<string, { filters: string }> }; messages: Array<{ metadata?: { turnContext?: Record<string, unknown> } }> } | undefined;
+    const capture: typeof fetch = async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "People: family." }] }), { status: 200 });
+    };
+    await runSmsAgent(db, fakeSearch(db), `profile:${area.id}`, "Rewrite the profile", undefined, {
+      fetcher: capture,
+      internal: true,
+      userMessageMetadata: { kind: "group_profile_refresh", lifeAreaId: area.id, threadId: "thread_gpf" },
+    });
+    const filters = Object.values(body?.algolia?.searchParameters ?? {}).map(entry => entry.filters).join(" | ");
+    assert.match(filters, new RegExp(`life_area_id:"${area.id}"`));
+    assert.match(filters, /threadId:"thread_gpf"/);
+    const turn = [...(body?.messages ?? [])].reverse().find(message => message.metadata?.turnContext)?.metadata?.turnContext ?? {};
+    assert.equal(turn.profile, undefined, "the owner's profile never goes into a group's");
+    assert.equal(turn.soul, undefined, "nor the owner's Soul");
   });
 
   /*
@@ -9087,6 +9117,60 @@ describe("worker scheduling", () => {
     assert.deepEqual(sent, []);
     assert.equal((db.prepare("SELECT followed_up_at FROM todos WHERE title='Laundry'").get() as { followed_up_at: string | null }).followed_up_at, null,
       "still owed a follow-up");
+  });
+
+  it("rewrites each group's profile overnight from its own roster and facts only", async () => {
+    const drafts: Array<{ prompt: string; context?: unknown }> = [];
+    const { db, api } = fixture(undefined, async (prompt, _address, options) => {
+      drafts.push({ prompt, context: options?.context });
+      return "People: Halo — Natella's boyfriend.";
+    });
+    const stamp = "2030-01-14T12:00:00.000Z";
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_gp',?,'sms','group:gp','alg_cnv_gp',?,?)
+    `).run(USER_ID, stamp, stamp);
+    const area = ensureGroupLifeArea(db, "thread_gp", "Goopers");
+    db.prepare("INSERT INTO group_members(thread_id,phone,name,relationship,is_owner,created_at,updated_at) VALUES('thread_gp','+15550188','Halo','Natella''s boyfriend',0,?,?)")
+      .run(stamp, stamp);
+    const memory = db.prepare(`
+      INSERT INTO memories(id,user_id,title,content,kind,life_area_id,tags_json,created_at,updated_at)
+      VALUES(?,?,?,?,'fact',?,'[]',?,?)
+    `);
+    memory.run("mem_gp_bday", USER_ID, "Halo's birthday", "Halo's birthday is November 26", area.id, stamp, stamp);
+    memory.run("mem_gp_owner", USER_ID, "Favorite gym", "The owner's favorite gym is Life Time", null, stamp, stamp);
+    const calls: Array<{ prompt: string; metadata?: Record<string, unknown> }> = [];
+    const dependencies = {
+      sendSms: async () => ({ sid: "SM_x", status: "queued" }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, prompt: string, _id?: string, options?: { userMessageMetadata?: Record<string, unknown> }) => {
+        calls.push({ prompt, metadata: options?.userMessageMetadata });
+        return { text: options?.userMessageMetadata?.kind === "group_profile_refresh" ? "People: Halo, birthday Nov 26." : "Life & work: gym at Life Time.", threadId: "thread_x" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    };
+    const restore = atUtcTime("04:30");
+    try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
+    const group = calls.find(call => call.metadata?.kind === "group_profile_refresh");
+    assert.ok(group, "the group's profile was rewritten");
+    assert.deepEqual({ lifeAreaId: group.metadata?.lifeAreaId, threadId: group.metadata?.threadId }, { lifeAreaId: area.id, threadId: "thread_gp" },
+      "its hosted search is fenced to the group");
+    assert.match(group.prompt, /Halo: Natella's boyfriend/);
+    assert.match(group.prompt, /Halo's birthday is November 26/);
+    assert.doesNotMatch(group.prompt, /Life Time/, "the owner's facts never reach a group's profile");
+    assert.equal(groupProfile(db, area.id).profile, "People: Halo, birthday Nov 26.");
+    assert.equal(ownerProfile(db).profile, "Life & work: gym at Life Time.");
+    const listed = (await api.get("/api/life-areas").expect(200)).body.data.find((row: { id: string }) => row.id === area.id);
+    assert.equal(listed.profile, "People: Halo, birthday Nov 26.");
+
+    // The owner corrects it, or has it rewritten now.
+    await api.put(`/api/life-areas/${area.id}/profile`).send({ profile: "People: Halo." }).expect(200);
+    assert.equal(groupProfileState(db, area.id), "current");
+    const rewritten = (await api.post(`/api/life-areas/${area.id}/profile/refresh`).expect(200)).body.data;
+    assert.equal(rewritten.profile, "People: Halo — Natella's boyfriend.");
+    assert.deepEqual(drafts[0].context, { kind: "group_profile_refresh", lifeAreaId: area.id, threadId: "thread_gp" });
+    // A new member is a change too.
+    db.prepare("UPDATE group_members SET name='Natella',relationship='the owner''s sister' WHERE thread_id='thread_gp'").run();
+    assert.equal(groupProfileState(db, area.id), "stale");
   });
 
   it("rewrites the owner's profile overnight when their facts changed, and hands it to their turns", async () => {

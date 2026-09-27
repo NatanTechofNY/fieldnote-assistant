@@ -24,6 +24,9 @@ export default defineConfig(({ mode }) => ({
     environment: "jsdom",
     setupFiles: "./tests/setup.ts",
     globals: true,
+    // Each test renders the whole app and clicks through it; on a busy runner
+    // the default 5s cut off tests that pass in under two when the machine is idle.
+    testTimeout: 20_000,
     // Pinned so the suite always exercises the Agent Studio chat path. Left to
     // a developer's .env, the same tests would silently cover the local
     // fallback chat instead, and CI would test something different again.

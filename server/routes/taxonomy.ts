@@ -1,8 +1,11 @@
+import { z } from "zod";
 import { USER_ID, id, lifeAreaSlug, now, queueIndexJob, renameLifeArea } from "../db.ts";
 import { refreshRosterMemory } from "../group-members.ts";
 import { failure, success } from "../http.ts";
 import { categoryCreate, lifeAreaCreate, lifeAreaPatch } from "../schemas.ts";
 import { assertUsableNickname } from "../soul.ts";
+import { NO_TEXT_FALLBACK } from "../agent-runner.ts";
+import { composeGroupProfileTurn, groupProfile, groupProfileState, PROFILE_MAX, setGroupProfile } from "../profile.ts";
 import type { RouteContext } from "./context.ts";
 
 /**
@@ -23,7 +26,7 @@ const GROUP_FIELDS = [
   "reply_mode",
 ] as const;
 
-export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void {
+export function registerTaxonomyRoutes({ app, db, search, draftWithAgent }: RouteContext): void {
   app.get("/api/categories", (_req, res) => {
     const rows = db.prepare(`
       SELECT id,kind,name,color,icon FROM categories WHERE user_id=? ORDER BY kind,name
@@ -63,11 +66,41 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
       SELECT id,slug,name,color,
         CASE WHEN slug IN ('work','personal','side-project') THEN 1 ELSE 0 END is_builtin,
         CASE WHEN thread_id IS NOT NULL THEN 1 ELSE 0 END is_group,
-        ${GROUP_FIELDS.join(",")}
+        ${GROUP_FIELDS.join(",")},profile,profile_updated_at
       FROM life_areas WHERE user_id=? ORDER BY
         CASE slug WHEN 'work' THEN 0 WHEN 'personal' THEN 1 WHEN 'side-project' THEN 2 ELSE 3 END,name
     `).all(USER_ID);
     return success(res, rows);
+  });
+  /*
+   * A group's profile, beside its Soul: the owner can correct it, or have it
+   * rewritten now from the group's roster and facts rather than overnight.
+   */
+  const groupArea = (areaId: string) => db.prepare("SELECT id,thread_id FROM life_areas WHERE id=? AND user_id=?")
+    .get(areaId, USER_ID) as { id: string; thread_id: string | null } | undefined;
+  app.put("/api/life-areas/:id/profile", (req, res) => {
+    const { profile } = z.object({ profile: z.string().max(PROFILE_MAX).nullable() }).strict().parse(req.body);
+    const area = groupArea(req.params.id);
+    if (!area?.thread_id) return failure(res, 404, "Group chat not found");
+    setGroupProfile(db, area.id, profile);
+    return success(res, groupProfile(db, area.id));
+  });
+  app.post("/api/life-areas/:id/profile/refresh", async (req, res) => {
+    const area = groupArea(req.params.id);
+    if (!area?.thread_id) return failure(res, 404, "Group chat not found");
+    if (groupProfileState(db, area.id) === "empty") return failure(res, 409, "Nothing has been saved about this group yet to write a profile from");
+    let text: string;
+    try {
+      text = await draftWithAgent(composeGroupProfileTurn(db, area.id), `profile:${area.id}`, {
+        context: { kind: "group_profile_refresh", lifeAreaId: area.id, threadId: area.thread_id },
+      });
+    } catch (error) {
+      console.warn("Group profile rewrite failed:", error instanceof Error ? error.message : error);
+      return failure(res, 502, "The assistant could not write the profile right now; try again in a minute");
+    }
+    if (!text.trim() || text === NO_TEXT_FALLBACK) return failure(res, 502, "The assistant returned no profile; try again in a minute");
+    setGroupProfile(db, area.id, text);
+    return success(res, groupProfile(db, area.id));
   });
   app.post("/api/life-areas", (req, res) => {
     const body = lifeAreaCreate.parse(req.body);

@@ -8,7 +8,7 @@ import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import { hasImageDescription } from "./image-input.ts";
 import { relevantFacts } from "./memory-context.ts";
-import { ownerProfile } from "./profile.ts";
+import { groupProfile, ownerProfile } from "./profile.ts";
 import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
 import { executeAgentTool, ownRecordsOnly, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
@@ -1045,11 +1045,13 @@ export async function runChannelAgent(
   // in a group, the owner's everywhere else. App-composed turns carry the voice
   // but not the facts; their instruction already says what to draw on.
   const voice = group ? groupVoice(db, group.area.id) : undefined;
-  const soul = voice ? voice.soul : ownerSoul(db);
   // Who the owner is travels with their own turns only; a group never reads it,
-  // nor does drafting wording that a group's check-in will be written from.
-  const draftingForGroup = options.userMessageMetadata?.kind === "checkin_ask_draft";
-  const profile = voice || draftingForGroup ? null : ownerProfile(db).profile;
+  // nor does anything written for a group: its check-in wording or its profile.
+  const kind = options.userMessageMetadata?.kind;
+  const writingForGroup = kind === "checkin_ask_draft" || kind === "group_profile_refresh";
+  const soul = voice ? voice.soul : kind === "group_profile_refresh" ? null : ownerSoul(db);
+  const profile = voice || writingForGroup ? null : ownerProfile(db).profile;
+  const roomProfile = group ? groupProfile(db, group.area.id).profile : null;
   const facts = options.internal ? [] : await relevantFacts(db, search, group ? { areaId: group.area.id } : { own: true }, body);
   /*
    * The turn context belongs on the message being answered. That is usually
@@ -1083,6 +1085,7 @@ export async function runChannelAgent(
         : {}),
       ...(soul ? { soul } : {}),
       ...(profile ? { profile } : {}),
+      ...(roomProfile ? { groupProfile: roomProfile } : {}),
       ...(facts.length ? { [group ? "groupFacts" : "ownerFacts"]: facts } : {}),
       ...(voice ? {
         replyMode: voice.replyMode,
@@ -1192,9 +1195,16 @@ export async function runChannelAgent(
     return undefined;
   };
 
+  // A group's profile is written on a scratch thread with no scope of its own,
+  // so its hosted search is fenced to that group the way a group turn's is.
+  const writingGroupProfile = options.internal && kind === "group_profile_refresh"
+    && typeof options.userMessageMetadata?.lifeAreaId === "string" && typeof options.userMessageMetadata?.threadId === "string"
+    ? { lifeAreaId: options.userMessageMetadata.lifeAreaId, threadId: options.userMessageMetadata.threadId }
+    : undefined;
   const searchParameters = context.scope
     ? groupSearchParameters(context.scope)
-    : ownRecordsOnly(context) ? ownSearchParameters(db) : undefined;
+    : writingGroupProfile ? groupSearchParameters(writingGroupProfile)
+      : ownRecordsOnly(context) ? ownSearchParameters(db) : undefined;
   // A retry that already shows a mark keeps it; the working mark never
   // replaces a more specific one.
   if (group && !options.internal && !markShown && markHandle

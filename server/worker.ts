@@ -1,7 +1,7 @@
 import type { AlgoliaSync } from "./algolia.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { pruneExpiredSessions } from "./auth.ts";
-import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
+import { getTodo, groupAreas, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
   archivedInboundText, archiveReactionText, failAgentTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
@@ -18,7 +18,10 @@ import {
   composeFollowUpTurn, FOLLOW_UP_TIME, FOLLOW_UP_UNTIL, followUpCandidates, followUpsEnabled, markFollowedUp,
 } from "./follow-ups.ts";
 import { describeMedia, mediaUrlsOf, withMediaLines } from "./image-input.ts";
-import { composeProfileTurn, PROFILE_REFRESH_TIME, PROFILE_REFRESH_UNTIL, profileState, setOwnerProfile } from "./profile.ts";
+import {
+  composeGroupProfileTurn, composeProfileTurn, groupProfileState, PROFILE_REFRESH_TIME, PROFILE_REFRESH_UNTIL, profileState,
+  setGroupProfile, setOwnerProfile,
+} from "./profile.ts";
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks, syncOccurrenceCompletion } from "./todo-status.ts";
@@ -875,6 +878,16 @@ async function refreshProfileOvernight(
   date: string,
   runAgent: typeof runSmsAgent,
 ): Promise<void> {
+  await refreshOwnerProfile(db, search, date, runAgent);
+  for (const area of groupAreas(db)) await refreshGroupProfile(db, search, date, area, runAgent);
+}
+
+async function refreshOwnerProfile(
+  db: Db,
+  search: SearchWriter,
+  date: string,
+  runAgent: typeof runSmsAgent,
+): Promise<void> {
   const key = `profile_refresh:${USER_ID}:${date}`;
   if (dispatchSettled(db, key)) return;
   if (profileState(db) !== "stale") return;
@@ -894,6 +907,35 @@ async function refreshProfileOvernight(
     db.prepare("UPDATE scheduled_dispatches SET status='sent',updated_at=? WHERE id=?").run(now(), dispatchId);
   } catch (error) {
     recordDispatchFailure(db, dispatchId, error, "Profile refresh failed");
+  }
+}
+
+/** The same for one group chat, written from that group's roster and facts alone. */
+async function refreshGroupProfile(
+  db: Db,
+  search: SearchWriter,
+  date: string,
+  area: { id: string; thread_id: string },
+  runAgent: typeof runSmsAgent,
+): Promise<void> {
+  const key = `profile_refresh:${area.id}:${date}`;
+  if (dispatchSettled(db, key)) return;
+  if (groupProfileState(db, area.id) !== "stale") return;
+  const dispatchId = claimDispatch(db, "profile_refresh", key, now());
+  if (!dispatchId) return;
+  try {
+    const response = await runAgent(db, search, `profile:${area.id}`, composeGroupProfileTurn(db, area.id), undefined, {
+      internal: true,
+      userMessageMetadata: { kind: "group_profile_refresh", date, lifeAreaId: area.id, threadId: area.thread_id },
+    });
+    if (!response.text.trim() || response.text === NO_TEXT_FALLBACK) {
+      failAgentTurn(db, response);
+      throw new Error("The group's profile came back empty");
+    }
+    setGroupProfile(db, area.id, response.text);
+    db.prepare("UPDATE scheduled_dispatches SET status='sent',updated_at=? WHERE id=?").run(now(), dispatchId);
+  } catch (error) {
+    recordDispatchFailure(db, dispatchId, error, "Group profile refresh failed");
   }
 }
 

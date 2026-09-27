@@ -22,6 +22,7 @@ export type AgentStudioService = { syncTools: () => Promise<AgentStudioSyncResul
 export type DraftContext =
   | { kind: "reflection_generation"; label: string; selectedCount: number }
   | { kind: "profile_refresh" }
+  | { kind: "group_profile_refresh"; lifeAreaId: string; threadId: string }
   | { kind: "checkin_ask_draft"; briefName: string; instruction: string }
   | {
     kind: "digest_brief";
