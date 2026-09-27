@@ -6,7 +6,7 @@ import { getNotificationPreferences, type SmsProvider } from "./integrations.ts"
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
-import { hasImageDescription } from "./image-input.ts";
+import { describeMedia, fillPendingPictures, hasImageDescription, imageInputMode, PICTURE_PENDING, unviewedPictures } from "./image-input.ts";
 import { relevantFacts } from "./memory-context.ts";
 import { servableGroupProfile, servableOwnerProfile } from "./profile.ts";
 import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
@@ -191,6 +191,7 @@ const PROGRESS_REACTIONS: Record<string, string> = {
   list_confluence_spaces: "📄", list_confluence_pages: "📄", get_confluence_page: "📄", list_confluence_comments: "📄",
   search_store_products: "🛒",
   web_search: "🌐", read_web_page: "🌐",
+  view_image: "🖼️",
 };
 const GENERAL_PROGRESS_REACTION = "🔍";
 /**
@@ -722,6 +723,126 @@ function aimedAtAssistant(
   return answered?.speaker === speakerPhone;
 }
 
+/** How long a held picture waits to be looked at; past this it belongs to an earlier conversation. */
+const HELD_PICTURE_WINDOW_MS = 60 * 60_000;
+/**
+ * The most pictures one turn looks at, its own first and then held ones newest
+ * first. Each can take the vision call's full timeout, and every other thread
+ * waits behind the turn.
+ */
+const PICTURES_PER_TURN = 4;
+/** The runtime's mark on a message while its pictures are being looked at. */
+const VIEWING_MARK = PROGRESS_REACTIONS.view_image;
+
+/** A row's pictures still to look at, the first of its unviewed ones, of `urlCount` attachments in all. */
+type UnviewedPictures = { id: string; content: string; urls: string[]; urlCount: number };
+
+function mediaUrlList(value: unknown): string[] {
+  const list = typeof value === "string" ? (() => {
+    try { return JSON.parse(value) as unknown; } catch { return []; }
+  })() : value;
+  return Array.isArray(list) ? list.filter((url): url is string => typeof url === "string") : [];
+}
+
+function unviewedOn(id: string, content: string, mediaUrls: unknown, limit: number): UnviewedPictures[] {
+  const all = mediaUrlList(mediaUrls);
+  const urls = unviewedPictures(content, all).slice(0, Math.max(limit, 0));
+  return urls.length ? [{ id, content, urls, urlCount: all.length }] : [];
+}
+
+/**
+ * Where the pictures held for this turn start: the assistant's last word in
+ * the group, or an hour back when that is longer ago. A retry has the same
+ * start, since its turn has not replied yet.
+ */
+function heldPicturesSince(db: Db, threadId: string): string {
+  const since = new Date(Date.now() - HELD_PICTURE_WINDOW_MS).toISOString();
+  const lastSaid = db.prepare(`
+    SELECT created_at FROM channel_messages WHERE thread_id=? AND role='assistant' AND status<>'failed'
+    ORDER BY created_at DESC LIMIT 1
+  `).get(threadId) as { created_at: string } | undefined;
+  return lastSaid && lastSaid.created_at > since ? lastSaid.created_at : since;
+}
+
+/** The group's messages held since `since`, newest first, whose text carries `marker`. */
+function heldRows(db: Db, threadId: string, inboundId: string, since: string, marker: string, limit: number) {
+  return db.prepare(`
+    SELECT id,content,json_extract(metadata_json,'$.mediaUrls') urls FROM channel_messages
+    WHERE thread_id=? AND role='user' AND direction='inbound' AND id<>?
+      AND json_extract(metadata_json,'$.heldUntilNamed')=1
+      AND instr(content,?)>0 AND created_at>?
+    ORDER BY created_at DESC,rowid DESC LIMIT ?
+  `).all(threadId, inboundId, marker, since, limit) as Array<{ id: string; content: string; urls: unknown }>;
+}
+
+/**
+ * Pictures sent in a group while it asked the assistant to stay out, since
+ * the assistant last spoke there and within the hour. They were filed
+ * unviewed, and being named right after one is usually being asked about it.
+ */
+function heldPictures(db: Db, threadId: string, inboundId: string, since: string, limit: number): UnviewedPictures[] {
+  if (limit <= 0) return [];
+  let budget = limit;
+  return heldRows(db, threadId, inboundId, since, PICTURE_PENDING, limit).flatMap(row => {
+    const found = unviewedOn(row.id, row.content, row.urls, budget);
+    budget -= found[0]?.urls.length ?? 0;
+    return found;
+  });
+}
+
+/**
+ * Looks at the pictures this turn can see and has not yet: the ones on the
+ * message being answered and, in a group, the ones held while the assistant
+ * was told to stay out. Each archived row gets what was seen in place of its
+ * pending line, so the window, the index, and a retry all read the
+ * description, and the look is filed as a `view_image` tool row so the
+ * history shows the vision call was made. With pictures off, held ones are
+ * left pending for when they can be seen. Returns the answered message's
+ * text, and whether a held message in play carries a description — its quoted
+ * words are in the window, on the attempt that looked and on any retry.
+ */
+async function viewUnviewedPictures(
+  db: Db,
+  threadId: string,
+  inbound: { id: string; body: string; mediaUrls: unknown },
+  group: boolean,
+  fetcher: typeof fetch | undefined,
+  showMark: (() => Promise<void>) | undefined,
+): Promise<{ body: string; describedEarlier: boolean }> {
+  const looking = imageInputMode() === "describe";
+  const since = group ? heldPicturesSince(db, threadId) : "";
+  const own = unviewedOn(inbound.id, inbound.body, inbound.mediaUrls, PICTURES_PER_TURN);
+  const held = group && looking ? heldPictures(db, threadId, inbound.id, since, PICTURES_PER_TURN - (own[0]?.urls.length ?? 0)) : [];
+  const pending = [...own, ...held];
+  let body = inbound.body;
+  const seen: string[] = [];
+  // The mark goes out beside the first look rather than ahead of it, and has
+  // landed before the turn reads the archive for the marks already up.
+  const marking = pending.length && looking ? showMark?.() : undefined;
+  for (const picture of pending) {
+    const lines = await describeMedia(picture.urls, fetcher);
+    seen.push(...lines);
+    const content = fillPendingPictures(picture.content, lines, picture.urlCount);
+    db.transaction(() => {
+      db.prepare("UPDATE channel_messages SET content=?,updated_at=? WHERE id=?").run(content, now(), picture.id);
+      queueIndexJob(db, "channel_message", picture.id);
+    })();
+    if (picture.id === inbound.id) body = content;
+  }
+  await marking;
+  const describedEarlier = group
+    && heldRows(db, threadId, inbound.id, since, "[Image: ", 1).some(row => hasImageDescription(row.content));
+  if (pending.length && looking) {
+    saveChannelMessage(db, threadId, "outbound", "tool", "view_image", undefined, {
+      input: { pictures: seen.length },
+      output: { success: !seen.some(line => line.includes("could not be viewed")), data: { descriptions: seen } },
+      toolCallId: id("vision"),
+      state: "output-available",
+    });
+  }
+  return { body, describedEarlier };
+}
+
 export function recordOutboundChannelMessage(
   db: Db,
   channel: "sms" | "web",
@@ -889,9 +1010,11 @@ function groupTurnSetup(
   const earlierMessage = db.prepare(
     "SELECT 1 found FROM channel_messages WHERE thread_id=? AND role='user' AND id<>? LIMIT 1",
   ).get(threadId, inboundId);
-  const answeredSinceCreated = db.prepare(
-    "SELECT 1 found FROM channel_messages WHERE thread_id=? AND role IN ('assistant','tool') AND created_at>=? LIMIT 1",
-  ).get(threadId, area.createdAt);
+  // The app's own look at a picture is not the assistant taking a turn.
+  const answeredSinceCreated = db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role IN ('assistant','tool') AND created_at>=? AND NOT (role='tool' AND content='view_image') LIMIT 1
+  `).get(threadId, area.createdAt);
   return {
     area,
     areaIsNew: !answeredSinceCreated,
@@ -991,6 +1114,8 @@ export async function runChannelAgent(
      * reply stays public — in the window and in the index.
      */
     replyInternal?: boolean;
+    /** What fetches the pictures and asks the vision model about them; the worker passes its own. */
+    mediaFetch?: typeof fetch;
   } = {},
 ): Promise<AgentTurnResult> {
   const thread = getOrCreateThread(db, channel, address);
@@ -1013,6 +1138,26 @@ export async function runChannelAgent(
   } | undefined;
   const group = options.inbound?.groupId ? groupTurnSetup(db, thread.id, inboundId, speaker?.groupName) : undefined;
   if (group) recordGroupParticipants(db, thread.id, group.area.id, options.inbound?.participants, speaker?.speaker);
+  let describedEarlier = false;
+  if (!options.internal && channel === "sms") {
+    // The picture's own mark goes up while it is looked at, on a message that
+    // is for the assistant and carries no tapback yet; the turn's marks then
+    // replace it like any other progress mark.
+    const handle = options.inbound?.provider === "sendblue" ? providerMessageId : undefined;
+    const showMark = handle ? async () => {
+      if (reactionsOn(db, thread.id, handle).all.length) return;
+      if (group && !aimedAtAssistant(db, thread.id, inboundId, body, options.inbound, speaker?.speaker)) return;
+      try {
+        await sendSendblueReaction(db, handle, VIEWING_MARK);
+        recordMessageReaction(db, thread.id, handle, VIEWING_MARK, "runtime");
+      } catch (error) {
+        console.warn("Viewing tapback failed:", error instanceof Error ? error.message : error);
+      }
+    } : undefined;
+    ({ body, describedEarlier } = await viewUnviewedPictures(
+      db, thread.id, { id: inboundId, body, mediaUrls: options.userMessageMetadata?.mediaUrls }, Boolean(group), options.mediaFetch, showMark,
+    ));
+  }
   const context: ToolTurnContext = {
     channel,
     address,
@@ -1034,7 +1179,7 @@ export async function runChannelAgent(
     ...(options.internal ? { internal: true } : {}),
     // A picture's description quotes words the sender did not write, like a
     // page does, so the same refusals apply from the start of the turn.
-    ...(!options.internal && hasImageDescription(body) ? { readWeb: true, readUntrusted: true } : {}),
+    ...(!options.internal && (hasImageDescription(body) || describedEarlier) ? { readWeb: true, readUntrusted: true } : {}),
     sendSms: options.sendSms,
     ...(options.internal && typeof options.userMessageMetadata?.kind === "string" ? { appTurn: options.userMessageMetadata.kind } : {}),
   };
@@ -1413,6 +1558,7 @@ export async function runSmsAgent(
     sendSms?: SmsSender;
     assistantMetadata?: Record<string, unknown>;
     replyInternal?: boolean;
+    mediaFetch?: typeof fetch;
   } = {},
 ): Promise<AgentTurnResult> {
   return runChannelAgent(db, search, "sms", fromPhone, body, providerMessageId, options);

@@ -4,7 +4,7 @@ export type HistoryToolTraceData = {
   name: string;
   /** Identifies the same call across the two places it is stored. */
   toolCallId?: string;
-  source: "Algolia" | "SQLite" | "Agent Studio";
+  source: "Algolia" | "SQLite" | "Agent Studio" | "Vision";
   state?: string;
   input?: unknown;
   output?: unknown;
@@ -20,6 +20,7 @@ export type HistoryToolTraceData = {
 
 function toolSource(name: string): HistoryToolTraceData["source"] {
   if (name.includes("algolia_search")) return "Algolia";
+  if (name === "view_image") return "Vision";
   if (/^(get|list|create|update|set|delete)_(todos?|memories|memory|reminders?|life_areas?)$|^get_(agenda|review_evidence|reflection_evidence|conversation_context)$/.test(name)) return "SQLite";
   return "Agent Studio";
 }

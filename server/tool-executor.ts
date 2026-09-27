@@ -62,6 +62,19 @@ function sharedInThread(db: Db, context: ToolTurnContext | undefined, url: strin
 type SearchWriter = Pick<AlgoliaSync, "flushSoon"> & Partial<Pick<AlgoliaSync, "client" | "searchProducts">>;
 type Input = Record<string, unknown>;
 
+/**
+ * The fields a patch empties. A field the same patch also gives a value is
+ * being set, not cleared: "move it to Wednesday" arrived as the new time with
+ * the old one listed to clear, and clearing it left the todo with no date.
+ * An empty list is no value: moods merge rather than replace, so `[]` beside
+ * a clear of them would otherwise leave every mood in place.
+ */
+function clearedFields(patch: Input): Set<string> {
+  const names = Array.isArray(patch.clear_fields) ? patch.clear_fields.map(String) : [];
+  const given = (value: unknown) => value !== null && value !== undefined && !(Array.isArray(value) && !value.length);
+  return new Set(names.filter(name => !given(patch[name])));
+}
+
 const todoJson = (row: TodoRow) => ({
   id: row.id, title: row.title, notes: row.notes, category_id: row.category_id,
   category_name: row.category_name ?? null, life_area_id: row.life_area_id,
@@ -1130,7 +1143,7 @@ export async function executeAgentTool(
     const current = scopedTodo(db, todoId, scope);
     if (!current) throw new Error(TODO_NOT_FOUND);
     const patch = (input.patch || {}) as Input;
-    const clear = new Set(Array.isArray(patch.clear_fields) ? patch.clear_fields.map(String) : []);
+    const clear = clearedFields(patch);
     const value = (key: string, currentValue: unknown) =>
       clear.has(key) ? (key === "extra_reminders" ? [] : null) : patch[key] ?? currentValue;
     if (!scope && current.life_area_source === "user"
@@ -1271,7 +1284,7 @@ export async function executeAgentTool(
     const current = scopedMemory(db, memoryId, scope);
     if (!current) throw new Error("Memory not found");
     const patch = (input.patch || {}) as Input;
-    const clear = new Set(Array.isArray(patch.clear_fields) ? patch.clear_fields.map(String) : []);
+    const clear = clearedFields(patch);
     const value = (key: string, currentValue: unknown) =>
       clear.has(key) ? (key === "tags" ? [] : null) : patch[key] ?? currentValue;
     if (!scope && current.life_area_source === "user"

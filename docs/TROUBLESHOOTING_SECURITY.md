@@ -79,7 +79,7 @@ Never “fix” this by writing directly to Algolia and treating that as canonic
 
 ## Update patch is empty or clears fields accidentally
 
-Strict schemas send every declared patch property. Follow `TOOL_ENDPOINT_MAPPING.md`: remove null patch values, apply only names in `clear_fields` as explicit nulls, remove `clear_fields`, and reject an empty normalized patch. Do not add undocumented version arguments.
+Strict schemas send every declared patch property. Follow `TOOL_ENDPOINT_MAPPING.md`: remove null patch values, apply only names in `clear_fields` as explicit nulls (a value sent for the same field wins), remove `clear_fields`, and reject an empty normalized patch. Do not add undocumented version arguments.
 
 ## Date is wrong
 

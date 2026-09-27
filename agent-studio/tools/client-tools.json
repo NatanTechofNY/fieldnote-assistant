@@ -404,7 +404,7 @@
                   "type": "string",
                   "enum": ["notes", "priority", "category_id", "life_area_id", "parent_id", "due_at", "reminder_at", "extra_reminders", "recurrence"]
                 },
-                "description": "Nullable fields to set to null; empty when none"
+                "description": "Nullable fields to set to null; empty when none. List only fields to empty: to move a date, send the new value and leave the field out of this list (a value sent for a listed field wins)"
               },
               "assistant_says": {
                 "type": ["boolean", "null"],
@@ -698,7 +698,7 @@
                   "type": "string",
                   "enum": ["title", "mood_label", "mood_score", "moods", "category_id", "life_area_id", "occurred_at", "tags"]
                 },
-                "description": "Nullable fields to clear; empty when none"
+                "description": "Nullable fields to clear; empty when none. A value sent for a listed field wins, so list only fields to empty"
               }
             },
             "required": ["kind", "title", "content", "mood_label", "mood_score", "moods", "category_id", "life_area_id", "occurred_at", "review_worthy", "tags", "clear_fields"],

@@ -128,6 +128,36 @@ export function withMediaLines(body: string | undefined, lines: string[]): strin
   return [body?.trim(), ...lines].filter(Boolean).join("\n");
 }
 
+/**
+ * The line an attachment is archived under until it has been looked at. A
+ * group's held message keeps it until the assistant is next named, so a
+ * picture nobody asked about costs no vision call.
+ */
+export const PICTURE_PENDING = "[Picture attached]";
+
+/**
+ * The rows of the app's own attachment lines: `withMediaLines` puts them last,
+ * one per link in order, so the same words typed above them are the sender's.
+ */
+function pendingSlots(rows: string[], urlCount: number): number[] {
+  const start = Math.max(rows.length - urlCount, 0);
+  return rows.flatMap((line, index) => index >= start && line.trim() === PICTURE_PENDING ? [index] : []);
+}
+
+/** The links of a message's attachments not yet looked at, in order. */
+export function unviewedPictures(text: string, urls: string[]): string[] {
+  const rows = text.split("\n");
+  const start = Math.max(rows.length - urls.length, 0);
+  return pendingSlots(rows, urls.length).map(index => urls[index - start]).filter(Boolean);
+}
+
+/** The text with its first unviewed attachments, of `urlCount` in all, replaced by what was seen. */
+export function fillPendingPictures(text: string, lines: string[], urlCount: number): string {
+  const rows = text.split("\n");
+  pendingSlots(rows, urlCount).slice(0, lines.length).forEach((slot, index) => { rows[slot] = lines[index]; });
+  return rows.join("\n");
+}
+
 const MEDIA_LINE = /^\[(?:Image: .*|Picture attached.*|Video attached.*|Voice or audio message attached.*|Attachment — .*)\]$/;
 
 /** What the person wrote, without the lines the app added for their attachments. */
