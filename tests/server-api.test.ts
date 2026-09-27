@@ -6539,7 +6539,7 @@ describe("Sendblue provider", () => {
     const contexts: Array<Record<string, unknown>> = [];
     const capture: typeof fetch = async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as { messages: Array<{ metadata?: { turnContext?: Record<string, unknown> } }> };
-      contexts.push(body.messages.findLast(message => message.metadata?.turnContext)?.metadata?.turnContext ?? {});
+      contexts.push([...body.messages].reverse().find(message => message.metadata?.turnContext)?.metadata?.turnContext ?? {});
       return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "ok" }] }), { status: 200 });
     };
     await runSmsAgent(db, fakeSearch(db), address, "pizza tonight?", "SB_pizza", groupTurnOptions(capture));
