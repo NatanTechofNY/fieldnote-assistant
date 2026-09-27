@@ -32,6 +32,23 @@ import { describeMedia, mediaUrlsOf, withMediaLines } from "../server/image-inpu
 import { relevantFacts } from "../server/memory-context.ts";
 import { assertPublicHost, setHostResolver } from "../server/public-fetch.ts";
 
+/** Runs `run` with these variables set (undefined unsets one), then puts back whatever was there before. */
+async function withEnv<T>(vars: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
+  const saved = Object.fromEntries(Object.keys(vars).map(key => [key, process.env[key]]));
+  const apply = (values: Record<string, string | undefined>) => {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+  apply(vars);
+  try {
+    return await run();
+  } finally {
+    apply(saved);
+  }
+}
+
 // No test reaches real DNS: every host is public unless a test says otherwise.
 setHostResolver(async () => ["93.184.216.34"]);
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
@@ -6651,11 +6668,12 @@ describe("Sendblue provider", () => {
    * Agent Studio takes only text on a user message, so a picture reaches the
    * agent as a description. A picture sent with no words is still a message.
    */
-  it("describes a picture someone sends and hands the agent the description", async () => {
+  it("describes a picture someone sends and hands the agent the description", () => withEnv({
+    OPENAI_API_KEY: "sk-test",
+    OPENAI_BASE_URL: undefined,
+  }, async () => {
     const { db, api } = connectedFixture();
     withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
-    const before = process.env.OPENAI_API_KEY;
-    process.env.OPENAI_API_KEY = "sk-test";
     const photo = "https://cdn.sendblue.example/photo.jpg";
     const payload = groupMessage(WIFE, "", { media_url: photo, message_handle: "SB_photo_only" });
     await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(payload).expect(200);
@@ -6672,23 +6690,18 @@ describe("Sendblue provider", () => {
       return json({ choices: [{ message: { content: "A cat asleep in a laundry basket." } }] });
     };
     const bodies: string[] = [];
-    try {
-      await runWorkerOnce(db, fakeSearch(db), {
-        runSmsAgent: async (...args: Parameters<typeof runSmsAgent>) => {
-          bodies.push(args[3]);
-          assert.deepEqual((args[5]?.userMessageMetadata as { mediaUrls?: string[] }).mediaUrls, [photo]);
-          return { text: "", threadId: "thread" } as Awaited<ReturnType<typeof runSmsAgent>>;
-        },
-        pollGranola: async () => ({ fetched: 0, queued: 0 }),
-        startTypingIndicator: () => () => {},
-        fetch: network,
-      });
-    } finally {
-      if (before === undefined) delete process.env.OPENAI_API_KEY;
-      else process.env.OPENAI_API_KEY = before;
-    }
+    await runWorkerOnce(db, fakeSearch(db), {
+      runSmsAgent: async (...args: Parameters<typeof runSmsAgent>) => {
+        bodies.push(args[3]);
+        assert.deepEqual((args[5]?.userMessageMetadata as { mediaUrls?: string[] }).mediaUrls, [photo]);
+        return { text: "", threadId: "thread" } as Awaited<ReturnType<typeof runSmsAgent>>;
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+      fetch: network,
+    });
     assert.deepEqual(bodies, ["[Image: A cat asleep in a laundry basket.]"]);
-    assert.deepEqual(seen, [photo, "https://api.openai.com/v1/chat/completions"]);
+    assert.deepEqual(seen, [photo, "https://us.api.openai.com/v1/chat/completions"]);
 
     // A retry answers the words it archived the first time; nothing is fetched or paid for again.
     db.prepare(`
@@ -6702,36 +6715,39 @@ describe("Sendblue provider", () => {
     `).run(threadId, new Date().toISOString(), new Date().toISOString());
     db.prepare("UPDATE external_events SET status='pending',available_at=? WHERE external_id='SB_photo_only'").run(new Date(Date.now() - 1000).toISOString());
     seen.length = 0;
-    process.env.OPENAI_API_KEY = "sk-test";
-    try {
-      await runWorkerOnce(db, fakeSearch(db), {
-        runSmsAgent: async (...args: Parameters<typeof runSmsAgent>) => {
-          bodies.push(args[3]);
-          return { text: "", threadId } as Awaited<ReturnType<typeof runSmsAgent>>;
-        },
-        pollGranola: async () => ({ fetched: 0, queued: 0 }),
-        startTypingIndicator: () => () => {},
-        fetch: network,
-      });
-    } finally {
-      if (before === undefined) delete process.env.OPENAI_API_KEY;
-      else process.env.OPENAI_API_KEY = before;
-    }
+    await runWorkerOnce(db, fakeSearch(db), {
+      runSmsAgent: async (...args: Parameters<typeof runSmsAgent>) => {
+        bodies.push(args[3]);
+        return { text: "", threadId } as Awaited<ReturnType<typeof runSmsAgent>>;
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+      fetch: network,
+    });
     assert.deepEqual(bodies.at(-1), "[Image: A cat asleep in a laundry basket.]");
     assert.deepEqual(seen, [], "the retry reuses the description");
     assert.match(JSON.stringify(visionBody?.messages[1].content), /data:image\/jpeg;base64,/, "the picture is sent as bytes, not a link the model fetches");
-  });
+  }));
 
   it("tells the agent a picture came when there is no way to see it", async () => {
-    const before = process.env.OPENAI_API_KEY;
-    delete process.env.OPENAI_API_KEY;
-    try {
+    await withEnv({ OPENAI_API_KEY: undefined }, async () => {
       assert.deepEqual(await describeMedia(["https://cdn.example/a.jpg"]), ["[Picture attached — you cannot see pictures right now]"]);
-      assert.equal(withMediaLines("look", ["[Image: x]"]), "look\n[Image: x]");
-      assert.deepEqual(mediaUrlsOf({ NumMedia: "2", MediaUrl0: "https://api.twilio.com/m/0", MediaUrl1: "http://insecure/1" }), ["https://api.twilio.com/m/0"]);
-    } finally {
-      if (before !== undefined) process.env.OPENAI_API_KEY = before;
-    }
+    });
+    assert.equal(withMediaLines("look", ["[Image: x]"]), "look\n[Image: x]");
+    assert.deepEqual(mediaUrlsOf({ NumMedia: "2", MediaUrl0: "https://api.twilio.com/m/0", MediaUrl1: "http://insecure/1" }), ["https://api.twilio.com/m/0"]);
+
+    // The US host is the default; OPENAI_BASE_URL points elsewhere.
+    await withEnv({ OPENAI_API_KEY: "sk-proj-test", OPENAI_BASE_URL: "https://api.openai.com/v1/" }, async () => {
+      const asked: string[] = [];
+      const regional: typeof fetch = async input => {
+        asked.push(String(input));
+        return String(input).startsWith("https://cdn.example")
+          ? new Response(new Uint8Array([1]), { headers: { "content-type": "image/png" } })
+          : json({ choices: [{ message: { content: "A logo." } }] });
+      };
+      assert.deepEqual(await describeMedia(["https://cdn.example/logo.png"], regional), ["[Image: A logo.]"]);
+      assert.equal(asked[1], "https://api.openai.com/v1/chat/completions");
+    });
   });
 
   /*

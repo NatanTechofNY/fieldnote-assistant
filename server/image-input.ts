@@ -9,7 +9,13 @@
 
 import { publicFetch, readCapped } from "./public-fetch.ts";
 
-const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+/**
+ * The US regional host by default: a key from a project with US data
+ * residency is only accepted there, and answers 401 anywhere else.
+ * `OPENAI_BASE_URL` points elsewhere, e.g. `https://api.openai.com/v1`.
+ */
+const openaiUrl = () =>
+  `${(process.env.OPENAI_BASE_URL?.trim() || "https://us.api.openai.com/v1").replace(/\/+$/, "")}/chat/completions`;
 const DEFAULT_MODEL = "gpt-4o-mini";
 /** Every other thread waits behind this, so a slow picture gives up rather than stall the worker. */
 const TIMEOUT_MS = 12_000;
@@ -72,7 +78,7 @@ async function describeOne(url: string, fetcher: typeof fetch): Promise<string> 
   }
   // HEIC is what an iPhone sends; the vision model reads JPEG, PNG, GIF, and WebP.
   if (!/^image\/(jpeg|png|gif|webp)$/.test(media.type)) return "[Picture attached in a format you cannot view]";
-  const response = await fetcher(OPENAI_URL, {
+  const response = await fetcher(openaiUrl(), {
     method: "POST",
     signal,
     headers: { "content-type": "application/json", authorization: `Bearer ${process.env.OPENAI_API_KEY?.trim()}` },
@@ -85,7 +91,11 @@ async function describeOne(url: string, fetcher: typeof fetch): Promise<string> 
       ],
     }),
   });
-  if (!response.ok) throw new Error(`vision model answered ${response.status}`);
+  if (!response.ok) {
+    // OpenAI's own code and message say what to fix ("incorrect_hostname" for a regional key).
+    const detail = await response.json().catch(() => undefined) as { error?: { code?: string; message?: string } } | undefined;
+    throw new Error(`vision model answered ${response.status}${detail?.error ? `: ${detail.error.code ?? ""} ${detail.error.message?.slice(0, 200) ?? ""}` : ""}`);
+  }
   const json = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
   const text = json.choices?.[0]?.message?.content?.replace(/\s+/g, " ").trim();
   if (!text) throw new Error("vision model returned no description");
