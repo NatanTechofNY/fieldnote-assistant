@@ -1501,7 +1501,7 @@ describe("Agent Studio configuration sync", () => {
       agentId: "agent",
       fetcher,
     });
-    assert.equal(result.clientTools, 42);
+    assert.equal(result.clientTools, 45);
     assert.equal(result.preservedTools, 1, "unrelated tools survive, the search tool is rebuilt not preserved");
     assert.equal(result.searchIndices, 3);
     assert.deepEqual(calls.map(call => call.method), ["GET", "PATCH", "POST"]);
@@ -1560,7 +1560,7 @@ describe("Agent Studio configuration sync", () => {
       assert.deepEqual(controls.facets.default, expected, `${index.index} exposes only safe facets`);
       assert.deepEqual(parameters.facets, expected, `${index.index} requests the same set it allows`);
     }
-    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 42);
+    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 45);
     assert.ok(!patch.tools.some(tool => tool.name === "list_memories"));
     assert.ok(patch.tools.some(tool => tool.name === "list_jira_issues" && "inputSchema" in tool));
     assert.ok(patch.tools.some(tool => tool.name === "create_memory" && "inputSchema" in tool));
@@ -2272,7 +2272,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
     const declared = Object.keys(toolInput);
-    assert.equal(declared.length, 42, "the tool contract changed; extend this test with it");
+    assert.equal(declared.length, 45, "the tool contract changed; extend this test with it");
     // The Atlassian tools read a remote system rather than SQLite, so they are
     // exercised against a stubbed site in their own block instead of here, as
     // are the shopping tools, which read the store catalog, and the web tools.
@@ -2409,6 +2409,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
     assert.deepEqual(history.messages.map((message: { speaker: string; content: string }) => [message.speaker, message.content]), [
       ["the owner", "What did we decide?"],
     ]);
+    assert.equal(history.messages[0].message_id, "msg_ctx", "a message can be aimed at by its archive id");
     // The browser chat is not a text thread, so without a thread id there is nothing to read.
     assert.match((await call("read_conversation", { from: "2030-01-01" }, 400)).error, /no conversation to read/);
 
@@ -2428,6 +2429,13 @@ describe("agent tools over /api/agent/tools/:name", () => {
     assert.match((await call("remember_group_member", { who: "speaker", name: "Sam", relationship: null }, 400)).error, /not a group chat/);
     // A text sent to the assistant on its own line is for it; only a group has bystanders.
     assert.match((await call("stay_quiet", { reason: "just chatting" }, 400)).error, /is for you/);
+    // The owner's groups can be listed from the browser, but acted in only from their own text chat.
+    assert.deepEqual((await call("list_group_chats")).data, { groups: [] });
+    assert.match((await call("send_to_group", {
+      thread_id: "thread_ctx", text: "hi", image_url: null, reply_to_message_id: null,
+    }, 400)).error, /not a text conversation/);
+    assert.match((await call("react_in_group", { thread_id: "thread_ctx", message_id: "msg_ctx", reaction: "love" }, 400)).error, /not a text conversation/);
+    await call("send_to_group", { thread_id: "thread_ctx", text: null, image_url: null, reply_to_message_id: null }, 400);
 
     await call("delete_memory", { id: memory.id }, 409);
     assert.equal((await call("delete_memory", { id: memory.id, confirmed: true })).data.id, memory.id);
@@ -2440,6 +2448,8 @@ describe("agent tools over /api/agent/tools/:name", () => {
       "get_memory", "update_memory", "get_agenda", "get_review_evidence", "get_reflection_evidence",
       "get_conversation_context", "read_conversation", "delete_memory", "delete_todo",
       "react_to_message", "reply_in_thread", "send_message", "name_group_chat", "stay_quiet", "remember_group_member",
+      // Exercised from the owner's own chat in the Sendblue block.
+      "list_group_chats", "send_to_group", "react_in_group",
       ...remote,
       ...shopping,
       ...web,
@@ -8247,6 +8257,131 @@ describe("Sendblue provider", () => {
       "a cursor without its range end would run on to now",
     );
     await assert.rejects(executeAgentTool(db, search, "read_conversation", { thread_id: thread.id, from: "2026-02-31" }, owner), /YYYY-MM-DD/);
+  });
+
+  /*
+   * "Send a GIF to the goopers chat in response to the picture of me", asked on
+   * the owner's own line. Every other sending tool reaches only the chat the
+   * turn is in, so this is the one way something asked for here lands there.
+   */
+  it("lets the owner post, reply, and react in a group from their own chat, and nowhere else", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const search = fakeSearch(db);
+    await runSmsAgent(db, search, address, "[Image: the owner grinning at the beach]", "SB_pic", groupTurnOptions(answering("cute")));
+    const thread = db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string };
+    db.prepare("UPDATE life_areas SET name='goopers' WHERE thread_id=?").run(thread.id);
+    const timestamp = new Date().toISOString();
+    for (const [phone, name, isOwner] of [[RECIPIENT, null, 1], [WIFE, "Sarah", 0], [STRANGER, null, 0]] as const) {
+      db.prepare(`
+        INSERT OR REPLACE INTO group_members(thread_id,phone,name,relationship,is_owner,left_at,created_at,updated_at)
+        VALUES(?,?,?,NULL,?,NULL,?,?)
+      `).run(thread.id, phone, name, isOwner, timestamp, timestamp);
+    }
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_owner',?,'sms',?,'cnv_owner',?,?)
+    `).run(USER_ID, RECIPIENT, timestamp, timestamp);
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+      VALUES('msg_owner','thread_owner','inbound','user','send goopers a gif','SB_owner_ask','received','{}',?,?)
+    `).run(timestamp, timestamp);
+
+    const sent: Array<{ to: string; body: string; mediaUrl?: string; groupId?: string; replyTo?: string }> = [];
+    const owner: ToolTurnContext = {
+      channel: "sms", address: RECIPIENT, threadId: "thread_owner", provider: "sendblue",
+      inboundMessageHandle: "SB_owner_ask", speakerIsOwner: true,
+      sendSms: async (_db, to, body, options) => {
+        sent.push({ to, body, mediaUrl: options?.mediaUrl, groupId: options?.groupId, replyTo: options?.replyTo });
+        return { sid: `SB_cross_${sent.length}`, status: "queued", ...(options?.replyTo ? { replyTo: options.replyTo } : {}) };
+      },
+    };
+
+    const listed = await executeAgentTool(db, search, "list_group_chats", {}, owner) as {
+      groups: Array<{ thread_id: string; group_name: string; members: string[] }>;
+    };
+    assert.deepEqual(listed.groups.map(group => [group.thread_id, group.group_name]), [[thread.id, "goopers"]], "only group threads, by the name the app shows");
+    assert.deepEqual(listed.groups[0].members, ["the owner", "Sarah", redactedNumber(STRANGER)]);
+    assert.doesNotMatch(JSON.stringify(listed), /7185552222|7185553333|7185551111/, "no member's number reaches the model");
+
+    const from = new Date(Date.now() - 3_600_000).toISOString();
+    const history = await executeAgentTool(db, search, "read_conversation", { thread_id: thread.id, from }, owner) as {
+      messages: Array<{ message_id: string; content: string }>;
+    };
+    const picture = history.messages.find(message => message.content.includes("grinning"))!;
+    assert.ok(picture.message_id);
+
+    // Words, threaded under the picture.
+    const text = await executeAgentTool(db, search, "send_to_group", {
+      thread_id: thread.id, text: "damn who is that", image_url: null, reply_to_message_id: picture.message_id,
+    }, owner) as { sent: boolean; threaded: boolean; group_name: string };
+    assert.deepEqual([text.sent, text.threaded, text.group_name], [true, true, "goopers"]);
+    assert.deepEqual(sent.at(-1), { to: address, body: "damn who is that", mediaUrl: undefined, groupId: GROUP, replyTo: "SB_pic" });
+    const filed = db.prepare("SELECT id,thread_id,content,metadata_json FROM channel_messages WHERE provider_message_id='SB_cross_1'").get() as {
+      id: string; thread_id: string; content: string; metadata_json: string;
+    };
+    assert.equal(filed.thread_id, thread.id, "filed in the group it went to, not the chat that asked");
+    assert.deepEqual(JSON.parse(filed.metadata_json), { kind: "message", sentFrom: "thread_owner", replyTo: "SB_pic" });
+    assert.ok(
+      db.prepare("SELECT 1 found FROM index_jobs WHERE entity_type='channel_message' AND entity_id=?").get(filed.id),
+      "and queued for search like any other message",
+    );
+    assert.equal(owner.sentText, undefined, "nothing went into the owner's own chat, which still gets its confirmation");
+
+    // A GIF this turn found.
+    const gifUrl = "https://media2.giphy.com/media/who123/giphy.gif";
+    await assert.rejects(
+      executeAgentTool(db, search, "send_to_group", { thread_id: thread.id, text: null, image_url: gifUrl, reply_to_message_id: null }, owner),
+      /Only a picture find_gif returned/,
+      "a picture no tool turned up is one the model composed",
+    );
+    rememberImages("thread_owner", [gifUrl]);
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { headers: { "content-type": "image/gif", "content-length": "90000" } })) as typeof fetch;
+    try {
+      await executeAgentTool(db, search, "send_to_group", {
+        thread_id: thread.id, text: null, image_url: gifUrl, reply_to_message_id: picture.message_id,
+      }, owner);
+    } finally { globalThis.fetch = original; }
+    assert.deepEqual(sent.at(-1), { to: address, body: "", mediaUrl: gifUrl, groupId: GROUP, replyTo: "SB_pic" });
+    const gif = db.prepare("SELECT content,metadata_json FROM channel_messages WHERE provider_message_id='SB_cross_2'").get() as { content: string; metadata_json: string };
+    assert.equal(gif.content, "(picture)");
+    assert.equal(JSON.parse(gif.metadata_json).mediaUrl, gifUrl);
+
+    // Only a group of the owner's, and only a message in it.
+    const post = (input: Record<string, unknown>, context: ToolTurnContext = owner) => executeAgentTool(db, search, "send_to_group", {
+      thread_id: thread.id, text: "hi", image_url: null, reply_to_message_id: null, ...input,
+    }, context);
+    await assert.rejects(post({ thread_id: "thread_owner" }), /Group chat not found/, "the owner's own line is not a group");
+    await assert.rejects(post({ reply_to_message_id: "msg_owner" }), /Message not found/, "a message from another chat cannot be aimed at");
+    await assert.rejects(post({}, { ...owner, readPages: true }), /read a web page/, "a page could be asking for it");
+    await assert.rejects(post({}, { ...owner, appTurn: "daily_digest" }), /app writing/);
+    const inGroup: ToolTurnContext = { ...owner, address, threadId: thread.id, groupId: GROUP, scope: { lifeAreaId: "area_x", threadId: thread.id } };
+    await assert.rejects(post({}, inGroup), /not available in a group chat/, "a group never reaches the owner's other groups");
+    await assert.rejects(executeAgentTool(db, search, "list_group_chats", {}, inGroup), /not available in a group chat/);
+    await assert.rejects(executeAgentTool(db, search, "list_group_chats", {}, { ...owner, appTurn: "daily_digest" }), /app writing/);
+    assert.equal(sent.length, 2, "no refusal sent anything");
+
+    // A tapback on the picture, and never on the assistant's own line.
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      const reacted = await executeAgentTool(db, search, "react_in_group", { thread_id: thread.id, message_id: picture.message_id, reaction: "love" }, owner) as { reacted: boolean };
+      assert.equal(reacted.reacted, true);
+      assert.deepEqual(stub.calls.map(call => [call.url.pathname, call.body.message_handle, call.body.reaction]), [["/api/send-reaction", "SB_pic", "love"]]);
+      const row = db.prepare("SELECT metadata_json FROM channel_messages WHERE id=?").get(picture.message_id) as { metadata_json: string };
+      assert.deepEqual(JSON.parse(row.metadata_json).reactions, ["love"]);
+      await assert.rejects(
+        executeAgentTool(db, search, "react_in_group", { thread_id: thread.id, message_id: filed.id, reaction: "love" }, owner),
+        /no tapback for your own message/,
+      );
+      await assert.rejects(
+        executeAgentTool(db, search, "react_in_group", { thread_id: thread.id, message_id: "msg_owner", reaction: "love" }, owner),
+        /Message not found/,
+      );
+      assert.equal(stub.calls.length, 1);
+    } finally { stub.restore(); }
   });
 
   it("says a said todo once when two of its texts come due together, and never sends an empty composition", async () => {

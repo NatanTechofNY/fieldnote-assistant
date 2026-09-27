@@ -55,6 +55,9 @@ export const toolActivityMeta: Record<string, { active: string; done: string; so
   // Both refuse on the web channel; a handler here means the refusal reaches
   // the agent as a tool result it can answer in words, rather than a stall.
   send_message: { active: "Sending a text", done: "Text sent", source: "Messages" },
+  list_group_chats: { active: "Checking your group chats", done: "Group chats found", source: "Messages" },
+  send_to_group: { active: "Posting in a group chat", done: "Posted in the group", source: "Messages" },
+  react_in_group: { active: "Reacting in a group chat", done: "Reacted in the group", source: "Messages" },
   name_group_chat: { active: "Naming the group chat", done: "Group chat named", source: "SQLite" },
   update_group_settings: { active: "Changing group settings", done: "Group settings changed", source: "SQLite" },
   update_soul: { active: "Updating how I talk", done: "Soul updated", source: "SQLite" },

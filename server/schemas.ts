@@ -605,6 +605,18 @@ export const toolInput = {
     limit: z.coerce.number().int().min(1).max(100).nullable().optional(),
   }).strict(),
   stay_quiet: z.object({ reason: z.string().trim().min(1).max(200) }).strict(),
+  list_group_chats: z.object({}).strict(),
+  send_to_group: z.object({
+    thread_id: z.string().min(1).max(100),
+    text: z.string().trim().max(1500).nullable().optional(),
+    image_url: z.string().trim().url().max(2000).nullable().optional(),
+    reply_to_message_id: z.string().min(1).max(100).nullable().optional(),
+  }).strict().refine(input => Boolean(input.text || input.image_url), "Pass text, image_url, or both"),
+  react_in_group: z.object({
+    thread_id: z.string().min(1).max(100),
+    message_id: z.string().min(1).max(100),
+    reaction,
+  }).strict(),
   search_store_products: z.object({
     query: z.string().trim().min(1).max(200),
     category: z.enum(PRODUCT_CATEGORIES).nullable().optional(),
