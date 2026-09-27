@@ -15,6 +15,7 @@ import { AskEditor } from "./AskEditor";
 import { LifeAreasSettings } from "./LifeAreasSettings";
 import { GroupChatSettings } from "./GroupChatSettings";
 import { SettingsSection } from "./SettingsSection";
+import { SoulEditor } from "./SoulEditor";
 import { UnderHoodSettings } from "./UnderHoodSettings";
 import { WebhookUrlField } from "./WebhookUrlField";
 import { currentPublicOrigin } from "../../lib/public-origin";
@@ -178,6 +179,18 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
     },
     onError: (mutationError: Error) => notify(mutationError.message),
   });
+  const soul = useMutation({
+    mutationFn: (next: string | null) => api.updateSoul(next),
+    onSuccess: (updated) => { refresh(); notify(updated.soul ? "Soul saved" : "Back to the default voice"); },
+    onError: (mutationError: Error) => notify(mutationError.message),
+  });
+  const tagPreferences = useMutation({
+    mutationFn: () => api.tagPreferences(),
+    onSuccess: (result) => notify(result.count
+      ? `Tagged ${result.count} ${result.count === 1 ? "memory" : "memories"} as preferences`
+      : "No untagged preferences found"),
+    onError: (mutationError: Error) => notify(mutationError.message),
+  });
   const granolaConnect = useMutation({
     mutationFn: () => api.connectGranola(granolaKey),
     onSuccess: () => { setGranolaKey(""); refresh(); notify("Granola connected and initial poll complete"); },
@@ -236,6 +249,29 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
           <input type="checkbox" checked={demoMode.enabled} onChange={event => demoMode.setEnabled(event.target.checked)}/>
           <span>Mask identifying values on screen</span>
         </label>
+      </SettingsSection>
+      <SettingsSection
+        sectionId="soul"
+        title="Soul"
+        description="How the assistant talks with you, on your own line and here. It updates itself when you give it feedback."
+        status={data.soul ? "Shaped" : "Default voice"}
+        icon={Sparkles}
+      >
+        <SoulEditor
+          name="Your Soul"
+          value={data.soul ?? null}
+          placeholder={"- Short answers; skip the pleasantries.\n- Dry humour is fine.\n- No emojis."}
+          saving={soul.isPending}
+          onSave={next => soul.mutate(next)}
+        />
+        <p className="integration-copy">
+          Each group chat has its own Soul, under Group chats. Facts about you — what you like, allergies, how you
+          want things done — are memories: those tagged <code>preference</code> come with every turn.
+        </p>
+        <button className="button ghost" type="button" disabled={tagPreferences.isPending} onClick={() => tagPreferences.mutate()}>
+          {tagPreferences.isPending ? <LoaderCircle className="spin" size={13}/> : <ListChecks size={13}/>}
+          Tag preference memories
+        </button>
       </SettingsSection>
       <SettingsSection
         sectionId="classifications"

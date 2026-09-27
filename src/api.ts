@@ -1,5 +1,5 @@
 import type {
-  Category, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource,
+  AgentTurnMemory, Category, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
   ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoStatus,
   UniversalSearchResult,
@@ -16,7 +16,7 @@ const TOOL_TIMEOUT_MS = 20_000;
  * get longer; the server gives up at 30s (`server/web-service.ts`) and answers first.
  */
 const WEB_TOOL_TIMEOUT_MS = 35_000;
-const WEB_TOOLS = new Set(["web_search", "read_web_page"]);
+const WEB_TOOLS = new Set(["web_search", "read_web_page", "find_gif", "send_image"]);
 
 async function request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
   const controller = timeoutMs ? new AbortController() : null;
@@ -91,6 +91,7 @@ export const api = {
     name?: string; color?: string;
     morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean;
     morning_checkin_prompt?: string | null; evening_checkin_prompt?: string | null;
+    soul?: string | null; assistant_nickname?: string | null; reply_mode?: ReplyMode;
   }) =>
     request<LifeArea>(`/life-areas/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteLifeArea: (id: string) =>
@@ -239,6 +240,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(input),
     }),
+  tagPreferences: () => request<{ applied: boolean; count: number }>("/admin/memories/tag-preferences", {
+    method: "POST",
+    body: JSON.stringify({ apply: true }),
+  }),
+  updateSoul: (soul: string | null) =>
+    request<{ soul: string | null }>("/integrations/soul", { method: "PUT", body: JSON.stringify({ soul }) }),
+  /* The owner's Soul and the memories that bear on a draft, for the browser chat's turn context. */
+  agentContext: (text: string, signal?: AbortSignal) =>
+    request<AgentTurnMemory>("/agent/context", { method: "POST", body: JSON.stringify({ text }), signal }),
   updateNotifications: (input: Omit<IntegrationState["notifications"], "optedOutAt" | "smsProvider">) =>
     request<IntegrationState["notifications"]>("/integrations/notifications", {
       method: "PUT",

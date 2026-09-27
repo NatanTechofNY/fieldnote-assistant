@@ -1,5 +1,6 @@
 import { now } from "../db.ts";
 import { enqueueExternalEvent } from "../event-ingestion.ts";
+import { mediaUrlsOf } from "../image-input.ts";
 import { getNotificationPreferences, getSendblueSecret, getTwilioSecret, recordSendblueNotice, setSmsOptOut } from "../integrations.ts";
 import { isInboundSenderAllowed, ownerHasSpokenInGroup } from "../messaging.ts";
 import { normalizeSendblueStatus, readSendblueInbound, SENDBLUE_INBOUND_PATH, SENDBLUE_LINE_ASSIGNED_PATH, SENDBLUE_LINE_BLOCKED_PATH, SENDBLUE_STATUS_PATH, verifySendblueWebhook } from "../sendblue-service.ts";
@@ -52,8 +53,9 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
     }
     const from = params.From;
     const messageSid = params.MessageSid;
-    const body = params.Body?.trim();
-    if (!from || !messageSid || !body) return res.status(400).send("Missing SMS fields");
+    const body = params.Body?.trim() ?? "";
+    // A picture sent on its own arrives with an empty body and is still a message.
+    if (!from || !messageSid || (!body && !mediaUrlsOf(params).length)) return res.status(400).send("Missing SMS fields");
     const preferences = getNotificationPreferences(db);
     // SMS has no group chats, so Twilio only ever hears from the recipient.
     if (!isInboundSenderAllowed(preferences, { from, participants: [] })) {
@@ -106,7 +108,7 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
     const inbound = readSendblueInbound(payload);
     const { from, messageHandle, groupId, participants } = inbound;
     const body = inbound.body?.trim() ?? "";
-    if (!from || !messageHandle || !body) return res.status(400).json({ received: false });
+    if (!from || !messageHandle || (!body && !mediaUrlsOf(payload).length)) return res.status(400).json({ received: false });
     const preferences = getNotificationPreferences(db);
     const owner = preferences.recipientPhone;
     const ownerPresent = Boolean(groupId && owner && participants.includes(owner));

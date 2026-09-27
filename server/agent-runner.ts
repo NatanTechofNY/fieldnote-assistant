@@ -6,6 +6,9 @@ import { getNotificationPreferences, type SmsProvider } from "./integrations.ts"
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
+import { hasImageDescription } from "./image-input.ts";
+import { relevantFacts } from "./memory-context.ts";
+import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
 import { executeAgentTool, ownRecordsOnly, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
 import type { Db } from "./types.ts";
@@ -47,7 +50,8 @@ function newConversationId(): string {
   return `alg_cnv_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
-type SearchWriter = Pick<AlgoliaSync, "flushSoon">;
+/** The memory search is optional: a test double without it falls back to a lexical scan. */
+type SearchWriter = Pick<AlgoliaSync, "flushSoon"> & Partial<Pick<AlgoliaSync, "searchMemories">>;
 type AgentPart = {
   type?: string;
   text?: string;
@@ -133,19 +137,23 @@ const WRITE_TOOLS = new Set([
   // A tapback changes nothing in SQLite but is just as irreversible from the
   // user's side, and a retried turn that cannot see the first one sends a
   // second. The same goes for a bubble sent mid-turn.
-  "react_to_message", "send_message",
+  "react_to_message", "send_message", "send_image",
   // Naming the group twice is harmless, but a retry should know it was done.
   "name_group_chat",
   "remember_group_member",
+  "update_soul", "update_group_settings",
 ]);
 
 /**
  * Tools that act on the conversation itself rather than look something up or
  * change a record. None of them is "working on it": a tapback, a threaded
  * reply, and an early bubble are the answer's own gestures, and the product
- * cards are messages.
+ * cards are messages. A GIF is a gesture too, and finding one is part of it:
+ * a 🔍 on the message before a meme lands would read as a stall.
  */
-const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_product_cards", "send_message", "stay_quiet"]);
+const GESTURE_TOOLS = new Set([
+  "react_to_message", "reply_in_thread", "send_product_cards", "send_message", "stay_quiet", "find_gif", "send_image",
+]);
 
 /**
  * The tapback that sits on the user's message while the turn is looking things
@@ -600,6 +608,77 @@ export function archiveReactionText(
   return saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, reactionText: true });
 }
 
+/**
+ * The text an earlier attempt already archived for this inbound message, so a
+ * retry answers the same words rather than paying to describe its pictures again.
+ */
+export function archivedInboundText(db: Db, address: string, providerMessageId: string | undefined): string | undefined {
+  if (!providerMessageId) return undefined;
+  const row = db.prepare(`
+    SELECT m.content FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+    WHERE t.user_id=? AND t.channel='sms' AND t.address=? AND m.direction='inbound' AND m.provider_message_id=?
+  `).get(USER_ID, address, providerMessageId) as { content: string } | undefined;
+  return row?.content;
+}
+
+/** Whether the message is an inline reply to one of the assistant's own messages. */
+function repliesToAssistant(db: Db, threadId: string, inbound: InboundContext | undefined): boolean {
+  const parents = [inbound?.replyTo, inbound?.threadOriginator].filter((handle): handle is string => Boolean(handle));
+  return parents.some(handle => Boolean(db.prepare(`
+    SELECT 1 found FROM channel_messages WHERE thread_id=? AND provider_message_id=? AND role='assistant'
+  `).get(threadId, handle)));
+}
+
+/** How long after the evening question the answers to it are still coming in. */
+const EVENING_ANSWER_WINDOW_MS = 6 * 60 * 60_000;
+/** How long a reminder or morning note in the chat can still be answered with a bare "done". */
+const PROMPTED_ANSWER_WINDOW_MS = 2 * 60 * 60_000;
+
+/**
+ * Files a group message without answering it, when the group has asked the
+ * assistant to stay out until named and this message does not name it or
+ * reply to it. Returns false — nothing filed — when the message is for it after
+ * all. Two exceptions, both the app asking the room something: answers to the
+ * evening question are the day's shared journal entry, which only the
+ * assistant writes, so for a few hours after it went out every message still
+ * reaches the agent; and when the last thing the assistant said was a reminder
+ * or the morning note, "done" or "push it to Monday" is an answer to it.
+ */
+export function holdUntilNamed(
+  db: Db,
+  address: string,
+  body: string,
+  providerMessageId: string | undefined,
+  inbound: InboundContext | undefined,
+  metadata: Record<string, unknown>,
+): boolean {
+  const thread = db.prepare("SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address=?")
+    .get(USER_ID, address) as { id: string } | undefined;
+  if (!thread) return false;
+  const voice = groupVoiceForThread(db, thread.id);
+  if (voice?.replyMode !== "named_only") return false;
+  if (addressesAssistant(body, voice.assistantNickname) || repliesToAssistant(db, thread.id, inbound)) return false;
+  const since = new Date(Date.now() - EVENING_ANSWER_WINDOW_MS).toISOString();
+  const eveningAsked = db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role='assistant' AND status<>'failed'
+      AND json_extract(metadata_json,'$.kind')='group_evening' AND created_at>=?
+    LIMIT 1
+  `).get(thread.id, since);
+  if (eveningAsked) return false;
+  const lastSaid = db.prepare(`
+    SELECT json_extract(metadata_json,'$.kind') kind,created_at FROM channel_messages
+    WHERE thread_id=? AND role='assistant' AND status<>'failed'
+    ORDER BY created_at DESC,rowid DESC LIMIT 1
+  `).get(thread.id) as { kind: string | null; created_at: string } | undefined;
+  if (lastSaid && ["reminder", "group_morning"].includes(lastSaid.kind ?? "")
+    && Date.now() - Date.parse(lastSaid.created_at) < PROMPTED_ANSWER_WINDOW_MS) {
+    return false;
+  }
+  saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, heldUntilNamed: true });
+  return true;
+}
+
 /** How recently the assistant has to have spoken for a message to read as a reply to it. */
 const FOLLOW_UP_WINDOW_MS = 10 * 60_000;
 
@@ -619,14 +698,8 @@ function aimedAtAssistant(
   inbound: InboundContext | undefined,
   speakerPhone: string | undefined,
 ): boolean {
-  if (addressesAssistant(text)) return true;
-  const parents = [inbound?.replyTo, inbound?.threadOriginator].filter((handle): handle is string => Boolean(handle));
-  for (const handle of parents) {
-    const parent = db.prepare(`
-      SELECT 1 found FROM channel_messages WHERE thread_id=? AND provider_message_id=? AND role='assistant'
-    `).get(threadId, handle);
-    if (parent) return true;
-  }
+  if (addressesAssistant(text, groupVoiceForThread(db, threadId)?.assistantNickname)) return true;
+  if (repliesToAssistant(db, threadId, inbound)) return true;
   if (!speakerPhone) return false;
   // The last few rows before this one, newest first, read off the thread's
   // (thread_id, created_at) index rather than a sort of the whole thread.
@@ -957,12 +1030,22 @@ export async function runChannelAgent(
     }),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
     inboundText: options.internal ? undefined : body,
+    ...(options.internal ? { internal: true } : {}),
+    // A picture's description quotes words the sender did not write, like a
+    // page does, so the same refusals apply from the start of the turn.
+    ...(!options.internal && hasImageDescription(body) ? { readWeb: true, readUntrusted: true } : {}),
     sendSms: options.sendSms,
     ...(options.internal && typeof options.userMessageMetadata?.kind === "string" ? { appTurn: options.userMessageMetadata.kind } : {}),
   };
   search.flushSoon();
   const messages = threadHistory(db, thread.id);
   const preferences = getNotificationPreferences(db);
+  // How to talk here, and what is known about the people here: the group's own
+  // in a group, the owner's everywhere else. App-composed turns carry the voice
+  // but not the facts; their instruction already says what to draw on.
+  const voice = group ? groupVoice(db, group.area.id) : undefined;
+  const soul = voice ? voice.soul : ownerSoul(db);
+  const facts = options.internal ? [] : await relevantFacts(db, search, group ? { areaId: group.area.id } : { own: true }, body);
   /*
    * The turn context belongs on the message being answered. That is usually
    * the last one in the window, but a retry that was overtaken is answering an
@@ -993,6 +1076,12 @@ export async function runChannelAgent(
       ...(options.internal && typeof options.userMessageMetadata?.kind === "string"
         ? { appTurn: options.userMessageMetadata.kind }
         : {}),
+      ...(soul ? { soul } : {}),
+      ...(facts.length ? { [group ? "groupFacts" : "ownerFacts"]: facts } : {}),
+      ...(voice ? {
+        replyMode: voice.replyMode,
+        ...(voice.assistantNickname ? { assistantNickname: voice.assistantNickname } : {}),
+      } : {}),
       ...(options.inbound?.groupId && group
         ? {
           groupId: options.inbound.groupId,
@@ -1106,6 +1195,19 @@ export async function runChannelAgent(
     && aimedAtAssistant(db, thread.id, inboundId, body, options.inbound, speaker?.speaker)) {
     void setMark(WORKING_MARK);
   }
+  /*
+   * On the owner's own turn nothing is fenced, so a search or a conversation
+   * read can hand back what someone in a group wrote. That text could be
+   * asking to change how the assistant talks to the owner, so once a result
+   * carries a group's area or thread, the owner's Soul is off limits for the
+   * rest of the turn.
+   */
+  const groupMarkers = context.scope ? [] : groupAreas(db).flatMap(area => [area.id, area.thread_id]);
+  const noteGroupContent = (turn: ToolTurnContext, output: unknown) => {
+    if (turn.readUntrusted || !groupMarkers.length || output === undefined) return;
+    const serialized = JSON.stringify(output) ?? "";
+    if (groupMarkers.some(marker => serialized.includes(marker))) turn.readUntrusted = true;
+  };
   const deadline = Date.now() + TURN_BUDGET_MS;
   try {
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
@@ -1121,6 +1223,8 @@ export async function runChannelAgent(
         && part.output !== undefined
       )) {
         saveToolTrace(db, thread.id, part);
+        // Hosted search hits arrive already answered, so this is where one from a group is seen.
+        noteGroupContent(context, part.output);
       }
       const toolParts = response.parts.filter(part =>
         typeof part.type === "string"
@@ -1129,11 +1233,18 @@ export async function runChannelAgent(
         && (part.toolCallId || part.tool_call_id),
       );
       if (!toolParts.length) {
-        const text = response.parts
+        const written = response.parts
           .filter(part => part.type === "text" && typeof part.text === "string")
           .map(part => part.text)
           .join("\n")
           .trim();
+        /*
+         * In a group, staying quiet is final. A model that called stay_quiet and
+         * then chatted anyway ("We hit collective idle mode") was the room's
+         * top complaint, so the text is dropped — unless a record changed
+         * after the call, which the room has to be told about.
+         */
+        const text = context.scope && context.stayedQuiet && !changedRecord ? "" : written;
         // Once per turn, so a model that insists cannot loop the turn out of its budget.
         if (!changedStatus && !checkedStatusClaim && STATUS_CLAIM.test(text)) {
           checkedStatusClaim = true;
@@ -1148,9 +1259,8 @@ export async function runChannelAgent(
         // The answer is in. The progress mark gives way to the closing one, or
         // comes down when there is nothing to confirm; the agent's own reaction,
         // if it made one, is left exactly where it is. A turn that decided the
-        // message was not for it, and held to that, leaves no receipt at all,
-        // whatever it read on the way to deciding; one that changed its mind
-        // and answered is answered, receipt and all.
+        // message was not for it leaves no receipt at all, whatever it read on
+        // the way to deciding.
         const quiet = context.stayedQuiet && !text;
         await setMark(quiet ? undefined : closingMark());
         /*
@@ -1164,7 +1274,7 @@ export async function runChannelAgent(
          * stay_quiet. Without any of those, silence is a model that forgot to
          * answer, and the fallback says so.
          */
-        if (!text && (context.reacted || context.sentText || context.stayedQuiet)) {
+        if (!text && (context.reacted || context.sentText || context.stayedQuiet || context.adjustedVoice)) {
           search.flushSoon();
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
         }
@@ -1198,6 +1308,7 @@ export async function runChannelAgent(
         if (!GESTURE_TOOLS.has(toolName)) lookedUp = true;
         try {
           const data = await executeAgentTool(db, search, toolName, part.input || {}, context);
+          noteGroupContent(context, data);
           // An undefined payload disappears from the serialized body, leaving a
           // bare `{"success":true}` that reads as a truncated result rather than
           // a confirmation. An explicit null says the write landed and returned

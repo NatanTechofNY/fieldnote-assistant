@@ -90,9 +90,10 @@ export function TodosPage() {
     if (status === "done" && todo && openSubtasks(todo).length) setFinishing(todo);
     else mutation.mutate({ id, status });
   };
+  const [recurringOpen, setRecurringOpen] = usePreference("todos:recurring-open", true, BOOLEAN);
   function onDragEnd(event: DragEndEvent) {
-    const status = event.over?.id as TodoStatus | undefined;
-    if (status && boardStatuses.includes(status)) setStatus(String(event.active.id), status);
+    const status = String(event.over?.id ?? "").split(":").pop() as TodoStatus;
+    if (boardStatuses.includes(status)) setStatus(String(event.active.id), status);
   }
   if (isLoading) return <Loading />;
   if (error) return <ErrorState error={error} />;
@@ -118,17 +119,36 @@ export function TodosPage() {
         is a drag to Done, and the target has to be there to drag to. */}
     {view === "board" && <DndContext sensors={sensors} onDragEnd={onDragEnd}>
       {query.trim() && !top.length && <div className="table-empty">No tasks match this view.</div>}
-      <div className="board">
-        {boardStatuses.map(status => <TodoColumn
-          key={status}
-          status={status}
-          todos={top.filter(t => t.status === status)}
-          children={children}
-          hiddenNote={status === "done" && !showDone ? "Done tasks are hidden" : undefined}
-          onOpen={setEditor}
-          onStatus={setStatus}
-        />)}
-      </div>
+      {/* Repeating tasks come round again and never really finish, so they
+          sit in their own lane rather than crowding the one-off work. The
+          one-off lane always renders, since it is where a drop has to land. */}
+      {lanes.map(lane => {
+        const laneTodos = top.filter(t => laneOf(t) === lane);
+        if (lane === "recurring" && !laneTodos.length) return null;
+        const collapsed = lane === "recurring" && !recurringOpen;
+        return <div key={lane} className={`board-lane ${lane}`} role="group" aria-label={laneLabel[lane]}>
+          {(lane === "recurring" || top.some(t => laneOf(t) === "recurring")) && <div className="board-lane-head">
+            {lane === "recurring"
+              ? <button type="button" className="board-lane-toggle" aria-expanded={!collapsed} onClick={() => setRecurringOpen(!recurringOpen)}>
+                <ChevronRight size={13} aria-hidden="true"/><Repeat size={12} aria-hidden="true"/>{laneLabel[lane]}
+              </button>
+              : <strong>{laneLabel[lane]}</strong>}
+            <span className="badge">{laneTodos.length}</span>
+          </div>}
+          {!collapsed && <div className="board">
+            {boardStatuses.map(status => <TodoColumn
+              key={status}
+              lane={lane}
+              status={status}
+              todos={laneTodos.filter(t => t.status === status)}
+              children={children}
+              hiddenNote={status === "done" && !showDone ? "Done tasks are hidden" : undefined}
+              onOpen={setEditor}
+              onStatus={setStatus}
+            />)}
+          </div>}
+        </div>;
+      })}
     </DndContext>}
     {/* The calendar is given every task rather than only the top-level ones:
         a step with a date of its own is a real thing on a real day. */}
@@ -158,6 +178,12 @@ export function TodosPage() {
     />}
   </div>;
 }
+
+type BoardLane = "one-off" | "recurring";
+
+const lanes: readonly BoardLane[] = ["one-off", "recurring"];
+const laneLabel: Record<BoardLane, string> = { "one-off": "One-off", recurring: "Recurring" };
+const laneOf = (todo: Todo): BoardLane => todo.recurrence ? "recurring" : "one-off";
 
 /** Steps grouped under the id of the task they belong to. */
 function stepsByParent(todos: Todo[]): Map<string, Todo[]> {
@@ -370,7 +396,8 @@ function StatusPicker({ todo, onStatus }: { todo: Todo; onStatus: (id: string, s
   </div>;
 }
 
-function TodoColumn({ status, todos, children, hiddenNote, onOpen, onStatus }: {
+function TodoColumn({ lane, status, todos, children, hiddenNote, onOpen, onStatus }: {
+  lane: BoardLane;
   status: TodoStatus;
   todos: Todo[];
   children: Map<string, Todo[]>;
@@ -379,7 +406,7 @@ function TodoColumn({ status, todos, children, hiddenNote, onOpen, onStatus }: {
   onOpen: (todo: Todo) => void;
   onStatus: (id: string, status: TodoStatus) => void;
 }) {
-  const { setNodeRef, isOver } = useDroppable({ id: status });
+  const { setNodeRef, isOver } = useDroppable({ id: `${lane}:${status}` });
   const meta = statusMeta[status];
   return <section ref={setNodeRef} className="column" style={{ outline: isOver ? `1px solid ${meta.color}` : undefined }}>
     {/* A finished task still holding open steps stays on the board whatever

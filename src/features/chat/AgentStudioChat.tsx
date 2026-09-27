@@ -7,7 +7,7 @@ import { BellRing, Bot, Brain, Clock3, ListTodo, MessagesSquare, Search, Sparkle
 import { liteClient as createSearchClient } from "algoliasearch/lite";
 import { api } from "../../api";
 import type {
-  MemoryKind, Todo, TodoStatus,
+  AgentTurnMemory, MemoryKind, Todo, TodoStatus,
 } from "../../types";
 import { moodEmoji } from "../../lib/mood";
 import { createToolActivityLayout, toolActivityMeta } from "./tool-activity";
@@ -17,6 +17,7 @@ import { statusMeta } from "../../lib/todo-meta";
 import { invalidateTaxonomy } from "../../lib/invalidate";
 import { useAgentPanel } from "../../lib/agent-panel";
 import { serializeAttachments } from "../../lib/agent-attachments";
+import { serializeTurnMemory } from "../../lib/turn-memory";
 import { AgentExpandButton } from "./AgentExpandButton";
 import { AttachmentChips } from "./AttachmentChips";
 
@@ -183,7 +184,7 @@ function ToolResultChannel({ settleRef }: { settleRef: RefObject<SettleToolCall 
 
 // Reads can be replayed safely; a write may have committed before the response
 // was lost, so retrying it would duplicate the record.
-const READ_ONLY_TOOLS = new Set(["search_store_products", "web_search", "read_web_page"]);
+const READ_ONLY_TOOLS = new Set(["search_store_products", "web_search", "read_web_page", "find_gif"]);
 const isReadOnlyTool = (name: string) => /^(get|list)_/.test(name) || READ_ONLY_TOOLS.has(name);
 const isTransportError = (error: unknown) =>
   error instanceof TypeError || (error instanceof DOMException && error.name === "AbortError");
@@ -242,6 +243,60 @@ export function AgentStudioChat() {
     attachmentsRef.current = attachments;
     clearAttachmentsRef.current = clearAttachments;
   }, [attachments, clearAttachments]);
+  /*
+   * The owner's Soul and the memories that bear on what is being typed, as a
+   * text turn carries them. The widget reads the turn context synchronously
+   * at send time, so it is fetched ahead: once on mount, then again as the
+   * draft settles, and the latest answer is what goes out.
+   */
+  const panelRef = useRef<HTMLDivElement>(null);
+  const turnMemoryRef = useRef<AgentTurnMemory>({ soul: null, ownerFacts: [] });
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlight: AbortController | undefined;
+    let lastText: string | undefined;
+    // Each lookup is a search, so only a settled, changed draft asks, and a
+    // newer one cancels the one before it.
+    const refresh = (text: string) => {
+      clearTimeout(timer);
+      if (text === lastText) return;
+      lastText = text;
+      inFlight?.abort();
+      const controller = new AbortController();
+      inFlight = controller;
+      api.agentContext(text, controller.signal)
+        .then(memory => { if (inFlight === controller) turnMemoryRef.current = memory; })
+        .catch(() => undefined);
+    };
+    refresh("");
+    const root = panelRef.current;
+    const draft = () => root?.querySelector("textarea")?.value ?? "";
+    const onInput = (event: Event) => {
+      if (!(event.target instanceof HTMLTextAreaElement)) return;
+      const text = event.target.value.trim();
+      clearTimeout(timer);
+      if (text.length < 3) return;
+      timer = setTimeout(() => refresh(text), 800);
+    };
+    // Sending does not wait for the debounce: the links in the message have
+    // to be registered before the agent can ask to read them.
+    const onSend = (event: Event) => {
+      const sending = event instanceof KeyboardEvent
+        ? event.key === "Enter" && !event.shiftKey && event.target instanceof HTMLTextAreaElement
+        : event.target instanceof Element && Boolean(event.target.closest("button[type='submit'], .ais-ChatPrompt-submit"));
+      if (sending) refresh(draft().trim());
+    };
+    root?.addEventListener("input", onInput);
+    root?.addEventListener("keydown", onSend, true);
+    root?.addEventListener("click", onSend, true);
+    return () => {
+      clearTimeout(timer);
+      inFlight?.abort();
+      root?.removeEventListener("input", onInput);
+      root?.removeEventListener("keydown", onSend, true);
+      root?.removeEventListener("click", onSend, true);
+    };
+  }, []);
   // The server executor owns validation, delete confirmation, and clear_fields
   // patching, so there is nothing tool-specific to do here.
   const callTool = useCallback(async (name: string, call: ToolCall) => {
@@ -280,6 +335,7 @@ export function AgentStudioChat() {
       localUserId: "devcon-demo",
       timezone: timezoneRef.current,
       currentDateTime: new Date().toISOString(),
+      ...serializeTurnMemory(turnMemoryRef.current),
       ...serializeAttachments(attached),
     };
   }, []);
@@ -300,6 +356,7 @@ export function AgentStudioChat() {
   // A closed panel is still mounted to keep the conversation, so it has to be
   // taken out of the accessibility tree and out of the tab order.
   return <div
+    ref={panelRef}
     className="agent-studio-panel"
     data-open={isOpen}
     data-expanded={isExpanded}

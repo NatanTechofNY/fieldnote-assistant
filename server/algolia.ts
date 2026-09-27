@@ -101,6 +101,8 @@ export interface MemorySearchFilters {
   kind?: string;
   category_id?: string;
   life_area_id?: string;
+  /** Areas left out of the ranking, such as every group's for the owner's own lookups. */
+  exclude_life_area_ids?: string[];
   mood_label?: string;
   review_worthy?: boolean;
 }
@@ -695,6 +697,7 @@ export class AlgoliaSync {
     if (options.kind) facets.push(`kind:"${escapeFilterValue(options.kind)}"`);
     if (options.category_id) facets.push(`category_id:"${escapeFilterValue(options.category_id)}"`);
     if (options.life_area_id) facets.push(`life_area_id:"${escapeFilterValue(options.life_area_id)}"`);
+    for (const area of options.exclude_life_area_ids ?? []) facets.push(`NOT life_area_id:"${escapeFilterValue(area)}"`);
     if (options.mood_label) facets.push(`mood_label:"${escapeFilterValue(options.mood_label)}"`);
     if (options.review_worthy !== undefined) facets.push(`review_worthy:${options.review_worthy}`);
     const hits = await this.searchIndex(this.memoryIndex, "Memory", {

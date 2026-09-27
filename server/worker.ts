@@ -4,7 +4,7 @@ import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
-  archiveReactionText, failAgentTurn, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
+  archivedInboundText, archiveReactionText, failAgentTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
   recordOutboundProviderMessage, runSmsAgent,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
@@ -14,6 +14,7 @@ import {
   claimExternalEvents, completeExternalEvent, deferExternalEvent, nextExternalEventAvailableAt, pollGranola,
   pruneSettledExternalEvents, STALE_CLAIM_MS, unsettledExternalEventsBefore,
 } from "./event-ingestion.ts";
+import { describeMedia, mediaUrlsOf, withMediaLines } from "./image-input.ts";
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks, syncOccurrenceCompletion } from "./todo-status.ts";
@@ -38,6 +39,8 @@ export type WorkerDependencies = {
   runSmsAgent?: typeof runSmsAgent;
   pollGranola?: typeof pollGranola;
   startTypingIndicator?: typeof startTypingIndicator;
+  /** What pictures are downloaded and described through; tests stand in for the network. */
+  fetch?: typeof fetch;
 };
 
 /**
@@ -57,6 +60,8 @@ type InboundMessage = {
   groupName?: string;
   /** Every number in the conversation, the Sendblue line included. */
   participants?: string[];
+  /** Pictures and other attachments sent with the message. */
+  mediaUrls?: string[];
 };
 
 const INBOUND_SOURCES: Array<{
@@ -69,6 +74,7 @@ const INBOUND_SOURCES: Array<{
       from: typeof payload.From === "string" ? payload.From : undefined,
       body: typeof payload.Body === "string" ? payload.Body : undefined,
       messageId: typeof payload.MessageSid === "string" ? payload.MessageSid : undefined,
+      mediaUrls: mediaUrlsOf(payload),
     }),
   },
   {
@@ -84,6 +90,7 @@ const INBOUND_SOURCES: Array<{
         groupId: inbound.groupId,
         groupName: inbound.groupName,
         participants: inbound.participants,
+        mediaUrls: mediaUrlsOf(payload),
       };
     },
   },
@@ -957,7 +964,8 @@ export async function runWorkerOnce(
       let message: InboundMessage | undefined;
       try {
         message = read(JSON.parse(event.payload_json) as Record<string, unknown>);
-        if (!message.from || !message.body) throw new Error("Inbound SMS event is missing a sender or body");
+        const media = message.mediaUrls ?? [];
+        if (!message.from || (!message.body?.trim() && !media.length)) throw new Error("Inbound SMS event is missing a sender or body");
         /*
          * A group chat is one thread shared by everyone in it, so it is keyed on
          * the group rather than on whoever spoke, and the speaker travels as
@@ -973,8 +981,21 @@ export async function runWorkerOnce(
         const group = message.groupId ? groupTurn(db, message.groupId, message.from, message.groupName) : null;
         // A tapback that arrived as text is filed and never answered: "What's
         // up?" in reply to a heart is the assistant misreading the room.
-        if (isReactionText(message.body)) {
+        if (message.body && !media.length && isReactionText(message.body)) {
           archiveReactionText(db, address, message.body, message.messageId, group?.metadata ?? {});
+          completeExternalEvent(db, event.id, "processed");
+          continue;
+        }
+        const inbound = {
+          provider: source,
+          replyTo: message.replyTo,
+          threadOriginator: message.threadOriginator,
+          ...(message.groupId ? { groupId: message.groupId, participants: message.participants } : {}),
+        };
+        // A group that asked the assistant to stay out until named gets no
+        // answer, and no completion is spent, on a message that does not name it.
+        const heldText = withMediaLines(message.body, media.map(() => "[Picture attached]"));
+        if (group && holdUntilNamed(db, address, heldText, message.messageId, inbound, { ...group.metadata, ...(media.length ? { mediaUrls: media } : {}) })) {
           completeExternalEvent(db, event.id, "processed");
           continue;
         }
@@ -982,14 +1003,15 @@ export async function runWorkerOnce(
         // is out rather than in between, so the wait is covered end to end and no
         // bubble outlives the answer.
         stopTyping = group ? () => {} : showTyping(db, message.from);
-        const response = await runAgent(db, search, address, message.body, message.messageId, {
-          inbound: {
-            provider: source,
-            replyTo: message.replyTo,
-            threadOriginator: message.threadOriginator,
-            ...(message.groupId ? { groupId: message.groupId, participants: message.participants } : {}),
-          },
-          ...(group ? { userMessageMetadata: group.metadata } : {}),
+        // A picture reaches the agent as a description, which is also what the
+        // archive keeps; the link rides along in the metadata.
+        const text = media.length
+          ? archivedInboundText(db, address, message.messageId) ?? withMediaLines(message.body, await describeMedia(media, dependencies.fetch))
+          : message.body ?? "";
+        const metadata = { ...group?.metadata, ...(media.length ? { mediaUrls: media } : {}) };
+        const response = await runAgent(db, search, address, text, message.messageId, {
+          inbound,
+          ...(Object.keys(metadata).length ? { userMessageMetadata: metadata } : {}),
           sendSms: send,
         });
         // An empty reply is a turn a tapback answered on its own; there is

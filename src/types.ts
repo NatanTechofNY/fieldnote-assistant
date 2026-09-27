@@ -19,7 +19,19 @@ export interface LifeArea {
   /** The owner's wording for each ask; null or absent uses the default. `{group}` stands for the group's name. */
   morning_checkin_prompt?: string | null;
   evening_checkin_prompt?: string | null;
+  /** How the assistant talks in this group chat, rewritten as the group gives it feedback. Group areas only. */
+  soul?: string | null;
+  /** What the group calls the assistant; it answers to this like its own name. */
+  assistant_nickname?: string | null;
+  /** `named_only` while the group has asked the assistant to stay out until someone names it. */
+  reply_mode?: ReplyMode;
 }
+
+export type ReplyMode = "normal" | "named_only";
+
+/** A memory the server hands the browser chat to carry on a turn. */
+export type MemoryFact = { title: string | null; content: string; tags: string[] };
+export type AgentTurnMemory = { soul: string | null; ownerFacts: MemoryFact[] };
 
 export interface Category {
   id: string;
@@ -228,6 +240,8 @@ export type TrustedContact = { phone: string; name: string };
 
 export interface IntegrationState {
   secretStorageReady: boolean;
+  /** How the assistant talks with the owner, on their line and in the browser. */
+  soul?: string | null;
   twilio: {
     configured: boolean;
     status: "disconnected" | "connected" | "error";

@@ -50,10 +50,14 @@ export const toolActivityMeta: Record<string, { active: string; done: string; so
   send_product_cards: { active: "Sending product cards", done: "Product cards sent", source: "Walgreens" },
   web_search: { active: "Searching the web", done: "Web results found", source: "Web" },
   read_web_page: { active: "Reading a web page", done: "Web page read", source: "Web" },
+  find_gif: { active: "Looking for a GIF", done: "GIFs found", source: "Web" },
+  send_image: { active: "Sending a picture", done: "Picture ready", source: "Messages" },
   // Both refuse on the web channel; a handler here means the refusal reaches
   // the agent as a tool result it can answer in words, rather than a stall.
   send_message: { active: "Sending a text", done: "Text sent", source: "Messages" },
   name_group_chat: { active: "Naming the group chat", done: "Group chat named", source: "SQLite" },
+  update_group_settings: { active: "Changing group settings", done: "Group settings changed", source: "SQLite" },
+  update_soul: { active: "Updating how I talk", done: "Soul updated", source: "SQLite" },
 };
 
 function toolResultDetail(output: unknown): string | null {

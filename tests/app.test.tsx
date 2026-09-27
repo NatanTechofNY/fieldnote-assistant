@@ -208,6 +208,10 @@ let digestBriefs: Array<Record<string, unknown> & { id: string }> = [];
  * uses a tool is scripted as two entries.
  */
 let agentStream: Array<Array<Record<string, unknown>>> = [];
+const soulSaves: Array<string | null> = [];
+let ownerSoul: string | null = null;
+/** What `/api/agent/context` answers: the owner's Soul and the facts for the draft. */
+let turnMemory: { soul: string | null; ownerFacts: Array<{ title: string | null; content: string; tags: string[] }> } = { soul: null, ownerFacts: [] };
 
 const streamChunks = (chunks: Array<Record<string, unknown>>) => new Response(new ReadableStream({
   start(controller) {
@@ -229,6 +233,9 @@ function resetAtlassianFixtures() {
     confluenceAvailable: false,
   };
   digestBriefs = [];
+  turnMemory = { soul: null, ownerFacts: [] };
+  ownerSoul = null;
+  soulSaves.length = 0;
 }
 
 vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -237,12 +244,18 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
   // A test that has not scripted a reply gets an empty stream, which closes
   // without leaving a message behind for the tests that count them.
   if (url.includes("/agent-studio/1/agents/")) return streamChunks(agentStream.shift() ?? []);
+  if (url.includes("/api/agent/context")) {
+    return new Response(JSON.stringify({ success: true, data: turnMemory }));
+  }
   if (url.includes("/api/agent/tools/set_todo_status")) {
     const { id, status } = JSON.parse(String(init?.body ?? "{}")) as { id: string; status: string };
     return new Response(JSON.stringify({
       success: true,
       data: todo({ id, title: "Review RFC for Alex", status }),
     }));
+  }
+  if (url.endsWith("/api/admin/memories/tag-preferences")) {
+    return new Response(JSON.stringify({ success: true, data: { applied: true, count: 2, memories: [] } }));
   }
   if (url.includes("/api/admin/algolia/neural-search")) {
     const { enabled } = JSON.parse(String(init?.body ?? "{}")) as { enabled: boolean };
@@ -678,10 +691,17 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     notificationSaves.push(body);
     return new Response(JSON.stringify({ success: true, data: { ...body, smsProvider: "twilio", optedOutAt: null } }));
   }
+  if (url.endsWith("/api/integrations/soul")) {
+    const { soul } = JSON.parse(String(init?.body ?? "{}")) as { soul: string | null };
+    soulSaves.push(soul);
+    ownerSoul = soul;
+    return new Response(JSON.stringify({ success: true, data: { soul } }));
+  }
   if (url.endsWith("/api/integrations")) return new Response(JSON.stringify({
     success: true,
     data: {
       secretStorageReady: true,
+      soul: ownerSoul,
       twilio: { configured: false, status: "disconnected" },
       sendblue: { configured: false, status: "disconnected" },
       granola: { configured: false, status: "disconnected" },
@@ -1110,11 +1130,45 @@ describe("attaching a record to the agent", () => {
     expect(attached[0]).toMatchObject({ type: "todo", id: "todo_1", status: "pending" });
     expect(attached[0].subtasks).toEqual([{ id: "todo_sub", title: "Write the outline", status: "done" }]);
 
+    // No Soul and no facts: nothing blank is sent in their place.
+    expect(context.soul).toBeUndefined();
+    expect(context.ownerFacts).toBeUndefined();
+
     // The message stayed the user's own sentence, and the chip went with it.
     expect(within(panel).getByText("the outline is done, follow it up with a rehearsal")).toBeInTheDocument();
     await waitFor(() => expect(
       within(panel).queryByRole("button", { name: /^Remove Prepare the DevCon demo/ }),
     ).toBeNull());
+  });
+
+  /** The browser turn carries the owner's Soul and the facts for what was typed, as a text turn does. */
+  it("carries the owner's Soul and relevant memories into a browser turn", async () => {
+    turnMemory = {
+      soul: "- Keep it short.",
+      ownerFacts: [{ title: "Food", content: "Allergic to shellfish", tags: ["preference"] }],
+    };
+    agentStream = [[
+      { type: "start", messageId: "asst_soul" },
+      { type: "text-start", id: "soul" },
+      { type: "text-delta", id: "soul", delta: "Skip the shrimp." },
+      { type: "text-end", id: "soul" },
+      { type: "finish" },
+    ]];
+    renderAt("/todos");
+    expect(await screen.findByText("The board.")).toBeInTheDocument();
+    await userEvent.keyboard("{Meta>}i{/Meta}");
+    await expectPanel(true);
+    const panel = agentPanel() as HTMLElement;
+    await waitFor(() => expect(requestedUrls.some(url => url.includes("/api/agent/context"))).toBe(true));
+    await userEvent.type(within(panel).getByPlaceholderText(/Ask about your work/), "what should I order?");
+    const before = requestedUrls.length;
+    await userEvent.click(within(panel).getByRole("button", { name: "Send message" }));
+    // Sending looks the message up at once, so the links in it are readable before the agent asks.
+    await waitFor(() => expect(requestedUrls.slice(before).some(url => url.includes("/api/agent/context"))).toBe(true));
+    expect(await within(panel).findByText("Skip the shrimp.")).toBeInTheDocument();
+    const context = lastTurnContext();
+    expect(context.soul).toBe("- Keep it short.");
+    expect(JSON.parse(context.ownerFacts)).toEqual(["Food: Allergic to shellfish"]);
   });
 
   /** A subtask is attachable in its own right, and says which task it belongs to. */
@@ -1455,7 +1509,9 @@ it("offers the origin the app is served from as the webhook URL", async () => {
   } finally {
     Object.defineProperty(window, "location", { configurable: true, value: original });
   }
-});
+  // Typing a whole URL key by key runs past the default 5s under CI coverage;
+  // cut off, the `finally` never ran and the next test saw this origin.
+}, 20_000);
 
 it("keeps the webhook field empty in development, where the origin is plain HTTP", async () => {
   window.localStorage.clear();
@@ -1536,6 +1592,55 @@ it("saves the owner's evening check-in time with the SMS schedule", async () => 
   await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
   await waitFor(() => expect(notificationSaves).toHaveLength(3));
   expect(notificationSaves[2].eveningCheckinPrompt).toBe("Ask me for a high and a low, then a mood 1–5.");
+});
+
+/** A group's voice: whether it waits to be named, what it is called there, and its Soul. */
+it("shapes a group's voice from the Group chats section", async () => {
+  window.localStorage.clear();
+  lifeAreaPatches.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Group chats"));
+
+  const named = await screen.findByLabelText("Answer only when named in Home");
+  expect(named).not.toBeChecked();
+  await userEvent.click(named);
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { reply_mode: "named_only" } }));
+
+  const nickname = screen.getByLabelText("Nickname in Home");
+  await userEvent.type(nickname, "Goop{Enter}");
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { assistant_nickname: "Goop" } }));
+
+  const soul = screen.getByLabelText("Soul for Home");
+  fireEvent.change(soul, { target: { value: "- One line.\n- No follow-up questions. " } });
+  await userEvent.click(within(soul.closest(".ask-editor") as HTMLElement).getByRole("button", { name: /Save Soul/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { soul: "- One line.\n- No follow-up questions." } }));
+  await userEvent.click(await within(soul.closest(".ask-editor") as HTMLElement).findByRole("button", { name: /Reset/ }));
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { soul: null } }));
+});
+
+/** The owner's own Soul sits in its own section, with the preference backfill beside it. */
+it("saves the owner's Soul and tags preference memories", async () => {
+  window.localStorage.clear();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  await userEvent.click(screen.getByText(/How the assistant talks with you/));
+  const soul = await screen.findByLabelText("Your Soul");
+  fireEvent.change(soul, { target: { value: "- Dry humour is fine." } });
+  await userEvent.click(within(soul.closest(".ask-editor") as HTMLElement).getByRole("button", { name: /Save Soul/ }));
+  await waitFor(() => expect(soulSaves).toEqual(["- Dry humour is fine."]));
+  await userEvent.click(screen.getByRole("button", { name: /Tag preference memories/ }));
+  expect(await screen.findByText("Tagged 2 memories as preferences")).toBeInTheDocument();
 });
 
 /**
@@ -2222,6 +2327,30 @@ it("ticks a subtask off from the board card it belongs to", async () => {
   // The summary folds a long list away without hiding that it is there.
   await userEvent.click(within(card).getByText("1/1 subtasks"));
   expect(within(card).queryByText("Write the outline")).not.toBeInTheDocument();
+});
+
+/** Repeating work comes round again, so it gets its own lane and folds away. */
+it("splits the board into one-off and recurring lanes", async () => {
+  const repeating = todos.find(item => item.id === "todo_open_parent")! as (typeof todos)[number] & { recurrence?: Todo["recurrence"] };
+  repeating.recurrence = { freq: "daily", interval: 1, weekdays: [], time: "09:00", lead_minutes: null };
+  try {
+    renderAt("/todos");
+    expect(await screen.findByText("The board.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Board" }));
+
+    const oneOff = await screen.findByRole("group", { name: "One-off" });
+    const recurring = screen.getByRole("group", { name: "Recurring" });
+    expect(within(recurring).getByText("Wrap the sprint")).toBeInTheDocument();
+    expect(within(oneOff).queryByText("Wrap the sprint")).not.toBeInTheDocument();
+    expect(within(oneOff).getByText("Prepare the DevCon demo")).toBeInTheDocument();
+
+    await userEvent.click(within(recurring).getByRole("button", { name: /Recurring/ }));
+    expect(within(recurring).queryByText("Wrap the sprint")).not.toBeInTheDocument();
+    expect(within(recurring).getByText("1")).toBeInTheDocument();
+  } finally {
+    repeating.recurrence = null;
+    localStorage.removeItem("todos:recurring-open");
+  }
 });
 
 /** A step someone has started does not look untouched: its box, a word, and the summary say so. */
