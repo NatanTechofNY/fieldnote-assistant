@@ -23,7 +23,14 @@ const MAX_ITEMS = 3;
 export const FOLLOW_UP_TIME = "10:00";
 export const FOLLOW_UP_UNTIL = "12:00";
 
-export type FollowUpItem = { id: string; title: string; due_at: string; dateOnly: boolean };
+export type FollowUpItem = {
+  id: string;
+  title: string;
+  due_at: string;
+  dateOnly: boolean;
+  /** Steps of this todo that were also due; the one question covers them, so they are marked with it. */
+  stepIds: string[];
+};
 
 /**
  * Open, one-off todos of the owner's whose time passed yesterday or so and
@@ -57,7 +64,10 @@ export function followUpCandidates(db: Db, timezone: string, at = new Date()): F
     .sort((a, b) => b.effective - a.effective);
   const ids = new Set(due.map(row => row.id));
   return due.filter(row => !row.parent_id || !ids.has(row.parent_id)).slice(0, MAX_ITEMS)
-    .map(({ id, title, due_at, dateOnly }) => ({ id, title, due_at, dateOnly }));
+    .map(({ id, title, due_at, dateOnly }) => ({
+      id, title, due_at, dateOnly,
+      stepIds: due.filter(step => step.parent_id === id).map(step => step.id),
+    }));
 }
 
 /** The instruction the follow-up text is written from. */
@@ -84,7 +94,9 @@ export function composeFollowUpTurn(items: FollowUpItem[], context: { date: stri
 export function markFollowedUp(db: Db, items: FollowUpItem[]): void {
   const stamp = now();
   const mark = db.prepare("UPDATE todos SET followed_up_at=? WHERE id=? AND user_id=?");
-  for (const item of items) mark.run(stamp, item.id, USER_ID);
+  for (const item of items) {
+    for (const todoId of [item.id, ...item.stepIds]) mark.run(stamp, todoId, USER_ID);
+  }
 }
 
 export function followUpsEnabled(db: Db): boolean {

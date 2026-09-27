@@ -9013,7 +9013,7 @@ describe("worker scheduling", () => {
   it("follows up once, the next morning, on what the owner said they would do and left open", async () => {
     const { db, api } = schedulingFixture();
     const laundry = (await api.post("/api/todos").send({ title: "Laundry", due_at: "2030-01-14T21:00:00.000Z" }).expect(201)).body.data;
-    await api.post("/api/todos").send({ title: "Fold laundry", parent_id: laundry.id, due_at: "2030-01-14T21:00:00.000Z" }).expect(201);
+    const fold = (await api.post("/api/todos").send({ title: "Fold laundry", parent_id: laundry.id, due_at: "2030-01-14T21:00:00.000Z" }).expect(201)).body.data;
     await api.post("/api/todos").send({ title: "Call the dentist", due_at: "2030-01-15T08:00:00.000Z" }).expect(201);
     // 01:00 UTC today, written with an offset: as text it would sort before the cutoff.
     await api.post("/api/todos").send({ title: "Water the plants", due_at: "2030-01-14T21:00:00-04:00" }).expect(201);
@@ -9058,6 +9058,8 @@ describe("worker scheduling", () => {
     restore = atUtcTime("11:15");
     try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
     assert.equal(sent.length, 1, "one follow-up a day, and each thing is asked about once");
+    assert.ok((db.prepare("SELECT followed_up_at FROM todos WHERE id=?").get(fold.id) as { followed_up_at: string | null }).followed_up_at,
+      "the step the parent's question covered is marked too, so it is not asked about alone tomorrow");
 
     // Moving a todo to a new time lets it be asked about again at that time.
     const followedUp = () => (db.prepare("SELECT followed_up_at FROM todos WHERE id=?").get(laundry.id) as { followed_up_at: string | null }).followed_up_at;
