@@ -725,8 +725,12 @@ function aimedAtAssistant(
 
 /** How long a held picture waits to be looked at; past this it belongs to an earlier conversation. */
 const HELD_PICTURE_WINDOW_MS = 60 * 60_000;
-/** The most held pictures one named turn looks at, newest first. */
-const HELD_PICTURE_LIMIT = 4;
+/**
+ * The most pictures one turn looks at, its own first and then held ones newest
+ * first. Each can take the vision call's full timeout, and every other thread
+ * waits behind the turn.
+ */
+const PICTURES_PER_TURN = 4;
 /** The runtime's mark on a message while its pictures are being looked at. */
 const VIEWING_MARK = PROGRESS_REACTIONS.view_image;
 
@@ -744,7 +748,8 @@ function mediaUrlList(value: unknown): string[] {
  * the assistant last spoke there and within the hour. They were filed
  * unviewed, and being named right after one is usually being asked about it.
  */
-function heldPictures(db: Db, threadId: string, inboundId: string): UnviewedPictures[] {
+function heldPictures(db: Db, threadId: string, inboundId: string, limit: number): UnviewedPictures[] {
+  if (limit <= 0) return [];
   const since = new Date(Date.now() - HELD_PICTURE_WINDOW_MS).toISOString();
   const lastSaid = (db.prepare(`
     SELECT max(created_at) at FROM channel_messages WHERE thread_id=? AND role='assistant' AND status<>'failed'
@@ -755,10 +760,10 @@ function heldPictures(db: Db, threadId: string, inboundId: string): UnviewedPict
       AND json_extract(metadata_json,'$.heldUntilNamed')=1
       AND instr(content,?)>0 AND created_at>?
     ORDER BY created_at DESC,rowid DESC LIMIT ?
-  `).all(threadId, inboundId, PICTURE_PENDING, lastSaid && lastSaid > since ? lastSaid : since, HELD_PICTURE_LIMIT) as Array<{
+  `).all(threadId, inboundId, PICTURE_PENDING, lastSaid && lastSaid > since ? lastSaid : since, limit) as Array<{
     id: string; content: string; urls: unknown;
   }>;
-  let budget = HELD_PICTURE_LIMIT;
+  let budget = limit;
   return rows.flatMap(row => {
     const urls = mediaUrlList(row.urls).slice(0, Math.min(pendingPictureCount(row.content), budget));
     budget -= urls.length;
@@ -784,10 +789,9 @@ async function viewUnviewedPictures(
   fetcher: typeof fetch | undefined,
   showMark: (() => Promise<void>) | undefined,
 ): Promise<{ body: string; describedEarlier: boolean }> {
-  const own = pendingPictureCount(inbound.body)
-    ? [{ id: inbound.id, content: inbound.body, urls: mediaUrlList(inbound.mediaUrls).slice(0, pendingPictureCount(inbound.body)) }]
-    : [];
-  const pending = [...own, ...(group ? heldPictures(db, threadId, inbound.id) : [])].filter(picture => picture.urls.length);
+  const ownUrls = mediaUrlList(inbound.mediaUrls).slice(0, Math.min(pendingPictureCount(inbound.body), PICTURES_PER_TURN));
+  const own = ownUrls.length ? [{ id: inbound.id, content: inbound.body, urls: ownUrls }] : [];
+  const pending = [...own, ...(group ? heldPictures(db, threadId, inbound.id, PICTURES_PER_TURN - ownUrls.length) : [])];
   if (!pending.length) return { body: inbound.body, describedEarlier: false };
   let describedEarlier = false;
   const looking = imageInputMode() === "describe";
@@ -798,8 +802,10 @@ async function viewUnviewedPictures(
     const lines = await describeMedia(picture.urls, fetcher);
     seen.push(...lines);
     const content = fillPendingPictures(picture.content, lines);
-    db.prepare("UPDATE channel_messages SET content=?,updated_at=? WHERE id=?").run(content, now(), picture.id);
-    queueIndexJob(db, "channel_message", picture.id);
+    db.transaction(() => {
+      db.prepare("UPDATE channel_messages SET content=?,updated_at=? WHERE id=?").run(content, now(), picture.id);
+      queueIndexJob(db, "channel_message", picture.id);
+    })();
     if (picture.id === inbound.id) body = content;
     else if (hasImageDescription(content)) describedEarlier = true;
   }
