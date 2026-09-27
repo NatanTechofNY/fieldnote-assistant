@@ -209,6 +209,7 @@ let digestBriefs: Array<Record<string, unknown> & { id: string }> = [];
  */
 let agentStream: Array<Array<Record<string, unknown>>> = [];
 const soulSaves: Array<string | null> = [];
+const groupProfileSaves: Array<{ id: string; profile: string | null }> = [];
 let ownerSoul: string | null = null;
 /** What `/api/agent/context` answers: the owner's Soul and the facts for the draft. */
 let turnMemory: { soul: string | null; ownerFacts: Array<{ title: string | null; content: string; tags: string[] }> } = { soul: null, ownerFacts: [] };
@@ -276,6 +277,15 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     askDrafts.push(body);
     return new Response(JSON.stringify({ success: true, data: { ask: `Drafted for: ${body.brief}` } }));
+  }
+  if (/\/api\/life-areas\/[^/]+\/profile/.test(url)) {
+    const id = url.split("/life-areas/")[1].split("/")[0];
+    const profile = url.endsWith("/refresh")
+      ? "People: rewritten."
+      : (JSON.parse(String(init?.body ?? "{}")) as { profile: string | null }).profile;
+    groupProfileSaves.push({ id, profile });
+    servedLifeAreas = servedLifeAreas.map(item => item.id === id ? { ...item, profile } : item);
+    return new Response(JSON.stringify({ success: true, data: { profile, updatedAt: profile ? new Date().toISOString() : null } }));
   }
   if (url.includes("/api/life-areas")) {
     if (init?.method === "PATCH") {
@@ -1509,9 +1519,7 @@ it("offers the origin the app is served from as the webhook URL", async () => {
   } finally {
     Object.defineProperty(window, "location", { configurable: true, value: original });
   }
-  // Typing a whole URL key by key runs past the default 5s under CI coverage;
-  // cut off, the `finally` never ran and the next test saw this origin.
-}, 20_000);
+});
 
 it("keeps the webhook field empty in development, where the origin is plain HTTP", async () => {
   window.localStorage.clear();
@@ -1622,6 +1630,18 @@ it("shapes a group's voice from the Group chats section", async () => {
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { soul: "- One line.\n- No follow-up questions." } }));
   await userEvent.click(await within(soul.closest(".ask-editor") as HTMLElement).findByRole("button", { name: /Reset/ }));
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { soul: null } }));
+
+  // The group's profile sits beside its Soul: edited by hand, or rewritten from its memories.
+  groupProfileSaves.length = 0;
+  const profile = screen.getByLabelText("Profile for Home");
+  const editor = profile.closest(".ask-editor") as HTMLElement;
+  fireEvent.change(profile, { target: { value: "People: Sam — the owner's sister." } });
+  expect(within(editor).getByRole("button", { name: /Rewrite now/ })).toBeDisabled();
+  await userEvent.click(within(editor).getByRole("button", { name: /Save profile/ }));
+  await waitFor(() => expect(groupProfileSaves).toEqual([{ id: "area_group", profile: "People: Sam — the owner's sister." }]));
+  await waitFor(() => expect(within(editor).getByRole("button", { name: /Rewrite now/ })).toBeEnabled());
+  await userEvent.click(within(editor).getByRole("button", { name: /Rewrite now/ }));
+  await waitFor(() => expect(groupProfileSaves.at(-1)).toEqual({ id: "area_group", profile: "People: rewritten." }));
 });
 
 /** The owner's own Soul sits in its own section, with the preference backfill beside it. */

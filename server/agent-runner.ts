@@ -8,7 +8,7 @@ import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import { hasImageDescription } from "./image-input.ts";
 import { relevantFacts } from "./memory-context.ts";
-import { ownerProfile } from "./profile.ts";
+import { servableGroupProfile, servableOwnerProfile } from "./profile.ts";
 import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
 import { executeAgentTool, ownRecordsOnly, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
@@ -1045,11 +1045,15 @@ export async function runChannelAgent(
   // in a group, the owner's everywhere else. App-composed turns carry the voice
   // but not the facts; their instruction already says what to draw on.
   const voice = group ? groupVoice(db, group.area.id) : undefined;
-  const soul = voice ? voice.soul : ownerSoul(db);
   // Who the owner is travels with their own turns only; a group never reads it,
-  // nor does drafting wording that a group's check-in will be written from.
-  const draftingForGroup = options.userMessageMetadata?.kind === "checkin_ask_draft";
-  const profile = voice || draftingForGroup ? null : ownerProfile(db).profile;
+  // nor does anything written for a group: its check-in wording or its profile.
+  const kind = options.userMessageMetadata?.kind;
+  const writingForGroup = kind === "checkin_ask_draft" || kind === "group_profile_refresh";
+  const soul = voice ? voice.soul : kind === "group_profile_refresh" ? null : ownerSoul(db);
+  // A profile written from a fact that has since gone or changed may say what
+  // is no longer true, so it is held back until the rewrite catches up.
+  const profile = voice || writingForGroup ? null : servableOwnerProfile(db);
+  const roomProfile = group ? servableGroupProfile(db, group.area.id) : null;
   const facts = options.internal ? [] : await relevantFacts(db, search, group ? { areaId: group.area.id } : { own: true }, body);
   /*
    * The turn context belongs on the message being answered. That is usually
@@ -1083,6 +1087,7 @@ export async function runChannelAgent(
         : {}),
       ...(soul ? { soul } : {}),
       ...(profile ? { profile } : {}),
+      ...(roomProfile ? { groupProfile: roomProfile } : {}),
       ...(facts.length ? { [group ? "groupFacts" : "ownerFacts"]: facts } : {}),
       ...(voice ? {
         replyMode: voice.replyMode,
@@ -1192,9 +1197,25 @@ export async function runChannelAgent(
     return undefined;
   };
 
+  /*
+   * A group's profile is written on a scratch thread with no scope of its own,
+   * so its hosted search is fenced to that group the way a group turn's is.
+   * The chat is read from the area's own row, not taken from the caller, and
+   * without one the turn does not run: an unfenced search would reach the
+   * owner's records and every other group's.
+   */
+  let writingGroupProfile: GroupScope | undefined;
+  if (kind === "group_profile_refresh") {
+    const areaId = typeof options.userMessageMetadata?.lifeAreaId === "string" ? options.userMessageMetadata.lifeAreaId : "";
+    const area = db.prepare("SELECT thread_id FROM life_areas WHERE id=? AND user_id=? AND thread_id IS NOT NULL")
+      .get(areaId, USER_ID) as { thread_id: string } | undefined;
+    if (!options.internal || !area) throw new Error("A group's profile can only be written for a group chat's own area");
+    writingGroupProfile = { lifeAreaId: areaId, threadId: area.thread_id };
+  }
   const searchParameters = context.scope
     ? groupSearchParameters(context.scope)
-    : ownRecordsOnly(context) ? ownSearchParameters(db) : undefined;
+    : writingGroupProfile ? groupSearchParameters(writingGroupProfile)
+      : ownRecordsOnly(context) ? ownSearchParameters(db) : undefined;
   // A retry that already shows a mark keeps it; the working mark never
   // replaces a more specific one.
   if (group && !options.internal && !markShown && markHandle

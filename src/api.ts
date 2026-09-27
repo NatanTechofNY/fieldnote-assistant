@@ -94,6 +94,10 @@ export const api = {
     soul?: string | null; assistant_nickname?: string | null; reply_mode?: ReplyMode;
   }) =>
     request<LifeArea>(`/life-areas/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
+  updateGroupProfile: (id: string, profile: string | null) =>
+    request<OwnerProfile>(`/life-areas/${id}/profile`, { method: "PUT", body: JSON.stringify({ profile }) }),
+  refreshGroupProfile: (id: string) =>
+    request<OwnerProfile>(`/life-areas/${id}/profile/refresh`, { method: "POST" }, TOOL_TIMEOUT_MS * 3),
   deleteLifeArea: (id: string) =>
     request<{ id: string }>(`/life-areas/${id}`, { method: "DELETE" }),
   /** The agent drafts a check-in's ask from what the owner says it should be like; nothing is saved. */

@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS life_areas (
   soul TEXT,
   assistant_nickname TEXT,
   reply_mode TEXT NOT NULL DEFAULT 'normal' CHECK(reply_mode IN ('normal','named_only')),
+  profile TEXT,
+  profile_updated_at TEXT,
+  profile_source TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, slug)
@@ -908,6 +911,11 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
     WHEN NEW.due_at IS NOT OLD.due_at AND NEW.followed_up_at IS NOT NULL
     BEGIN UPDATE todos SET followed_up_at=NULL WHERE id=NEW.id; END
   `);
+  // A group chat's own profile, the same shape as the owner's, on its area.
+  const profileAreaColumns = columns(db, "life_areas");
+  if (!profileAreaColumns.has("profile")) db.exec("ALTER TABLE life_areas ADD COLUMN profile TEXT");
+  if (!profileAreaColumns.has("profile_updated_at")) db.exec("ALTER TABLE life_areas ADD COLUMN profile_updated_at TEXT");
+  if (!profileAreaColumns.has("profile_source")) db.exec("ALTER TABLE life_areas ADD COLUMN profile_source TEXT");
   // The fact set the profile was last written from, so a delete or a move is noticed too.
   if (!columns(db, "notification_preferences").has("life_profile_source")) {
     db.exec("ALTER TABLE notification_preferences ADD COLUMN life_profile_source TEXT");

@@ -347,6 +347,7 @@ const SPEAKER_SCAN_LIMIT = 5000;
 
 const NO_TOOL_APP_TURNS = new Set([
   "group_morning", "group_evening", "evening_checkin", "checkin_ask_draft", "assistant_say", "follow_up", "profile_refresh",
+  "group_profile_refresh",
 ]);
 
 /**

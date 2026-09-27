@@ -25,6 +25,9 @@ export interface LifeArea {
   assistant_nickname?: string | null;
   /** `named_only` while the group has asked the assistant to stay out until someone names it. */
   reply_mode?: ReplyMode;
+  /** What the assistant knows about the people in this group chat, rewritten overnight from its facts. */
+  profile?: string | null;
+  profile_updated_at?: string | null;
 }
 
 export type ReplyMode = "normal" | "named_only";
