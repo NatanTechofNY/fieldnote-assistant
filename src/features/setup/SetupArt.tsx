@@ -126,8 +126,8 @@ export function LoopMark({ name }: { name: "plan" | "memory" | "thread" | "windo
   </svg>;
 }
 
-/** One drawn mark per connection, so the doors are not four library glyphs. */
-export function DoorMark({ name }: { name: "sms" | "imessage" | "notes" | "board" }) {
+/** One drawn mark per connection, so the doors are not library glyphs. */
+export function DoorMark({ name }: { name: "sms" | "imessage" | "group" | "notes" | "board" | "web" }) {
   if (name === "sms") return <svg viewBox="0 0 20 20" className="setup-mark" aria-hidden="true">
     <circle cx="10" cy="14.5" r="1.6" className="setup-mark-fill"/>
     <path d="M6.5 11.5a5 5 0 017 0"/><path d="M3.5 8a9.5 9.5 0 0113 0"/>
@@ -139,8 +139,17 @@ export function DoorMark({ name }: { name: "sms" | "imessage" | "notes" | "board
     <circle cx="10" cy="9.1" r=".9" className="setup-mark-fill"/>
     <circle cx="13.1" cy="9.1" r=".9" className="setup-mark-fill"/>
   </svg>;
+  // Three people, the one in front a little larger.
+  if (name === "group") return <svg viewBox="0 0 20 20" className="setup-mark" aria-hidden="true">
+    <circle cx="10" cy="7" r="2.6"/><circle cx="4.5" cy="8.5" r="1.9"/><circle cx="15.5" cy="8.5" r="1.9"/>
+    <path d="M5.5 16.5a4.5 4.5 0 019 0"/><path d="M1.5 15.5a3 3 0 014.6-2.5M18.5 15.5a3 3 0 00-4.6-2.5"/>
+  </svg>;
   if (name === "notes") return <svg viewBox="0 0 20 20" className="setup-mark" aria-hidden="true">
     <path d="M4 2.5h8l4 4v11H4z"/><path d="M12 2.5v4h4"/><path d="M7 11h6M7 14h4"/>
+  </svg>;
+  if (name === "web") return <svg viewBox="0 0 20 20" className="setup-mark" aria-hidden="true">
+    <circle cx="10" cy="10" r="7.5"/><path d="M2.5 10h15"/>
+    <path d="M10 2.5c2.1 2.1 3.2 4.6 3.2 7.5s-1.1 5.4-3.2 7.5c-2.1-2.1-3.2-4.6-3.2-7.5s1.1-5.4 3.2-7.5z"/>
   </svg>;
   return <svg viewBox="0 0 20 20" className="setup-mark" aria-hidden="true">
     <path d="M2.5 3.5h5v9h-5zM12.5 3.5h5v13h-5"/><path d="M2.5 7h5M12.5 7h5M12.5 12.5h5"/>
