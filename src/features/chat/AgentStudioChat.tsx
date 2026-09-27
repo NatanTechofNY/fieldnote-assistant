@@ -7,7 +7,7 @@ import { BellRing, Bot, Brain, Clock3, ListTodo, MessagesSquare, Search, Sparkle
 import { liteClient as createSearchClient } from "algoliasearch/lite";
 import { api } from "../../api";
 import type {
-  MemoryKind, Todo, TodoStatus,
+  AgentTurnMemory, MemoryKind, Todo, TodoStatus,
 } from "../../types";
 import { moodEmoji } from "../../lib/mood";
 import { createToolActivityLayout, toolActivityMeta } from "./tool-activity";
@@ -17,6 +17,7 @@ import { statusMeta } from "../../lib/todo-meta";
 import { invalidateTaxonomy } from "../../lib/invalidate";
 import { useAgentPanel } from "../../lib/agent-panel";
 import { serializeAttachments } from "../../lib/agent-attachments";
+import { serializeTurnMemory } from "../../lib/turn-memory";
 import { AgentExpandButton } from "./AgentExpandButton";
 import { AttachmentChips } from "./AttachmentChips";
 
@@ -242,6 +243,37 @@ export function AgentStudioChat() {
     attachmentsRef.current = attachments;
     clearAttachmentsRef.current = clearAttachments;
   }, [attachments, clearAttachments]);
+  /*
+   * The owner's Soul and the memories that bear on what is being typed, as a
+   * text turn carries them. The widget reads the turn context synchronously
+   * at send time, so it is fetched ahead: once on mount, then again as the
+   * draft settles, and the latest answer is what goes out.
+   */
+  const panelRef = useRef<HTMLDivElement>(null);
+  const turnMemoryRef = useRef<AgentTurnMemory>({ soul: null, ownerFacts: [] });
+  useEffect(() => {
+    let latest = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = (text: string) => {
+      const call = ++latest;
+      api.agentContext(text)
+        .then(memory => { if (call === latest) turnMemoryRef.current = memory; })
+        .catch(() => undefined);
+    };
+    refresh("");
+    const root = panelRef.current;
+    const onInput = (event: Event) => {
+      if (!(event.target instanceof HTMLTextAreaElement)) return;
+      const text = event.target.value;
+      clearTimeout(timer);
+      timer = setTimeout(() => refresh(text), 350);
+    };
+    root?.addEventListener("input", onInput);
+    return () => {
+      clearTimeout(timer);
+      root?.removeEventListener("input", onInput);
+    };
+  }, []);
   // The server executor owns validation, delete confirmation, and clear_fields
   // patching, so there is nothing tool-specific to do here.
   const callTool = useCallback(async (name: string, call: ToolCall) => {
@@ -280,6 +312,7 @@ export function AgentStudioChat() {
       localUserId: "devcon-demo",
       timezone: timezoneRef.current,
       currentDateTime: new Date().toISOString(),
+      ...serializeTurnMemory(turnMemoryRef.current),
       ...serializeAttachments(attached),
     };
   }, []);
@@ -300,6 +333,7 @@ export function AgentStudioChat() {
   // A closed panel is still mounted to keep the conversation, so it has to be
   // taken out of the accessibility tree and out of the tab order.
   return <div
+    ref={panelRef}
     className="agent-studio-panel"
     data-open={isOpen}
     data-expanded={isExpanded}

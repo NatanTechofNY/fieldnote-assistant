@@ -1,5 +1,5 @@
 import type {
-  Category, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource,
+  AgentTurnMemory, Category, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
   ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoStatus,
   UniversalSearchResult,
@@ -91,6 +91,7 @@ export const api = {
     name?: string; color?: string;
     morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean;
     morning_checkin_prompt?: string | null; evening_checkin_prompt?: string | null;
+    soul?: string | null; assistant_nickname?: string | null; reply_mode?: ReplyMode;
   }) =>
     request<LifeArea>(`/life-areas/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteLifeArea: (id: string) =>
@@ -239,6 +240,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(input),
     }),
+  updateSoul: (soul: string | null) =>
+    request<{ soul: string | null }>("/integrations/soul", { method: "PUT", body: JSON.stringify({ soul }) }),
+  /* The owner's Soul and the memories that bear on a draft, for the browser chat's turn context. */
+  agentContext: (text: string) =>
+    request<AgentTurnMemory>("/agent/context", { method: "POST", body: JSON.stringify({ text }) }, TOOL_TIMEOUT_MS),
   updateNotifications: (input: Omit<IntegrationState["notifications"], "optedOutAt" | "smsProvider">) =>
     request<IntegrationState["notifications"]>("/integrations/notifications", {
       method: "PUT",

@@ -29,6 +29,7 @@ import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } fr
 import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
 import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } from "../server/group-thread.ts";
 import { describeMedia, mediaUrlsOf, withMediaLines } from "../server/image-input.ts";
+import { relevantFacts } from "../server/memory-context.ts";
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
@@ -6510,6 +6511,53 @@ describe("Sendblue provider", () => {
   });
 
   /*
+   * Every turn carries the voice and the facts for where it is: the group's in
+   * a group, the owner's on their own line, and never one where the other is.
+   */
+  it("carries the Soul and the memories that bear on the message, scoped to the conversation", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_facts',?,'sms',?,'alg_cnv_facts',?,?)
+    `).run(USER_ID, address, stamp, stamp);
+    const area = ensureGroupLifeArea(db, "thread_facts", "Home");
+    db.prepare("UPDATE life_areas SET soul='- One line.',assistant_nickname='Goop',reply_mode='normal' WHERE id=?").run(area.id);
+    db.prepare("UPDATE notification_preferences SET soul='- Dry humour.' WHERE user_id=?").run(USER_ID);
+    const memory = db.prepare(`
+      INSERT INTO memories(id,user_id,title,content,kind,life_area_id,tags_json,created_at,updated_at)
+      VALUES(?,?,?,?,'fact',?,?,?,?)
+    `);
+    memory.run("mem_group_pizza", USER_ID, "Halo and pizza", "Halo hates pineapple on pizza", area.id, "[]", stamp, stamp);
+    memory.run("mem_group_pref", USER_ID, "Sarah", "Sarah prefers mornings", area.id, '["preference"]', stamp, stamp);
+    memory.run("mem_owner_pizza", USER_ID, "Owner pizza", "The owner loves pizza from Joe's", null, "[]", stamp, stamp);
+    memory.run("mem_owner_pref", USER_ID, "Short replies", "Keep replies short", null, '["preference"]', stamp, stamp);
+
+    const contexts: Array<Record<string, unknown>> = [];
+    const capture: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ metadata?: { turnContext?: Record<string, unknown> } }> };
+      contexts.push(body.messages.findLast(message => message.metadata?.turnContext)?.metadata?.turnContext ?? {});
+      return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "ok" }] }), { status: 200 });
+    };
+    await runSmsAgent(db, fakeSearch(db), address, "pizza tonight?", "SB_pizza", groupTurnOptions(capture));
+    const inGroup = contexts[0] as { soul?: string; groupFacts?: Array<{ content: string }>; ownerFacts?: unknown; assistantNickname?: string; replyMode?: string };
+    assert.equal(inGroup.soul, "- One line.");
+    assert.equal(inGroup.assistantNickname, "Goop");
+    assert.equal(inGroup.replyMode, "normal");
+    assert.deepEqual(inGroup.groupFacts?.map(fact => fact.content), ["Halo hates pineapple on pizza", "Sarah prefers mornings"]);
+    assert.equal(inGroup.ownerFacts, undefined, "the owner's records never reach a group");
+
+    await runSmsAgent(db, fakeSearch(db), RECIPIENT, "pizza tonight?", "SB_pizza_own", { fetcher: capture, inbound: { provider: "sendblue" } });
+    const own = contexts[1] as { soul?: string; ownerFacts?: Array<{ content: string }>; groupFacts?: unknown };
+    assert.equal(own.soul, "- Dry humour.");
+    assert.deepEqual(own.ownerFacts?.map(fact => fact.content), ["The owner loves pizza from Joe's", "Keep replies short"]);
+    assert.equal(own.groupFacts, undefined);
+  });
+
+  /*
    * Agent Studio takes only text on a user message, so a picture reaches the
    * agent as a description. A picture sent with no words is still a message.
    */
@@ -10003,6 +10051,12 @@ describe("authentication", () => {
     assert.equal(login.headers.location, "/", "an off-site next is discarded");
   });
 
+  it("keeps the browser's memory context behind the sign-in", async () => {
+    const { api } = authFixture();
+    await api.post("/api/agent/context").send({ text: "what do I like?" }).expect(401);
+    await api.post("/api/agent/context").auth("admin", PASSWORD).send({ text: "what do I like?" }).expect(200);
+  });
+
   it("still accepts Basic Auth for scripts and integrations", async () => {
     const { api } = authFixture();
     await api.get("/api/todos").auth("admin", PASSWORD).expect(200);
@@ -10056,6 +10110,39 @@ describe("the Soul and group settings", () => {
     await api.patch(`/api/life-areas/${work.id}`).send({ soul: "- nope" }).expect(400);
     const edited = db.prepare("SELECT soul,reply_mode,assistant_nickname FROM life_areas WHERE id=?").get(area.id);
     assert.deepEqual({ ...edited as object }, { soul: null, reply_mode: "named_only", assistant_nickname: "Goop" });
+  });
+
+  it("hands the browser the owner's Soul and facts, and never waits long on the search", async () => {
+    const { db, api } = fixture();
+    const { area } = groupContext(db);
+    const stamp = new Date().toISOString();
+    const memory = db.prepare(`
+      INSERT INTO memories(id,user_id,title,content,kind,life_area_id,tags_json,created_at,updated_at)
+      VALUES(?,?,?,?,'fact',?,?,?,?)
+    `);
+    memory.run("mem_b_group", USER_ID, "Group sushi", "Everyone in the group loves sushi", area.id, '["preference"]', stamp, stamp);
+    memory.run("mem_b_owner", USER_ID, "Sushi", "The owner is allergic to shellfish", null, '["preference"]', stamp, stamp);
+    memory.run("mem_b_untagged", USER_ID, "Tea", "The owner likes green tea", null, "[]", stamp, stamp);
+    db.prepare("UPDATE notification_preferences SET soul='- No emojis.' WHERE user_id=?").run(USER_ID);
+
+    const context = (await api.post("/api/agent/context").send({ text: "sushi" }).expect(200)).body.data;
+    assert.equal(context.soul, "- No emojis.");
+    assert.deepEqual(context.ownerFacts.map((fact: { content: string }) => fact.content), ["The owner is allergic to shellfish"],
+      "a group's preference is not the owner's");
+
+    // A search that hangs is abandoned; the preferences still come.
+    const started = Date.now();
+    const facts = await relevantFacts(db, { searchMemories: () => new Promise(() => {}) }, { own: true }, "green tea");
+    assert.ok(Date.now() - started < 2500);
+    assert.deepEqual(facts.map(fact => fact.content), ["The owner is allergic to shellfish"]);
+
+    // The backfill lists preference-shaped facts, then tags them for every turn.
+    const dry = (await api.post("/api/admin/memories/tag-preferences").send({}).expect(200)).body.data;
+    assert.deepEqual(dry.memories.map((row: { id: string }) => row.id), ["mem_b_untagged"]);
+    assert.equal(JSON.parse((db.prepare("SELECT tags_json FROM memories WHERE id='mem_b_untagged'").get() as { tags_json: string }).tags_json).length, 0);
+    await api.post("/api/admin/memories/tag-preferences").send({ apply: true }).expect(200);
+    assert.deepEqual(JSON.parse((db.prepare("SELECT tags_json FROM memories WHERE id='mem_b_untagged'").get() as { tags_json: string }).tags_json), ["preference"]);
+    assert.equal((db.prepare("SELECT count(*) count FROM index_jobs WHERE entity_id='mem_b_untagged'").get() as { count: number }).count > 0, true);
   });
 
   it("lets anyone in a group switch to answering only when named, and back", async () => {

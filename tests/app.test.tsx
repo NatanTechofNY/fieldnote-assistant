@@ -208,6 +208,8 @@ let digestBriefs: Array<Record<string, unknown> & { id: string }> = [];
  * uses a tool is scripted as two entries.
  */
 let agentStream: Array<Array<Record<string, unknown>>> = [];
+/** What `/api/agent/context` answers: the owner's Soul and the facts for the draft. */
+let turnMemory: { soul: string | null; ownerFacts: Array<{ title: string | null; content: string; tags: string[] }> } = { soul: null, ownerFacts: [] };
 
 const streamChunks = (chunks: Array<Record<string, unknown>>) => new Response(new ReadableStream({
   start(controller) {
@@ -229,6 +231,7 @@ function resetAtlassianFixtures() {
     confluenceAvailable: false,
   };
   digestBriefs = [];
+  turnMemory = { soul: null, ownerFacts: [] };
 }
 
 vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -237,6 +240,9 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
   // A test that has not scripted a reply gets an empty stream, which closes
   // without leaving a message behind for the tests that count them.
   if (url.includes("/agent-studio/1/agents/")) return streamChunks(agentStream.shift() ?? []);
+  if (url.includes("/api/agent/context")) {
+    return new Response(JSON.stringify({ success: true, data: turnMemory }));
+  }
   if (url.includes("/api/agent/tools/set_todo_status")) {
     const { id, status } = JSON.parse(String(init?.body ?? "{}")) as { id: string; status: string };
     return new Response(JSON.stringify({
@@ -1110,11 +1116,44 @@ describe("attaching a record to the agent", () => {
     expect(attached[0]).toMatchObject({ type: "todo", id: "todo_1", status: "pending" });
     expect(attached[0].subtasks).toEqual([{ id: "todo_sub", title: "Write the outline", status: "done" }]);
 
+    // No Soul and no facts: nothing blank is sent in their place.
+    expect(context.soul).toBeUndefined();
+    expect(context.ownerFacts).toBeUndefined();
+
     // The message stayed the user's own sentence, and the chip went with it.
     expect(within(panel).getByText("the outline is done, follow it up with a rehearsal")).toBeInTheDocument();
     await waitFor(() => expect(
       within(panel).queryByRole("button", { name: /^Remove Prepare the DevCon demo/ }),
     ).toBeNull());
+  });
+
+  /** The browser turn carries the owner's Soul and the facts for what was typed, as a text turn does. */
+  it("carries the owner's Soul and relevant memories into a browser turn", async () => {
+    turnMemory = {
+      soul: "- Keep it short.",
+      ownerFacts: [{ title: "Food", content: "Allergic to shellfish", tags: ["preference"] }],
+    };
+    agentStream = [[
+      { type: "start", messageId: "asst_soul" },
+      { type: "text-start", id: "soul" },
+      { type: "text-delta", id: "soul", delta: "Skip the shrimp." },
+      { type: "text-end", id: "soul" },
+      { type: "finish" },
+    ]];
+    renderAt("/todos");
+    expect(await screen.findByText("The board.")).toBeInTheDocument();
+    await userEvent.keyboard("{Meta>}i{/Meta}");
+    await expectPanel(true);
+    const panel = agentPanel() as HTMLElement;
+    const before = requestedUrls.length;
+    await userEvent.type(within(panel).getByPlaceholderText(/Ask about your work/), "what should I order?");
+    // The settled draft is looked up again, so the facts match what was typed.
+    await waitFor(() => expect(requestedUrls.slice(before).some(url => url.includes("/api/agent/context"))).toBe(true));
+    await userEvent.click(within(panel).getByRole("button", { name: "Send message" }));
+    expect(await within(panel).findByText("Skip the shrimp.")).toBeInTheDocument();
+    const context = lastTurnContext();
+    expect(context.soul).toBe("- Keep it short.");
+    expect(JSON.parse(context.ownerFacts)).toEqual(["Food: Allergic to shellfish"]);
   });
 
   /** A subtask is attachable in its own right, and says which task it belongs to. */
@@ -2226,7 +2265,7 @@ it("ticks a subtask off from the board card it belongs to", async () => {
 
 /** Repeating work comes round again, so it gets its own lane and folds away. */
 it("splits the board into one-off and recurring lanes", async () => {
-  const repeating = todos.find(item => item.id === "todo_open_parent")!;
+  const repeating = todos.find(item => item.id === "todo_open_parent")! as (typeof todos)[number] & { recurrence?: Todo["recurrence"] };
   repeating.recurrence = { freq: "daily", interval: 1, weekdays: [], time: "09:00", lead_minutes: null };
   try {
     renderAt("/todos");

@@ -6,7 +6,8 @@ import { getNotificationPreferences, type SmsProvider } from "./integrations.ts"
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
-import { groupVoiceForThread } from "./soul.ts";
+import { relevantFacts } from "./memory-context.ts";
+import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
 import { executeAgentTool, ownRecordsOnly, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
 import type { Db } from "./types.ts";
@@ -48,7 +49,8 @@ function newConversationId(): string {
   return `alg_cnv_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
-type SearchWriter = Pick<AlgoliaSync, "flushSoon">;
+/** The memory search is optional: a test double without it falls back to a lexical scan. */
+type SearchWriter = Pick<AlgoliaSync, "flushSoon"> & Partial<Pick<AlgoliaSync, "searchMemories">>;
 type AgentPart = {
   type?: string;
   text?: string;
@@ -1006,6 +1008,12 @@ export async function runChannelAgent(
   search.flushSoon();
   const messages = threadHistory(db, thread.id);
   const preferences = getNotificationPreferences(db);
+  // How to talk here, and what is known about the people here: the group's own
+  // in a group, the owner's everywhere else. App-composed turns carry the voice
+  // but not the facts; their instruction already says what to draw on.
+  const voice = group ? groupVoice(db, group.area.id) : undefined;
+  const soul = voice ? voice.soul : ownerSoul(db);
+  const facts = options.internal ? [] : await relevantFacts(db, search, group ? { areaId: group.area.id } : { own: true }, body);
   /*
    * The turn context belongs on the message being answered. That is usually
    * the last one in the window, but a retry that was overtaken is answering an
@@ -1036,6 +1044,12 @@ export async function runChannelAgent(
       ...(options.internal && typeof options.userMessageMetadata?.kind === "string"
         ? { appTurn: options.userMessageMetadata.kind }
         : {}),
+      ...(soul ? { soul } : {}),
+      ...(facts.length ? { [group ? "groupFacts" : "ownerFacts"]: facts } : {}),
+      ...(voice ? {
+        replyMode: voice.replyMode,
+        ...(voice.assistantNickname ? { assistantNickname: voice.assistantNickname } : {}),
+      } : {}),
       ...(options.inbound?.groupId && group
         ? {
           groupId: options.inbound.groupId,

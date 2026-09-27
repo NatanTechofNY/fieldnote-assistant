@@ -2,6 +2,7 @@ import { z } from "zod";
 import { resetDatabase, seedDatabase } from "../db.ts";
 import { success } from "../http.ts";
 import { saveSearchPreferences } from "../integrations.ts";
+import { tagPreferences } from "../memory-context.ts";
 import type { RouteContext } from "./context.ts";
 
 export function registerAdminRoutes({ app, db, search, agentStudio }: RouteContext): void {
@@ -17,6 +18,14 @@ export function registerAdminRoutes({ app, db, search, agentStudio }: RouteConte
     return success(res, { reset: true });
   });
   app.post("/api/admin/reindex", async (_req, res) => success(res, await search.reindex()));
+  // Tags facts that read like preferences, so every turn carries them. A dry
+  // run lists them; `apply: true` writes the tag and queues each for reindex.
+  app.post("/api/admin/memories/tag-preferences", (req, res) => {
+    const { apply } = z.object({ apply: z.boolean().default(false) }).strict().parse(req.body ?? {});
+    const tagged = tagPreferences(db, apply);
+    if (apply) search.flushSoon();
+    return success(res, { applied: apply, count: tagged.length, memories: tagged });
+  });
   app.post("/api/admin/algolia/setup", async (_req, res) => success(res, await search.setup()));
   // Flipping the toggle rewrites each index's semantic settings, so the setup
   // run has to happen here rather than waiting for the next manual

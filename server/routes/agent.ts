@@ -2,11 +2,26 @@ import { z } from "zod";
 import { USER_ID, id, now, queueIndexJob } from "../db.ts";
 import { failure, success } from "../http.ts";
 import { currentConversation, messageJson } from "../serializers.ts";
+import { relevantFacts } from "../memory-context.ts";
+import { ownerSoul } from "../soul.ts";
 import { executeAgentTool } from "../tool-executor.ts";
+import { linksIn, rememberLinks } from "../web-service.ts";
 import { type MessageRow } from "../types.ts";
 import type { RouteContext } from "./context.ts";
 
 export function registerAgentRoutes({ app, db, search }: RouteContext): void {
+  /*
+   * What the browser chat adds to a turn before it sends: the owner's Soul and
+   * the memories that bear on the message, the same as a text turn carries.
+   * The links in the message become readable for the browser's page reads, as
+   * a pasted link is on a text turn. Behind the sign-in like every route here.
+   */
+  app.post("/api/agent/context", async (req, res) => {
+    const { text } = z.object({ text: z.string().max(20_000) }).strict().parse(req.body);
+    rememberLinks("web", linksIn(text));
+    const ownerFacts = await relevantFacts(db, search, { own: true }, text);
+    return success(res, { soul: ownerSoul(db), ownerFacts });
+  });
   app.post("/api/agent/tools/:name", async (req, res) => {
     const input = z.record(z.string(), z.unknown()).parse(req.body);
     try {
