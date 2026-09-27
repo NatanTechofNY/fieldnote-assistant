@@ -66,10 +66,13 @@ type Input = Record<string, unknown>;
  * The fields a patch empties. A field the same patch also gives a value is
  * being set, not cleared: "move it to Wednesday" arrived as the new time with
  * the old one listed to clear, and clearing it left the todo with no date.
+ * An empty list is no value: moods merge rather than replace, so `[]` beside
+ * a clear of them would otherwise leave every mood in place.
  */
 function clearedFields(patch: Input): Set<string> {
   const names = Array.isArray(patch.clear_fields) ? patch.clear_fields.map(String) : [];
-  return new Set(names.filter(name => patch[name] === null || patch[name] === undefined));
+  const given = (value: unknown) => value !== null && value !== undefined && !(Array.isArray(value) && !value.length);
+  return new Set(names.filter(name => !given(patch[name])));
 }
 
 const todoJson = (row: TodoRow) => ({

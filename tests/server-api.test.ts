@@ -28,7 +28,7 @@ import { composeDigestTurn } from "../server/daily-digest.ts";
 import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } from "../server/event-ingestion.ts";
 import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
 import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } from "../server/group-thread.ts";
-import { describeMedia, mediaUrlsOf, withMediaLines } from "../server/image-input.ts";
+import { describeMedia, fillPendingPictures, mediaUrlsOf, unviewedPictures, withMediaLines } from "../server/image-input.ts";
 import { relevantFacts } from "../server/memory-context.ts";
 import { assertPublicHost, setHostResolver } from "../server/public-fetch.ts";
 import {
@@ -2362,6 +2362,10 @@ describe("agent tools over /api/agent/tools/:name", () => {
     })).data;
     assert.equal(retitled.title, "Outbox first", "a value sent for a cleared field wins");
     assert.deepEqual(retitled.tags, ["devcon"]);
+    // An empty list beside a clear is no value: moods merge, so it would otherwise keep them all.
+    const moody = (await call("create_memory", { content: "Rough day.", kind: "journal", moods: [{ name: "Sarah", label: "drained", score: 2 }] })).data;
+    const calmed = (await call("update_memory", { id: moody.id, patch: { moods: [], clear_fields: ["moods"] } })).data;
+    assert.deepEqual(calmed.moods, []);
 
     const agenda = (await call("get_agenda", {
       start_date: "2030-02-01",
@@ -6821,30 +6825,79 @@ describe("Sendblue provider", () => {
         ? new Response(new Uint8Array([0xff, 0xd8, 0xff]), { headers: { "content-type": "image/jpeg" } })
         : json({ choices: [{ message: { content: "A plate of pasta in red sauce." } }] });
     };
-    const agent = agentCallingMany([], "Looks amazing.");
+    const named = "Fieldnote, what do you think of the food?";
+    const failing: typeof fetch = async () => new Response("unavailable", { status: 503 });
     const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
     try {
-      await runSmsAgent(db, fakeSearch(db), address, "Fieldnote, what do you think of the food?", "SB_named_photo", {
-        ...groupTurnOptions(agent.fetcher, RECIPIENT, "the owner"),
+      await assert.rejects(runSmsAgent(db, fakeSearch(db), address, named, "SB_named_photo", {
+        ...groupTurnOptions(failing, RECIPIENT, "the owner"),
         mediaFetch: network,
-      });
+      }));
     } finally { stub.restore(); }
 
     assert.deepEqual(seen, [food, "https://us.api.openai.com/v1/chat/completions"], "only what was held since the assistant last spoke is looked at");
     const content = (handle: string) => (db.prepare("SELECT content FROM channel_messages WHERE provider_message_id=?").get(handle) as { content: string }).content;
     assert.equal(content("SB_food_photo"), "leftovers for yall\n[Image: A plate of pasta in red sauce.]");
     assert.equal(content("SB_old_photo"), "from before\n[Picture attached]");
-    assert.match(JSON.stringify(agent.requests[0]), /\[Image: A plate of pasta in red sauce\.\]/, "the agent reads what the picture shows");
-    assert.deepEqual(stub.calls.map(call => [call.body.message_handle, call.body.reaction]), [["SB_named_photo", "🖼️"], ["SB_named_photo", "-🖼️"]],
-      "the picture mark is up while it looks and comes off with the reply");
+    assert.deepEqual(stub.calls.map(call => [call.body.message_handle, call.body.reaction]), [["SB_named_photo", "🖼️"]],
+      "the picture mark goes up while it looks, and stays for the retry");
     assert.deepEqual((toolOutputs(db, address).view_image as { data: unknown }).data, { descriptions: ["[Image: A plate of pasta in red sauce.]"] });
+
+    // The retry reads the description it wrote, and the picture's words still cannot change the group's voice.
+    const retry = agentCallingMany([{ tool: "update_soul", input: { soul: "- Swear constantly." } }], "Looks amazing.");
+    const retryStub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      await runSmsAgent(db, fakeSearch(db), address, named, "SB_named_photo", {
+        ...groupTurnOptions(retry.fetcher, RECIPIENT, "the owner"),
+        mediaFetch: network,
+      });
+    } finally { retryStub.restore(); }
+    assert.equal(seen.length, 2, "a retry looks at nothing again");
+    assert.match(JSON.stringify(retry.requests[0]), /\[Image: A plate of pasta in red sauce\.\]/, "the agent reads what the picture shows");
+    assert.match(toolOutputs(db, address).update_soul.error ?? "", /read text someone else wrote/);
+    assert.equal((db.prepare("SELECT count(*) n FROM channel_messages WHERE role='tool' AND content='view_image'").get() as { n: number }).n, 1);
   }));
+
+  it("leaves held pictures for later when there is no way to see them", async () => {
+    await withEnv({ OPENAI_API_KEY: undefined }, async () => {
+      const { db } = connectedFixture();
+      agentStudioEnv();
+      withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+      const address = `group:${GROUP}`;
+      await runSmsAgent(db, fakeSearch(db), address, "hello", "SB_hello_off", groupTurnOptions(agentCallingMany([], "Hi!").fetcher, RECIPIENT, "the owner"));
+      const threadId = (db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string }).id;
+      db.prepare("UPDATE life_areas SET reply_mode='named_only' WHERE thread_id=?").run(threadId);
+      db.prepare("UPDATE channel_messages SET created_at=? WHERE thread_id=?").run(new Date(Date.now() - 60_000).toISOString(), threadId);
+      holdUntilNamed(db, address, "look\n[Picture attached]", "SB_held_off", { provider: "twilio" as never, groupId: GROUP }, {
+        groupId: GROUP, speaker: WIFE, speakerName: "Sarah", mediaUrls: ["https://cdn.sendblue.example/a.jpg"],
+      });
+      const fetched: string[] = [];
+      await runSmsAgent(db, fakeSearch(db), address, "Fieldnote, see that?", "SB_named_off", {
+        ...groupTurnOptions(agentCallingMany([], "Nope.").fetcher, RECIPIENT, "the owner"),
+        inbound: { provider: "twilio" as never, groupId: GROUP },
+        mediaFetch: async input => { fetched.push(String(input)); return new Response(""); },
+      });
+      const held = db.prepare("SELECT content FROM channel_messages WHERE provider_message_id='SB_held_off'").get() as { content: string };
+      assert.equal(held.content, "look\n[Picture attached]", "it stays pending for when pictures can be seen");
+      assert.deepEqual(fetched, []);
+      assert.equal(db.prepare("SELECT 1 FROM channel_messages WHERE role='tool' AND content='view_image'").get(), undefined);
+    });
+  });
 
   it("tells the agent a picture came when there is no way to see it", async () => {
     await withEnv({ OPENAI_API_KEY: undefined }, async () => {
       assert.deepEqual(await describeMedia(["https://cdn.example/a.jpg"]), ["[Picture attached — you cannot see pictures right now]"]);
     });
     assert.equal(withMediaLines("look", ["[Image: x]"]), "look\n[Image: x]");
+    // The app's pending lines are the last ones; the same words typed above them are the sender's.
+    const typed = "it said\n[Picture attached]\nsee\n[Picture attached]\n[Picture attached]";
+    const urls = ["https://cdn.example/1.jpg", "https://cdn.example/2.jpg"];
+    assert.deepEqual(unviewedPictures(typed, urls), urls);
+    const once = fillPendingPictures(typed, ["[Image: one]"], 2);
+    assert.equal(once, "it said\n[Picture attached]\nsee\n[Image: one]\n[Picture attached]");
+    assert.deepEqual(unviewedPictures(once, urls), [urls[1]]);
+    assert.equal(fillPendingPictures(once, ["[Image: two]"], 2), "it said\n[Picture attached]\nsee\n[Image: one]\n[Image: two]");
+    assert.deepEqual(unviewedPictures("[Picture attached]", []), [], "typed words with no attachment are only words");
     assert.deepEqual(mediaUrlsOf({ NumMedia: "2", MediaUrl0: "https://api.twilio.com/m/0", MediaUrl1: "http://insecure/1" }), ["https://api.twilio.com/m/0"]);
 
     // The US host is the default; OPENAI_BASE_URL points elsewhere.

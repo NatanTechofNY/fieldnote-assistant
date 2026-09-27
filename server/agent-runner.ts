@@ -6,7 +6,7 @@ import { getNotificationPreferences, type SmsProvider } from "./integrations.ts"
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
-import { describeMedia, fillPendingPictures, hasImageDescription, imageInputMode, PICTURE_PENDING, pendingPictureCount } from "./image-input.ts";
+import { describeMedia, fillPendingPictures, hasImageDescription, imageInputMode, PICTURE_PENDING, unviewedPictures } from "./image-input.ts";
 import { relevantFacts } from "./memory-context.ts";
 import { servableGroupProfile, servableOwnerProfile } from "./profile.ts";
 import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
@@ -734,7 +734,8 @@ const PICTURES_PER_TURN = 4;
 /** The runtime's mark on a message while its pictures are being looked at. */
 const VIEWING_MARK = PROGRESS_REACTIONS.view_image;
 
-type UnviewedPictures = { id: string; content: string; urls: string[] };
+/** A row's pictures still to look at, the first of its unviewed ones, of `urlCount` attachments in all. */
+type UnviewedPictures = { id: string; content: string; urls: string[]; urlCount: number };
 
 function mediaUrlList(value: unknown): string[] {
   const list = typeof value === "string" ? (() => {
@@ -743,31 +744,49 @@ function mediaUrlList(value: unknown): string[] {
   return Array.isArray(list) ? list.filter((url): url is string => typeof url === "string") : [];
 }
 
+function unviewedOn(id: string, content: string, mediaUrls: unknown, limit: number): UnviewedPictures[] {
+  const all = mediaUrlList(mediaUrls);
+  const urls = unviewedPictures(content, all).slice(0, Math.max(limit, 0));
+  return urls.length ? [{ id, content, urls, urlCount: all.length }] : [];
+}
+
 /**
- * Pictures sent in a group while it asked the assistant to stay out, since
- * the assistant last spoke there and within the hour. They were filed
- * unviewed, and being named right after one is usually being asked about it.
+ * Where the pictures held for this turn start: the assistant's last word in
+ * the group, or an hour back when that is longer ago. A retry has the same
+ * start, since its turn has not replied yet.
  */
-function heldPictures(db: Db, threadId: string, inboundId: string, limit: number): UnviewedPictures[] {
-  if (limit <= 0) return [];
+function heldPicturesSince(db: Db, threadId: string): string {
   const since = new Date(Date.now() - HELD_PICTURE_WINDOW_MS).toISOString();
-  const lastSaid = (db.prepare(`
-    SELECT max(created_at) at FROM channel_messages WHERE thread_id=? AND role='assistant' AND status<>'failed'
-  `).get(threadId) as { at: string | null }).at;
-  const rows = db.prepare(`
+  const lastSaid = db.prepare(`
+    SELECT created_at FROM channel_messages WHERE thread_id=? AND role='assistant' AND status<>'failed'
+    ORDER BY created_at DESC LIMIT 1
+  `).get(threadId) as { created_at: string } | undefined;
+  return lastSaid && lastSaid.created_at > since ? lastSaid.created_at : since;
+}
+
+/** The group's messages held since `since`, newest first, whose text carries `marker`. */
+function heldRows(db: Db, threadId: string, inboundId: string, since: string, marker: string, limit: number) {
+  return db.prepare(`
     SELECT id,content,json_extract(metadata_json,'$.mediaUrls') urls FROM channel_messages
     WHERE thread_id=? AND role='user' AND direction='inbound' AND id<>?
       AND json_extract(metadata_json,'$.heldUntilNamed')=1
       AND instr(content,?)>0 AND created_at>?
     ORDER BY created_at DESC,rowid DESC LIMIT ?
-  `).all(threadId, inboundId, PICTURE_PENDING, lastSaid && lastSaid > since ? lastSaid : since, limit) as Array<{
-    id: string; content: string; urls: unknown;
-  }>;
+  `).all(threadId, inboundId, marker, since, limit) as Array<{ id: string; content: string; urls: unknown }>;
+}
+
+/**
+ * Pictures sent in a group while it asked the assistant to stay out, since
+ * the assistant last spoke there and within the hour. They were filed
+ * unviewed, and being named right after one is usually being asked about it.
+ */
+function heldPictures(db: Db, threadId: string, inboundId: string, since: string, limit: number): UnviewedPictures[] {
+  if (limit <= 0) return [];
   let budget = limit;
-  return rows.flatMap(row => {
-    const urls = mediaUrlList(row.urls).slice(0, Math.min(pendingPictureCount(row.content), budget));
-    budget -= urls.length;
-    return urls.length ? [{ id: row.id, content: row.content, urls }] : [];
+  return heldRows(db, threadId, inboundId, since, PICTURE_PENDING, limit).flatMap(row => {
+    const found = unviewedOn(row.id, row.content, row.urls, budget);
+    budget -= found[0]?.urls.length ?? 0;
+    return found;
   });
 }
 
@@ -777,9 +796,10 @@ function heldPictures(db: Db, threadId: string, inboundId: string, limit: number
  * was told to stay out. Each archived row gets what was seen in place of its
  * pending line, so the window, the index, and a retry all read the
  * description, and the look is filed as a `view_image` tool row so the
- * history shows the vision call was made. Returns the answered message's text,
- * and whether an earlier message now carries a description, whose quoted words
- * are then in the window too.
+ * history shows the vision call was made. With pictures off, held ones are
+ * left pending for when they can be seen. Returns the answered message's
+ * text, and whether a held message in play carries a description — its quoted
+ * words are in the window, on the attempt that looked and on any retry.
  */
 async function viewUnviewedPictures(
   db: Db,
@@ -789,27 +809,30 @@ async function viewUnviewedPictures(
   fetcher: typeof fetch | undefined,
   showMark: (() => Promise<void>) | undefined,
 ): Promise<{ body: string; describedEarlier: boolean }> {
-  const ownUrls = mediaUrlList(inbound.mediaUrls).slice(0, Math.min(pendingPictureCount(inbound.body), PICTURES_PER_TURN));
-  const own = ownUrls.length ? [{ id: inbound.id, content: inbound.body, urls: ownUrls }] : [];
-  const pending = [...own, ...(group ? heldPictures(db, threadId, inbound.id, PICTURES_PER_TURN - ownUrls.length) : [])];
-  if (!pending.length) return { body: inbound.body, describedEarlier: false };
-  let describedEarlier = false;
   const looking = imageInputMode() === "describe";
-  if (looking) await showMark?.();
+  const since = group ? heldPicturesSince(db, threadId) : "";
+  const own = unviewedOn(inbound.id, inbound.body, inbound.mediaUrls, PICTURES_PER_TURN);
+  const held = group && looking ? heldPictures(db, threadId, inbound.id, since, PICTURES_PER_TURN - (own[0]?.urls.length ?? 0)) : [];
+  const pending = [...own, ...held];
   let body = inbound.body;
   const seen: string[] = [];
+  // The mark goes out beside the first look rather than ahead of it, and has
+  // landed before the turn reads the archive for the marks already up.
+  const marking = pending.length && looking ? showMark?.() : undefined;
   for (const picture of pending) {
     const lines = await describeMedia(picture.urls, fetcher);
     seen.push(...lines);
-    const content = fillPendingPictures(picture.content, lines);
+    const content = fillPendingPictures(picture.content, lines, picture.urlCount);
     db.transaction(() => {
       db.prepare("UPDATE channel_messages SET content=?,updated_at=? WHERE id=?").run(content, now(), picture.id);
       queueIndexJob(db, "channel_message", picture.id);
     })();
     if (picture.id === inbound.id) body = content;
-    else if (hasImageDescription(content)) describedEarlier = true;
   }
-  if (looking) {
+  await marking;
+  const describedEarlier = group
+    && heldRows(db, threadId, inbound.id, since, "[Image: ", 1).some(row => hasImageDescription(row.content));
+  if (pending.length && looking) {
     saveChannelMessage(db, threadId, "outbound", "tool", "view_image", undefined, {
       input: { pictures: seen.length },
       output: { success: !seen.some(line => line.includes("could not be viewed")), data: { descriptions: seen } },
@@ -987,9 +1010,11 @@ function groupTurnSetup(
   const earlierMessage = db.prepare(
     "SELECT 1 found FROM channel_messages WHERE thread_id=? AND role='user' AND id<>? LIMIT 1",
   ).get(threadId, inboundId);
-  const answeredSinceCreated = db.prepare(
-    "SELECT 1 found FROM channel_messages WHERE thread_id=? AND role IN ('assistant','tool') AND created_at>=? LIMIT 1",
-  ).get(threadId, area.createdAt);
+  // The app's own look at a picture is not the assistant taking a turn.
+  const answeredSinceCreated = db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role IN ('assistant','tool') AND created_at>=? AND NOT (role='tool' AND content='view_image') LIMIT 1
+  `).get(threadId, area.createdAt);
   return {
     area,
     areaIsNew: !answeredSinceCreated,
