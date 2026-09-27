@@ -8066,6 +8066,31 @@ describe("Sendblue provider", () => {
     assert.deepEqual(stub.calls.map(call => [call.body.message_handle, call.body.reaction]), [["SB_named", "👀"], ["SB_named", "-👀"]]);
   });
 
+  it("does not text the same words twice when the reply repeats what the turn already sent", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const texted: string[] = [];
+    const options = {
+      ...groupTurnOptions(agentCallingMany([{ tool: "send_message", input: { text: "this the storm y’all were hyping 😂" } }], "This the storm y'all were hyping 😂").fetcher),
+      inbound: { provider: "twilio" as never, groupId: GROUP },
+      sendSms: async (_db: Db, _to: string, body: string) => {
+        texted.push(body);
+        return { sid: `SB_${texted.length}`, status: "queued" as const };
+      },
+    };
+    const repeated = await runSmsAgent(db, fakeSearch(db), address, "Fieldnote, how's the storm?", "SB_storm", options);
+    assert.equal(repeated.text, "", "the closing line said nothing new");
+    assert.deepEqual(texted, ["this the storm y’all were hyping 😂"]);
+
+    const added = await runSmsAgent(db, fakeSearch(db), address, "Fieldnote, and tomorrow?", "SB_storm_2", {
+      ...options,
+      fetcher: agentCallingMany([{ tool: "send_message", input: { text: "lol" } }], "Clears up by noon.").fetcher,
+    });
+    assert.equal(added.text, "Clears up by noon.", "a closing line that adds something still goes out");
+  });
+
   it("writes a said todo itself when its time comes, logs it done, and keeps it off the morning note", async () => {
     const { db, api, area } = checkinFixture();
     agentStudioEnv();

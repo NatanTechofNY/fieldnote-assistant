@@ -723,6 +723,11 @@ function aimedAtAssistant(
   return answered?.speaker === speakerPhone;
 }
 
+/** A message's words, for telling whether two texts say the same thing. */
+function sameWords(text: string): string {
+  return text.normalize("NFKC").replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 /** How long a held picture waits to be looked at; past this it belongs to an earlier conversation. */
 const HELD_PICTURE_WINDOW_MS = 60 * 60_000;
 /**
@@ -1416,7 +1421,11 @@ export async function runChannelAgent(
          * top complaint, so the text is dropped — unless a record changed
          * after the call, which the room has to be told about.
          */
-        const text = context.scope && context.stayedQuiet && !changedRecord ? "" : written;
+        // A closing line that only repeats what already went out — the model
+        // restating the caption it sent with a GIF — would text it twice.
+        const said = new Set((context.sentWords ?? []).map(sameWords));
+        const unsaid = said.has(sameWords(written)) ? "" : written;
+        const text = context.scope && context.stayedQuiet && !changedRecord ? "" : unsaid;
         // Once per turn, so a model that insists cannot loop the turn out of its budget.
         if (!changedStatus && !checkedStatusClaim && STATUS_CLAIM.test(text)) {
           checkedStatusClaim = true;

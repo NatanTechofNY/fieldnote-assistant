@@ -322,6 +322,11 @@ export type ToolTurnContext = {
    */
   sentText?: boolean;
   /**
+   * The words already texted this turn, a bubble's or a picture's caption. A
+   * closing reply that only says them again is the same message twice.
+   */
+  sentWords?: string[];
+  /**
    * Set once a web tool has put someone else's text in front of the model this
    * turn. From then on deletes are refused until the user asks again, so a page
    * cannot talk the model into one with a `confirmed` flag it sets itself.
@@ -626,6 +631,7 @@ export async function executeAgentTool(
     const delivered = await send(db, turn.address, text, turn.groupId ? { groupId: turn.groupId } : undefined);
     insertOutboundChannelMessage(db, turn.threadId, text, delivered.sid, delivered.status, { kind: "message" });
     turn.sentText = true;
+    turn.sentWords = [...(turn.sentWords ?? []), text];
     search.flushSoon();
     return { sent: true, message_handle: delivered.sid, status: delivered.status };
   }
@@ -815,6 +821,7 @@ export async function executeAgentTool(
       mediaUrl: url,
     });
     context.sentText = true;
+    if (caption) context.sentWords = [...(context.sentWords ?? []), caption];
     search.flushSoon();
     return { channel: "sms", sent: true, message_handle: delivered.sid, status: delivered.status };
   }
