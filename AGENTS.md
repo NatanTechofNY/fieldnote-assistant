@@ -47,7 +47,9 @@ change usually has to land in both the tool executor and the matching REST route
 filters with its completion. Every by-id read in `server/tool-executor.ts` goes through
 `scopedTodo`/`scopedMemory`, every list is filtered to the area, and `OWNER_ONLY_TOOLS` are refused.
 A new tool, a new list, or a new index the hosted search tool can reach has to honour the scope, or a
-question asked in a group answers from the owner's private records.
+question asked in a group answers from the owner's private records. The cross-chat tools
+(`list_group_chats`, `send_to_group`, `react_in_group`) are in `OWNER_ONLY_TOOLS` for the same reason:
+a group must never reach the owner's other groups.
 
 **Tool schemas are contract-tested.** `tests/server-api.test.ts` asserts that the tools published
 in `agent-studio/tools/client-tools.json` are exactly the keys of `toolInput` in

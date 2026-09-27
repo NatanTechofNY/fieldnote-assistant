@@ -1290,7 +1290,7 @@
         "properties": {
           "thread_id": {
             "type": ["string", "null"],
-            "description": "Null for this conversation; outside a group, a threadId from a message search hit"
+            "description": "Null for this conversation; outside a group, a threadId from a message search hit or list_group_chats"
           },
           "from": {
             "type": "string",
@@ -1334,6 +1334,80 @@
           }
         },
         "required": ["reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_group_chats",
+      "description": "Lists the owner's iMessage group chats: thread_id, name, who is in each, and when it last spoke. Finds the group the owner means before send_to_group or react_in_group. Owner's own chat only.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "send_to_group",
+      "description": "Posts into another of the owner's group chats when the owner asks from their own chat: text, a picture, or both, optionally threaded under a message there. The reply here still follows.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "description": "The group's thread_id from list_group_chats"
+          },
+          "text": {
+            "type": ["string", "null"],
+            "maxLength": 1500,
+            "description": "The words to post, or the picture's caption; null for the picture alone"
+          },
+          "image_url": {
+            "type": ["string", "null"],
+            "maxLength": 2000,
+            "description": "A find_gif result from this turn, URL exactly as returned; null for text only"
+          },
+          "reply_to_message_id": {
+            "type": ["string", "null"],
+            "description": "A message_id from read_conversation on that group, to thread under it; null to post on its own"
+          }
+        },
+        "required": ["thread_id", "text", "image_url", "reply_to_message_id"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "react_in_group",
+      "description": "Puts a tapback on one message in another of the owner's group chats, on the owner's ask from their own chat. Use love, like, dislike, laugh, emphasize, question, or one emoji; - prefix removes.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "description": "The group's thread_id from list_group_chats"
+          },
+          "message_id": {
+            "type": "string",
+            "description": "A message_id from read_conversation on that group"
+          },
+          "reaction": {
+            "type": "string",
+            "minLength": 1,
+            "description": "love, like, dislike, laugh, emphasize, question, or one emoji such as 🔥"
+          }
+        },
+        "required": ["thread_id", "message_id", "reaction"],
         "additionalProperties": false
       }
     }

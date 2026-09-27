@@ -17,9 +17,10 @@ import { withoutMediaLines } from "./image-input.ts";
 import { assertSendableImage, giphyConfig, imagesInMarkdown, isRememberedImage, rememberImages, searchGifs } from "./image-output.ts";
 import { refreshRosterMemory, rememberGroupMember } from "./group-members.ts";
 import {
-  addressesAssistant, ASSISTANT_NAME, groupIdOfAddress, OWNER_SPEAKER_NAME, speakerLabel, speakerNameOf,
+  addressesAssistant, ASSISTANT_NAME, GROUP_ADDRESS_PREFIX, groupIdOfAddress, OWNER_SPEAKER_NAME, redactedNumber,
+  speakerLabel, speakerNameOf,
 } from "./group-thread.ts";
-import type { SmsProvider } from "./integrations.ts";
+import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset, zonedToInstant } from "./local-time.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
 import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
@@ -333,6 +334,21 @@ export type ToolTurnContext = {
    */
   readWeb?: boolean;
   /**
+   * Set by the web reads and the Jira and Confluence reads that return other
+   * people's prose. A GIF title or a picture's words are short enough to
+   * judge; a page is not, so after one nothing goes into another chat until
+   * the owner asks again.
+   */
+  readPages?: boolean;
+  /**
+   * The group threads whose messages this turn has read, set by the runner
+   * from what tools and the hosted search handed back. What someone wrote in
+   * one group can then post only into that group.
+   */
+  groupThreadsRead?: Set<string>;
+  /** The GIFs `find_gif` returned this turn: the only pictures `send_to_group` passes on. */
+  foundGifs?: Set<string>;
+  /**
    * Set once the turn has put text in front of the model that the person
    * answering did not write: anything `readWeb` covers, a picture's quoted
    * words, or — on the owner's own turn — records and messages people wrote in
@@ -381,17 +397,24 @@ export function ownRecordsOnly(context: ToolTurnContext | undefined): boolean {
 }
 
 /**
- * Tools that read the owner's working life or their Atlassian account. None of
- * it belongs in a group chat, so in a group they are refused before touching the
- * database or the network rather than filtered.
+ * Tools that read the owner's working life or their Atlassian account, or reach
+ * into the owner's other group chats. None of it belongs in a group chat, so in
+ * a group they are refused before touching the database or the network rather
+ * than filtered.
  */
 const OWNER_ONLY_TOOLS = new Set([
   "get_review_evidence", "get_reflection_evidence",
   "list_jira_boards", "list_jira_issues", "get_jira_issue", "list_jira_users",
   "list_confluence_spaces", "list_confluence_pages", "get_confluence_page", "list_confluence_comments",
+  "list_group_chats", "send_to_group", "react_in_group",
 ]);
 
 const DELETE_TOOLS = new Set(["delete_todo", "delete_memory", "delete_reminder"]);
+
+/** The Atlassian reads that hand back what coworkers wrote: descriptions, page bodies, comments, excerpts. */
+const ATLASSIAN_PROSE_TOOLS = new Set([
+  "list_jira_issues", "get_jira_issue", "list_confluence_pages", "get_confluence_page", "list_confluence_comments",
+]);
 
 /**
  * The browser route has no turn context, so its web reads are remembered
@@ -589,6 +612,87 @@ function imessageTurn(
   return context as ToolTurnContext & { inboundMessageHandle: string };
 }
 
+/**
+ * Only the recipient's own number is the owner's line. With none configured
+ * the inbound filter lets any 1:1 sender through, and nobody in that state may
+ * reach the owner's groups.
+ */
+function assertOwnerLine(db: Db, context: ToolTurnContext): void {
+  const owner = getNotificationPreferences(db).recipientPhone;
+  if (!owner || context.address !== owner) throw new Error("Only the owner's own text chat can reach their group chats");
+}
+
+/** A group the owner has left, as far as the app saw, is not one the assistant speaks in for them. */
+const OWNER_STILL_IN_GROUP = `NOT EXISTS (
+  SELECT 1 FROM group_members gm WHERE gm.thread_id=t.id AND gm.is_owner=1 AND gm.left_at IS NOT NULL
+)`;
+
+type OwnGroupThread = {
+  id: string; address: string; groupId: string; group_name: string | null; area_name: string | null; display_name: string | null;
+};
+
+function ownGroupThread(db: Db, threadId: string): OwnGroupThread {
+  const thread = db.prepare(`
+    SELECT t.id,t.address,${GROUP_NAME_SQL} group_name,la.name area_name,t.display_name FROM channel_threads t
+    LEFT JOIN life_areas la ON la.thread_id=t.id
+    WHERE t.id=? AND t.user_id=? AND t.channel='sms' AND ${OWNER_STILL_IN_GROUP}
+  `).get(threadId, USER_ID) as Omit<OwnGroupThread, "groupId"> | undefined;
+  const groupId = thread ? groupIdOfAddress(thread.address) : undefined;
+  if (!thread || !groupId) throw new Error("Group chat not found. Pass a thread_id from list_group_chats");
+  return { ...thread, groupId };
+}
+
+/**
+ * A turn that may act in `group` for the owner. Group turns never reach here
+ * (`OWNER_ONLY_TOOLS`), and neither does anything the app composed, so a
+ * check-in or a digest cannot post into a group whatever its instruction
+ * quotes. The rest is what keeps someone else's words from choosing where the
+ * owner speaks: the owner's own message has to name the group, and once the
+ * turn has read what people wrote in some other group, or a page, nothing goes
+ * out on it.
+ */
+function crossChatTurn(
+  db: Db, context: ToolTurnContext | undefined, threadId: string,
+): { turn: ToolTurnContext; group: OwnGroupThread } {
+  if (!context || context.channel !== "sms") {
+    throw new Error("This is not a text conversation; acting in a group chat works from the owner's own text chat");
+  }
+  if (context.appTurn || context.internal) {
+    throw new Error("This turn is the app writing, not the owner; nothing goes into a group chat from it");
+  }
+  assertOwnerLine(db, context);
+  const group = ownGroupThread(db, threadId);
+  if (context.readPages) {
+    throw new Error("This turn read a web page, search results, or a Jira or Confluence page, so nothing goes into another chat on it; ask the owner to say it again");
+  }
+  if ([...context.groupThreadsRead ?? []].some(threadId => threadId !== group.id)) {
+    throw new Error("This turn read what people wrote in a different group chat, so nothing goes into this one on it; ask the owner to say it again");
+  }
+  const asked = withoutMediaLines(context.inboundText ?? "").toLowerCase();
+  const names = [group.area_name, group.display_name].map(name => name?.trim().toLowerCase()).filter(Boolean) as string[];
+  if (!names.some(name => asked.includes(name))) {
+    throw new Error(`The owner's message has to name the group to post there; ask them which chat they mean${group.group_name ? ` (this one is "${group.group_name}")` : ""}`);
+  }
+  return { turn: context, group };
+}
+
+/**
+ * The provider handle of a message in that group, looked up by its archive id
+ * within the group's own thread, so a handle from any other chat cannot be
+ * aimed at.
+ */
+function groupMessageHandle(db: Db, threadId: string, messageId: string, forTapback: boolean): string {
+  const row = db.prepare(`
+    SELECT role,provider_message_id FROM channel_messages
+    WHERE id=? AND thread_id=? AND role IN ('user','assistant') AND status<>'failed'
+  `).get(messageId, threadId) as { role: "user" | "assistant"; provider_message_id: string | null } | undefined;
+  if (!row?.provider_message_id) {
+    throw new Error("Message not found. Pass a message_id from read_conversation on that group");
+  }
+  if (forTapback && row.role === "assistant") throw new Error("iMessage has no tapback for your own message; pick one someone else sent");
+  return row.provider_message_id;
+}
+
 export async function executeAgentTool(
   db: Db,
   search: SearchWriter,
@@ -721,6 +825,101 @@ export async function executeAgentTool(
     turn.replyToMessageHandle = turn.inboundMessageHandle;
     return { threaded: true };
   }
+
+  /*
+   * The owner, from their own chat, acting in one of their groups. What goes
+   * out is filed in the group's thread, so that group's next turn sees it in its
+   * window and search finds it there; `sentFrom` says where it was asked for.
+   */
+  if (name === "list_group_chats") {
+    if (context?.appTurn || context?.internal) throw new Error("This turn is the app writing, not the owner; it has no group chats to look through");
+    if (context?.channel === "sms") assertOwnerLine(db, context);
+    // The same rows read_conversation would show: nothing failed, no app instruction, no written-out tapback.
+    const threads = db.prepare(`
+      SELECT t.id,${GROUP_NAME_SQL} group_name,
+        (SELECT created_at FROM channel_messages m
+          WHERE m.thread_id=t.id AND m.role IN ('user','assistant') AND m.status<>'failed'
+            AND NOT (m.role='user' AND COALESCE(json_extract(m.metadata_json,'$.internal'),0)=1)
+            AND json_extract(m.metadata_json,'$.reactionText') IS NULL
+          ORDER BY m.created_at DESC LIMIT 1) last_message_at
+      FROM channel_threads t LEFT JOIN life_areas la ON la.thread_id=t.id
+      WHERE t.user_id=? AND t.channel='sms' AND t.address LIKE ? AND ${OWNER_STILL_IN_GROUP}
+      ORDER BY last_message_at IS NULL,last_message_at DESC
+    `).all(USER_ID, `${GROUP_ADDRESS_PREFIX}%`) as Array<{ id: string; group_name: string | null; last_message_at: string | null }>;
+    const members = db.prepare(`
+      SELECT phone,name,is_owner FROM group_members WHERE thread_id=? AND left_at IS NULL ORDER BY is_owner DESC,name IS NULL,name
+    `);
+    // Anyone in a group can name it, so two groups can answer to the same name.
+    const nameCounts = new Map<string, number>();
+    for (const thread of threads) {
+      const key = thread.group_name?.trim().toLowerCase();
+      if (key) nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+    }
+    const timezone = userTimezone(db);
+    return {
+      groups: threads.map(thread => ({
+        thread_id: thread.id,
+        group_name: thread.group_name,
+        // By name, or the shortened number a group turn would show; never the number itself.
+        members: (members.all(thread.id) as Array<{ phone: string; name: string | null; is_owner: number }>)
+          .map(member => member.is_owner ? OWNER_SPEAKER_NAME : member.name || redactedNumber(member.phone)),
+        last_message_at: thread.last_message_at ? localIsoWithOffset(new Date(thread.last_message_at), timezone) : null,
+        ...((nameCounts.get(thread.group_name?.trim().toLowerCase() ?? "") ?? 0) > 1 ? { name_shared: true } : {}),
+      })),
+    };
+  }
+  if (name === "send_to_group") {
+    const { turn, group } = crossChatTurn(db, context, input.thread_id as string);
+    const text = typeof input.text === "string" ? input.text.trim() : "";
+    const imageUrl = typeof input.image_url === "string" && input.image_url ? input.image_url : undefined;
+    if (imageUrl) {
+      if (!turn.foundGifs?.has(imageUrl)) {
+        throw new Error("Only a picture find_gif returned this turn can be sent; pass its URL exactly");
+      }
+      await assertSendableImage(imageUrl);
+    }
+    const replyTo = typeof input.reply_to_message_id === "string" && input.reply_to_message_id
+      ? groupMessageHandle(db, group.id, input.reply_to_message_id, false)
+      : undefined;
+    const send = turn.sendSms ?? sendSms;
+    const delivered = await send(db, group.address, text, {
+      groupId: group.groupId,
+      ...(imageUrl ? { mediaUrl: imageUrl } : {}),
+      ...(replyTo ? { replyTo } : {}),
+    });
+    insertOutboundChannelMessage(db, group.id, text || "(picture)", delivered.sid, delivered.status, {
+      kind: imageUrl ? "image" : "message",
+      sentFrom: turn.threadId,
+      ...(imageUrl ? { mediaUrl: imageUrl } : {}),
+      ...(delivered.replyTo ? { replyTo: delivered.replyTo } : {}),
+    });
+    search.flushSoon();
+    return {
+      sent: true,
+      group_name: group.group_name,
+      threaded: Boolean(delivered.replyTo),
+      message_handle: delivered.sid,
+      status: delivered.status,
+    };
+  }
+  if (name === "react_in_group") {
+    const { group } = crossChatTurn(db, context, input.thread_id as string);
+    const handle = groupMessageHandle(db, group.id, input.message_id as string, true);
+    const reaction = input.reaction as string;
+    await sendSendblueReaction(db, handle, reaction);
+    // iMessage keeps one tapback per sender, so the receipt the runtime left on
+    // that message is gone from the device the moment this one lands.
+    if (!reaction.startsWith("-")) {
+      const row = db.prepare("SELECT metadata_json FROM channel_messages WHERE thread_id=? AND provider_message_id=?")
+        .get(group.id, handle) as { metadata_json: string | null } | undefined;
+      const runtime = JSON.parse(row?.metadata_json || "{}").runtimeReactions;
+      for (const mark of Array.isArray(runtime) ? runtime : []) {
+        if (typeof mark === "string" && mark !== reaction) recordMessageReaction(db, group.id, handle, `-${mark}`, "runtime");
+      }
+    }
+    recordMessageReaction(db, group.id, handle, reaction);
+    return { reacted: true, reaction, group_name: group.group_name };
+  }
   if (name === "stay_quiet") {
     // People talk to each other in a group, and not every message is for the
     // assistant. The reason lands in the archive as this tool's row; the turn
@@ -765,6 +964,7 @@ export async function executeAgentTool(
     const results = await countedWebCall(db, context, () => searchWeb(input.query as string, limit));
     rememberResults(context?.threadId ?? "web", results);
     markReadWeb(context);
+    if (context) context.readPages = true;
     // Google answers "weather tomorrow" with its own widget and no organic
     // results at all, while "weather" alone returns the forecast sites.
     const hint = results.length ? undefined
@@ -781,6 +981,7 @@ export async function executeAgentTool(
     }
     const page = await countedWebCall(db, context, () => readWebPage(url));
     markReadWeb(context);
+    if (context) context.readPages = true;
     // The pictures on a page it read are ones send_image may pass on.
     rememberImages(context?.threadId ?? "web", imagesInMarkdown(page.text));
     const hint = page.text ? undefined
@@ -802,6 +1003,7 @@ export async function executeAgentTool(
     // Uploaders write the titles, so they are outside text like a search snippet.
     markReadWeb(context);
     rememberImages(context?.threadId ?? "web", gifs.map(gif => gif.url));
+    if (context) context.foundGifs = new Set([...context.foundGifs ?? [], ...gifs.map(gif => gif.url)]);
     const hint = gifs.length ? undefined : "No GIFs. Try once more with one or two plainer words, e.g. \"happy dance\"";
     return { source: "giphy", untrusted: true, gifs, ...(hint ? { hint } : {}) };
   }
@@ -1010,7 +1212,7 @@ export async function executeAgentTool(
     // Speakers are matched on their label, which is worked out per row, so a
     // filtered read scans further before it is cut; either way it is bounded.
     const rows = db.prepare(`
-      SELECT role,content,created_at,metadata_json,rowid FROM channel_messages
+      SELECT id,role,content,created_at,metadata_json,rowid FROM channel_messages
       WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
         AND (created_at>? OR (created_at=? AND rowid>=?)) AND created_at<?
         AND NOT (role='user' AND COALESCE(json_extract(metadata_json,'$.internal'),0)=1)
@@ -1018,7 +1220,7 @@ export async function executeAgentTool(
         AND json_extract(metadata_json,'$.reactionText') IS NULL
       ORDER BY created_at,rowid LIMIT ?
     `).all(thread.id, from, from, afterRowid, to, wanted ? SPEAKER_SCAN_LIMIT : limit + 1) as Array<{
-      role: "user" | "assistant"; content: string; created_at: string; metadata_json: string; rowid: number;
+      id: string; role: "user" | "assistant"; content: string; created_at: string; metadata_json: string; rowid: number;
     }>;
     // Who said it, by name or redacted number; the assistant's own lines are "you".
     const labelled = rows.map(row => ({
@@ -1037,6 +1239,7 @@ export async function executeAgentTool(
       from: localIsoWithOffset(new Date(from), timezone),
       to: localIsoWithOffset(new Date(to), timezone),
       messages: matching.slice(0, limit).map(row => ({
+        message_id: row.id,
         at: localIsoWithOffset(new Date(row.created_at), timezone),
         speaker: row.speaker,
         content: row.content.length > MAX_CONTENT ? `${row.content.slice(0, MAX_CONTENT)}…` : row.content,
@@ -1469,6 +1672,7 @@ export async function executeAgentTool(
    * when no credential is stored, which the agent is told to report rather than
    * work around.
    */
+  if (context && ATLASSIAN_PROSE_TOOLS.has(name)) context.readPages = true;
   if (name === "list_jira_boards") {
     return listJiraBoards(db, {
       name_filter: input.name_filter as string | null,

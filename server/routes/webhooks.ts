@@ -1,5 +1,6 @@
 import { now } from "../db.ts";
 import { enqueueExternalEvent } from "../event-ingestion.ts";
+import { markOwnerLeftGroup } from "../group-members.ts";
 import { mediaUrlsOf } from "../image-input.ts";
 import { getNotificationPreferences, getSendblueSecret, getTwilioSecret, recordSendblueNotice, setSmsOptOut } from "../integrations.ts";
 import { isInboundSenderAllowed, ownerHasSpokenInGroup } from "../messaging.ts";
@@ -119,6 +120,7 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
       // ordinary event, and a 403 would only make Sendblue deliver it three more
       // times; it is acknowledged and dropped instead.
       if (ownerPresent) return res.json({ received: true, ignored: "sender" });
+      if (groupId && owner && participants.length) markOwnerLeftGroup(db, groupId, owner);
       return res.status(403).json({ received: false });
     }
     // Opting out is the recipient's call. A trusted contact in a group is heard
