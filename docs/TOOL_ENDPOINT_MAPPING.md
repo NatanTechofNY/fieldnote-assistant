@@ -134,7 +134,7 @@ One divergence to know about: **`get_agenda` ignores its `timezone` argument.** 
 Agent Studio strict mode requires every declared property to be present on every call, which is at odds with partial updates. So `{ id, patch }` is normalized before it touches SQLite:
 
 1. Drop patch properties whose value is null — in this dialect `null` means "not set", not "clear it".
-2. For each name in `patch.clear_fields`, set that nullable column to null.
+2. For each name in `patch.clear_fields`, set that nullable column to null — unless the same patch carries a value for it, in which case the value wins. A model moving a todo sometimes lists the old `due_at` to clear while sending the new one, and that is a move, not a clear.
 3. Drop `clear_fields`.
 4. Reject an empty normalized patch.
 

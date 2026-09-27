@@ -366,6 +366,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
                 </div>}
                 <footer>
                   <span>{message.status}</span>
+                  {message.metadata.heldUntilNamed === true && <span className="history-held" title="The group asked the assistant to stay out until it is named, so this message was filed without an answer">Held — quiet until named</span>}
                   <time>{historyTimestamp(message.createdAt, timezone)}</time>
                 </footer>
               </div>

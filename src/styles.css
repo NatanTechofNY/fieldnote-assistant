@@ -2100,6 +2100,7 @@ tr:hover .attach-button,
 .history-message.role-tool .history-bubble { width:min(720px,94%); max-width:94%; padding:6px; border:0; background:transparent; }
 .history-bubble .markdown-content { font-size:13px; line-height:1.55; }
 .history-bubble footer { display:flex; gap:9px; margin-top:6px; font-size:11px; opacity:.7; }
+.history-held { font-style:italic; }
 /* An inline reply is only legible beside the message it answers, and that parent
    is often far enough up the thread to be off screen. `currentColor` carries the
    rule through the accent bubble, where a fixed border would disappear. */
@@ -2182,6 +2183,7 @@ tr:hover .attach-button,
 .history-trace-source.index-pending,.history-trace-source.index-processing { color:var(--warn); background:var(--warn-subtle); }
 .history-trace-source.index-failed { color:var(--danger); background:var(--danger-subtle); }
 .history-trace-source.source-agent-studio { color:var(--info); background:var(--info-subtle); }
+.history-trace-source.source-vision { color:var(--success); background:var(--success-subtle); }
 .history-trace-result { grid-column:5; color:var(--text-tertiary); font-size:11px; text-align:right; }
 /* A run summarises the calls it contains, so its own row wants the tool list to
    have the width the per-call result column would otherwise hold. */

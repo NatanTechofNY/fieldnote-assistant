@@ -690,6 +690,29 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       metadata: {},
       createdAt: "2026-07-29T21:00:05.000Z",
       updatedAt: "2026-07-29T21:00:05.000Z",
+    }, {
+      id: "message_group_3",
+      direction: "inbound",
+      role: "user",
+      content: "leftovers for yall\n[Image: A plate of pasta in red sauce.]",
+      providerMessageId: "SB_group_3",
+      status: "received",
+      metadata: { groupId: "3fa85f64-5717-4562-b3fc-2c963f66afa6", speaker: "+17185552222", speakerName: "Sarah", heldUntilNamed: true },
+      createdAt: "2026-07-29T21:10:00.000Z",
+      updatedAt: "2026-07-29T21:10:00.000Z",
+    }, {
+      id: "message_group_4",
+      direction: "outbound",
+      role: "tool",
+      content: "view_image",
+      status: "delivered",
+      metadata: {
+        toolCallId: "vision_1",
+        input: { pictures: 1 },
+        output: { success: true, data: { descriptions: ["[Image: A plate of pasta in red sauce.]"] } },
+      },
+      createdAt: "2026-07-29T21:11:00.000Z",
+      updatedAt: "2026-07-29T21:11:00.000Z",
     }],
   }));
   if (url.endsWith("/api/integrations/tasks")) {
@@ -2030,6 +2053,11 @@ it("renders complete channel conversation history", async () => {
   expect(document.querySelector(".history-message.inbound .history-speaker")).toHaveTextContent("Sarah");
   expect(document.querySelector(".history-message.outbound .history-speaker")).toBeNull();
   expect(screen.queryByText(/3fa85f64/)).not.toBeInTheDocument();
+  // A message filed while the group asked for quiet says so, and a look at a picture is on the record.
+  const held = [...document.querySelectorAll(".history-message")].find(node => node.textContent?.includes("leftovers for yall"));
+  expect(held?.querySelector(".history-held")).toHaveTextContent("Held — quiet until named");
+  expect(screen.getByText("view_image")).toBeInTheDocument();
+  expect(screen.getByText("Vision")).toBeInTheDocument();
 });
 
 /**

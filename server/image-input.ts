@@ -128,6 +128,24 @@ export function withMediaLines(body: string | undefined, lines: string[]): strin
   return [body?.trim(), ...lines].filter(Boolean).join("\n");
 }
 
+/**
+ * The line an attachment is archived under until it has been looked at. A
+ * group's held message keeps it until the assistant is next named, so a
+ * picture nobody asked about costs no vision call.
+ */
+export const PICTURE_PENDING = "[Picture attached]";
+
+/** How many of the message's attachments have not been looked at yet. */
+export function pendingPictureCount(text: string): number {
+  return text.split("\n").filter(line => line.trim() === PICTURE_PENDING).length;
+}
+
+/** The text with its unviewed attachment lines replaced, in order, by what was seen. */
+export function fillPendingPictures(text: string, lines: string[]): string {
+  let next = 0;
+  return text.split("\n").map(line => line.trim() === PICTURE_PENDING && next < lines.length ? lines[next++] : line).join("\n");
+}
+
 const MEDIA_LINE = /^\[(?:Image: .*|Picture attached.*|Video attached.*|Voice or audio message attached.*|Attachment — .*)\]$/;
 
 /** What the person wrote, without the lines the app added for their attachments. */

@@ -17,7 +17,7 @@ import {
 import {
   composeFollowUpTurn, FOLLOW_UP_TIME, FOLLOW_UP_UNTIL, followUpCandidates, followUpsEnabled, markFollowedUp,
 } from "./follow-ups.ts";
-import { describeMedia, mediaUrlsOf, withMediaLines } from "./image-input.ts";
+import { mediaUrlsOf, PICTURE_PENDING, withMediaLines } from "./image-input.ts";
 import {
   composeGroupProfileTurn, composeProfileTurn, groupProfileSnapshot, groupProfileState, ownerProfileSnapshot,
   PROFILE_REFRESH_TIME, PROFILE_REFRESH_UNTIL, profileState, setGroupProfile, setOwnerProfile,
@@ -1150,7 +1150,7 @@ export async function runWorkerOnce(
         };
         // A group that asked the assistant to stay out until named gets no
         // answer, and no completion is spent, on a message that does not name it.
-        const heldText = withMediaLines(message.body, media.map(() => "[Picture attached]"));
+        const heldText = withMediaLines(message.body, media.map(() => PICTURE_PENDING));
         if (group && holdUntilNamed(db, address, heldText, message.messageId, inbound, { ...group.metadata, ...(media.length ? { mediaUrls: media } : {}) })) {
           completeExternalEvent(db, event.id, "processed");
           continue;
@@ -1160,15 +1160,17 @@ export async function runWorkerOnce(
         // bubble outlives the answer.
         stopTyping = group ? () => {} : showTyping(db, message.from);
         // A picture reaches the agent as a description, which is also what the
-        // archive keeps; the link rides along in the metadata.
+        // archive keeps; the link rides along in the metadata. The turn looks at
+        // it, so the look is on the record, and a retry reuses what it saw.
         const text = media.length
-          ? archivedInboundText(db, address, message.messageId) ?? withMediaLines(message.body, await describeMedia(media, dependencies.fetch))
+          ? archivedInboundText(db, address, message.messageId) ?? heldText
           : message.body ?? "";
         const metadata = { ...group?.metadata, ...(media.length ? { mediaUrls: media } : {}) };
         const response = await runAgent(db, search, address, text, message.messageId, {
           inbound,
           ...(Object.keys(metadata).length ? { userMessageMetadata: metadata } : {}),
           sendSms: send,
+          ...(dependencies.fetch ? { mediaFetch: dependencies.fetch } : {}),
         });
         // An empty reply is a turn a tapback answered on its own; there is
         // nothing to send and no outbound row to file a provider id on.
