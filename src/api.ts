@@ -247,8 +247,8 @@ export const api = {
   updateSoul: (soul: string | null) =>
     request<{ soul: string | null }>("/integrations/soul", { method: "PUT", body: JSON.stringify({ soul }) }),
   /* The owner's Soul and the memories that bear on a draft, for the browser chat's turn context. */
-  agentContext: (text: string) =>
-    request<AgentTurnMemory>("/agent/context", { method: "POST", body: JSON.stringify({ text }) }, TOOL_TIMEOUT_MS),
+  agentContext: (text: string, signal?: AbortSignal) =>
+    request<AgentTurnMemory>("/agent/context", { method: "POST", body: JSON.stringify({ text }), signal }),
   updateNotifications: (input: Omit<IntegrationState["notifications"], "optedOutAt" | "smsProvider">) =>
     request<IntegrationState["notifications"]>("/integrations/notifications", {
       method: "PUT",

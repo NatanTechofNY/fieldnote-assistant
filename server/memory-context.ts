@@ -8,7 +8,7 @@
  */
 
 import type { AlgoliaSync } from "./algolia.ts";
-import { now, OWN_AREA_CLAUSE, queueIndexJob, USER_ID } from "./db.ts";
+import { groupAreas, now, OWN_AREA_CLAUSE, queueIndexJob, USER_ID } from "./db.ts";
 import type { Db } from "./types.ts";
 
 export type FactScope = { areaId: string } | { own: true };
@@ -95,7 +95,10 @@ async function searchedRows(db: Db, search: MemorySearch, text: string, scope: F
     const ids = await Promise.race([
       search.searchMemories(text.slice(0, 300), {
         limit: SEARCH_LIMIT * 2,
-        ...("areaId" in scope ? { life_area_id: scope.areaId } : {}),
+        // hydrate() is what fences the scope; the filter keeps group hits from crowding out the owner's.
+        ...("areaId" in scope
+          ? { life_area_id: scope.areaId }
+          : { exclude_life_area_ids: groupAreas(db).map(area => area.id) }),
       }),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error("memory search timed out")), SEARCH_TIMEOUT_MS);

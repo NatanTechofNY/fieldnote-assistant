@@ -256,6 +256,11 @@ export function rememberGroupMember(
   const name = cleanPersonText(input.name, 60);
   if (!name) throw new Error("That name is empty once cleaned up; ask what they want to be called");
   if (reservedName(name)) throw new Error(`"${name}" is a label the app uses itself; ask for the name they go by`);
+  const nickname = (db.prepare("SELECT assistant_nickname FROM life_areas WHERE id=? AND user_id=?")
+    .get(turn.lifeAreaId, USER_ID) as { assistant_nickname: string | null } | undefined)?.assistant_nickname;
+  if (nickname && nickname.trim().toLowerCase() === name.toLowerCase()) {
+    throw new Error(`"${name}" is what this group calls the assistant; ask for the name they go by`);
+  }
   if (!turn.speakerIsOwner && currentName && currentName.toLowerCase() !== name.toLowerCase()) {
     throw new Error(`This person is already saved as ${currentName}; only the owner can rename them`);
   }

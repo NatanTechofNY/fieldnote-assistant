@@ -632,7 +632,8 @@ export const toolInput = {
   update_soul: z.object({ soul: soulText }),
   update_group_settings: z.object({
     reply_mode: z.enum(["normal", "named_only"]).nullable().optional(),
-    assistant_nickname: assistantNickname.nullable().optional(),
+    // "" clears the nickname; null leaves it alone.
+    assistant_nickname: z.union([assistantNickname, z.literal("")]).nullable().optional(),
   }),
 } as const;
 

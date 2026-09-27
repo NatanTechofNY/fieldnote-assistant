@@ -2,6 +2,7 @@ import { USER_ID, id, lifeAreaSlug, now, queueIndexJob, renameLifeArea } from ".
 import { refreshRosterMemory } from "../group-members.ts";
 import { failure, success } from "../http.ts";
 import { categoryCreate, lifeAreaCreate, lifeAreaPatch } from "../schemas.ts";
+import { assertUsableNickname } from "../soul.ts";
 import type { RouteContext } from "./context.ts";
 
 /**
@@ -95,6 +96,13 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
     // assistant there, so only an area a group owns can carry them.
     const groupSettings = GROUP_FIELDS.some(field => body[field] !== undefined);
     if (groupSettings && !current.thread_id) return failure(res, 400, "Only a group chat's area can have check-ins or a Soul");
+    if (body.assistant_nickname) {
+      try {
+        assertUsableNickname(db, current.id, body.assistant_nickname);
+      } catch (error) {
+        return failure(res, 400, error instanceof Error ? error.message : "That nickname cannot be used");
+      }
+    }
     // The name is on every indexed record of the area, so a rename goes through
     // the helper that queues the rewrites; the colour lives only here.
     if (body.name !== undefined && body.name !== current.name) {

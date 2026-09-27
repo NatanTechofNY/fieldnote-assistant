@@ -252,26 +252,49 @@ export function AgentStudioChat() {
   const panelRef = useRef<HTMLDivElement>(null);
   const turnMemoryRef = useRef<AgentTurnMemory>({ soul: null, ownerFacts: [] });
   useEffect(() => {
-    let latest = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlight: AbortController | undefined;
+    let lastText: string | undefined;
+    // Each lookup is a search, so only a settled, changed draft asks, and a
+    // newer one cancels the one before it.
     const refresh = (text: string) => {
-      const call = ++latest;
-      api.agentContext(text)
-        .then(memory => { if (call === latest) turnMemoryRef.current = memory; })
+      clearTimeout(timer);
+      if (text === lastText) return;
+      lastText = text;
+      inFlight?.abort();
+      const controller = new AbortController();
+      inFlight = controller;
+      api.agentContext(text, controller.signal)
+        .then(memory => { if (inFlight === controller) turnMemoryRef.current = memory; })
         .catch(() => undefined);
     };
     refresh("");
     const root = panelRef.current;
+    const draft = () => root?.querySelector("textarea")?.value ?? "";
     const onInput = (event: Event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return;
-      const text = event.target.value;
+      const text = event.target.value.trim();
       clearTimeout(timer);
-      timer = setTimeout(() => refresh(text), 350);
+      if (text.length < 3) return;
+      timer = setTimeout(() => refresh(text), 800);
+    };
+    // Sending does not wait for the debounce: the links in the message have
+    // to be registered before the agent can ask to read them.
+    const onSend = (event: Event) => {
+      const sending = event instanceof KeyboardEvent
+        ? event.key === "Enter" && !event.shiftKey && event.target instanceof HTMLTextAreaElement
+        : event.target instanceof Element && Boolean(event.target.closest("button[type='submit'], .ais-ChatPrompt-submit"));
+      if (sending) refresh(draft().trim());
     };
     root?.addEventListener("input", onInput);
+    root?.addEventListener("keydown", onSend, true);
+    root?.addEventListener("click", onSend, true);
     return () => {
       clearTimeout(timer);
+      inFlight?.abort();
       root?.removeEventListener("input", onInput);
+      root?.removeEventListener("keydown", onSend, true);
+      root?.removeEventListener("click", onSend, true);
     };
   }, []);
   // The server executor owns validation, delete confirmation, and clear_fields

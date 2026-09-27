@@ -4,7 +4,7 @@ import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
-  archiveReactionText, failAgentTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
+  archivedInboundText, archiveReactionText, failAgentTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
   recordOutboundProviderMessage, runSmsAgent,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
@@ -1005,7 +1005,9 @@ export async function runWorkerOnce(
         stopTyping = group ? () => {} : showTyping(db, message.from);
         // A picture reaches the agent as a description, which is also what the
         // archive keeps; the link rides along in the metadata.
-        const text = withMediaLines(message.body, await describeMedia(media, dependencies.fetch));
+        const text = media.length
+          ? archivedInboundText(db, address, message.messageId) ?? withMediaLines(message.body, await describeMedia(media, dependencies.fetch))
+          : message.body ?? "";
         const metadata = { ...group?.metadata, ...(media.length ? { mediaUrls: media } : {}) };
         const response = await runAgent(db, search, address, text, message.messageId, {
           inbound,

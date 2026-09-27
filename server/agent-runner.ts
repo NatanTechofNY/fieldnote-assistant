@@ -6,6 +6,7 @@ import { getNotificationPreferences, type SmsProvider } from "./integrations.ts"
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
+import { hasImageDescription } from "./image-input.ts";
 import { relevantFacts } from "./memory-context.ts";
 import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
 import { executeAgentTool, ownRecordsOnly, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
@@ -607,6 +608,19 @@ export function archiveReactionText(
   return saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, reactionText: true });
 }
 
+/**
+ * The text an earlier attempt already archived for this inbound message, so a
+ * retry answers the same words rather than paying to describe its pictures again.
+ */
+export function archivedInboundText(db: Db, address: string, providerMessageId: string | undefined): string | undefined {
+  if (!providerMessageId) return undefined;
+  const row = db.prepare(`
+    SELECT m.content FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+    WHERE t.user_id=? AND t.channel='sms' AND t.address=? AND m.direction='inbound' AND m.provider_message_id=?
+  `).get(USER_ID, address, providerMessageId) as { content: string } | undefined;
+  return row?.content;
+}
+
 /** Whether the message is an inline reply to one of the assistant's own messages. */
 function repliesToAssistant(db: Db, threadId: string, inbound: InboundContext | undefined): boolean {
   const parents = [inbound?.replyTo, inbound?.threadOriginator].filter((handle): handle is string => Boolean(handle));
@@ -647,7 +661,8 @@ export function holdUntilNamed(
   const since = new Date(Date.now() - EVENING_ANSWER_WINDOW_MS).toISOString();
   const eveningAsked = db.prepare(`
     SELECT 1 found FROM channel_messages
-    WHERE thread_id=? AND role='assistant' AND json_extract(metadata_json,'$.kind')='group_evening' AND created_at>=?
+    WHERE thread_id=? AND role='assistant' AND status<>'failed'
+      AND json_extract(metadata_json,'$.kind')='group_evening' AND created_at>=?
     LIMIT 1
   `).get(thread.id, since);
   if (eveningAsked) return false;
@@ -1015,6 +1030,10 @@ export async function runChannelAgent(
     }),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
     inboundText: options.internal ? undefined : body,
+    ...(options.internal ? { internal: true } : {}),
+    // A picture's description quotes words the sender did not write, like a
+    // page does, so the same refusals apply from the start of the turn.
+    ...(!options.internal && hasImageDescription(body) ? { readWeb: true, readUntrusted: true } : {}),
     sendSms: options.sendSms,
     ...(options.internal && typeof options.userMessageMetadata?.kind === "string" ? { appTurn: options.userMessageMetadata.kind } : {}),
   };
@@ -1176,6 +1195,19 @@ export async function runChannelAgent(
     && aimedAtAssistant(db, thread.id, inboundId, body, options.inbound, speaker?.speaker)) {
     void setMark(WORKING_MARK);
   }
+  /*
+   * On the owner's own turn nothing is fenced, so a search or a conversation
+   * read can hand back what someone in a group wrote. That text could be
+   * asking to change how the assistant talks to the owner, so once a result
+   * carries a group's area or thread, the owner's Soul is off limits for the
+   * rest of the turn.
+   */
+  const groupMarkers = context.scope ? [] : groupAreas(db).flatMap(area => [area.id, area.thread_id]);
+  const noteGroupContent = (turn: ToolTurnContext, output: unknown) => {
+    if (turn.readUntrusted || !groupMarkers.length || output === undefined) return;
+    const serialized = JSON.stringify(output) ?? "";
+    if (groupMarkers.some(marker => serialized.includes(marker))) turn.readUntrusted = true;
+  };
   const deadline = Date.now() + TURN_BUDGET_MS;
   try {
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
@@ -1191,6 +1223,8 @@ export async function runChannelAgent(
         && part.output !== undefined
       )) {
         saveToolTrace(db, thread.id, part);
+        // Hosted search hits arrive already answered, so this is where one from a group is seen.
+        noteGroupContent(context, part.output);
       }
       const toolParts = response.parts.filter(part =>
         typeof part.type === "string"
@@ -1240,7 +1274,7 @@ export async function runChannelAgent(
          * stay_quiet. Without any of those, silence is a model that forgot to
          * answer, and the fallback says so.
          */
-        if (!text && (context.reacted || context.sentText || context.stayedQuiet)) {
+        if (!text && (context.reacted || context.sentText || context.stayedQuiet || context.adjustedVoice)) {
           search.flushSoon();
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
         }
@@ -1274,6 +1308,7 @@ export async function runChannelAgent(
         if (!GESTURE_TOOLS.has(toolName)) lookedUp = true;
         try {
           const data = await executeAgentTool(db, search, toolName, part.input || {}, context);
+          noteGroupContent(context, data);
           // An undefined payload disappears from the serialized body, leaving a
           // bare `{"success":true}` that reads as a truncated result rather than
           // a confirmation. An explicit null says the write landed and returned

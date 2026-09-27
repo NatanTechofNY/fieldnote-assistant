@@ -30,12 +30,48 @@ function privateV4(address: string): boolean {
     || (a === 198 && (b === 18 || b === 19));
 }
 
+/** The eight 16-bit groups of an IPv6 address, a trailing dotted IPv4 part included. */
+function v6Groups(address: string): number[] | null {
+  let text = address.toLowerCase().split("%")[0];
+  const dotted = text.match(/(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  if (dotted) {
+    const [a, b, c, d] = dotted.split(".").map(Number);
+    text = text.slice(0, -dotted.length) + `${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, tail] = text.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail !== undefined && tail ? tail.split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if (tail === undefined ? left.length !== 8 : missing < 0) return null;
+  const groups = [...left, ...Array(tail === undefined ? 0 : missing).fill("0"), ...right].map(group => parseInt(group, 16));
+  return groups.length === 8 && groups.every(group => Number.isInteger(group) && group >= 0 && group <= 0xffff) ? groups : null;
+}
+
+const v4Of = (high: number, low: number) => `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+
+/*
+ * IPv6 is decoded rather than matched as text: the URL parser writes
+ * [::ffff:127.0.0.1] as [::ffff:7f00:1], and NAT64, 6to4, and the old
+ * IPv4-compatible form all carry an IPv4 address that is judged as one.
+ */
 function privateAddress(address: string): boolean {
   if (isIP(address) === 4) return privateV4(address);
-  const lower = address.toLowerCase();
-  const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-  if (mapped) return privateV4(mapped);
-  return lower === "::" || lower === "::1" || /^f[cd]/.test(lower) || /^fe[89ab]/.test(lower) || lower.startsWith("ff");
+  const groups = v6Groups(address);
+  if (!groups) return true;
+  const zeroPrefix = (count: number) => groups.slice(0, count).every(group => group === 0);
+  if (zeroPrefix(8)) return true;
+  if (zeroPrefix(7) && groups[7] === 1) return true;
+  if (zeroPrefix(5) && groups[5] === 0xffff) return privateV4(v4Of(groups[6], groups[7]));
+  if (zeroPrefix(6)) return privateV4(v4Of(groups[6], groups[7]));
+  if (groups[0] === 0x64 && groups[1] === 0xff9b) return privateV4(v4Of(groups[6], groups[7]));
+  if (groups[0] === 0x2002) return privateV4(v4Of(groups[1], groups[2]));
+  const first = groups[0];
+  return (first & 0xfe00) === 0xfc00 // unique local
+    || (first & 0xffc0) === 0xfe80 // link-local
+    || (first & 0xff00) === 0xff00 // multicast
+    || first === 0x100 // discard
+    || (first === 0x2001 && groups[1] === 0xdb8) // documentation
+    || (first === 0x2001 && groups[1] === 0); // Teredo
 }
 
 /** Refuses a URL that is not https or whose host resolves to any non-public address. */

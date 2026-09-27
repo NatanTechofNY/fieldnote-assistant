@@ -1544,7 +1544,7 @@
           "assistant_nickname": {
             "type": ["string", "null"],
             "maxLength": 40,
-            "description": "What the group calls you (\"goop\"), which you answer to like your own name; null to leave it"
+            "description": "What the group calls you (\"goop\"): 2+ letters, not a common word or someone's name. \"\" to drop it, null to leave it"
           }
         },
         "required": ["reply_mode", "assistant_nickname"],

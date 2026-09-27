@@ -68,6 +68,12 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
         return failure(res, 400, message);
       }
       if (/^GIPHY /.test(message)) return failure(res, 502, message);
+      // How the assistant talks changes only on a person's own words, and a
+      // nickname has to be one nobody says by accident.
+      if (/^This turn read text someone else wrote|^This turn is the app writing/.test(message)) return failure(res, 409, message);
+      if (/is too common a word to answer to|is the name of someone in the chat|^Pass reply_mode/.test(message)) {
+        return failure(res, 400, message);
+      }
       if (/^Web access has reached its limit/.test(message)) return failure(res, 429, message);
       throw error;
     }

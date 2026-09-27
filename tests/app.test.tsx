@@ -1159,11 +1159,12 @@ describe("attaching a record to the agent", () => {
     await userEvent.keyboard("{Meta>}i{/Meta}");
     await expectPanel(true);
     const panel = agentPanel() as HTMLElement;
-    const before = requestedUrls.length;
+    await waitFor(() => expect(requestedUrls.some(url => url.includes("/api/agent/context"))).toBe(true));
     await userEvent.type(within(panel).getByPlaceholderText(/Ask about your work/), "what should I order?");
-    // The settled draft is looked up again, so the facts match what was typed.
-    await waitFor(() => expect(requestedUrls.slice(before).some(url => url.includes("/api/agent/context"))).toBe(true));
+    const before = requestedUrls.length;
     await userEvent.click(within(panel).getByRole("button", { name: "Send message" }));
+    // Sending looks the message up at once, so the links in it are readable before the agent asks.
+    await waitFor(() => expect(requestedUrls.slice(before).some(url => url.includes("/api/agent/context"))).toBe(true));
     expect(await within(panel).findByText("Skip the shrimp.")).toBeInTheDocument();
     const context = lastTurnContext();
     expect(context.soul).toBe("- Keep it short.");

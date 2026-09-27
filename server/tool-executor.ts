@@ -13,6 +13,7 @@ import {
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
+import { withoutMediaLines } from "./image-input.ts";
 import { assertSendableImage, giphyConfig, imagesInMarkdown, isRememberedImage, rememberImages, searchGifs } from "./image-output.ts";
 import { refreshRosterMemory, rememberGroupMember } from "./group-members.ts";
 import {
@@ -42,7 +43,7 @@ const SHARED_LINK_WINDOW_MS = 24 * 60 * 60_000;
  */
 function sharedInThread(db: Db, context: ToolTurnContext | undefined, url: string): boolean {
   if (!context) return false;
-  if (context.inboundText && linksIn(context.inboundText).includes(url)) return true;
+  if (context.inboundText && linksIn(withoutMediaLines(context.inboundText)).includes(url)) return true;
   const since = new Date(Date.now() - SHARED_LINK_WINDOW_MS).toISOString();
   const rows = db.prepare(`
     SELECT content FROM channel_messages
@@ -50,7 +51,7 @@ function sharedInThread(db: Db, context: ToolTurnContext | undefined, url: strin
       AND COALESCE(json_extract(metadata_json,'$.internal'),0)=0
     ORDER BY created_at DESC LIMIT 50
   `).all(context.threadId, since, "%https://%") as Array<{ content: string }>;
-  return rows.some(row => linksIn(row.content).includes(url));
+  return rows.some(row => linksIn(withoutMediaLines(row.content)).includes(url));
 }
 
 /**
@@ -313,6 +314,18 @@ export type ToolTurnContext = {
    * cannot talk the model into one with a `confirmed` flag it sets itself.
    */
   readWeb?: boolean;
+  /**
+   * Set once the turn has put text in front of the model that the person
+   * answering did not write: anything `readWeb` covers, a picture's quoted
+   * words, or — on the owner's own turn — records and messages people wrote in
+   * a group. The Soul and the group settings change only on a person's own
+   * words, so both refuse from then on.
+   */
+  readUntrusted?: boolean;
+  /** An app-composed turn of any kind, named or not. */
+  internal?: boolean;
+  /** Set once update_soul or update_group_settings has landed: the change is the answer, and no text is owed. */
+  adjustedVoice?: boolean;
   /** How a tool that texts mid-turn sends; the active provider unless a test supplies one. */
   sendSms?: SmsSender;
   /**
@@ -358,6 +371,43 @@ const OWNER_ONLY_TOOLS = new Set([
 ]);
 
 const DELETE_TOOLS = new Set(["delete_todo", "delete_memory", "delete_reminder"]);
+
+/**
+ * The browser route has no turn context, so its web reads are remembered
+ * here: for a while after one, the owner's Soul changes only from Settings.
+ */
+const BROWSER_UNTRUSTED_MS = 15 * 60_000;
+let browserReadUntrustedAt = 0;
+
+/** Forgets the browser's last outside read; tests start from nothing. */
+export function resetBrowserTurnState(): void {
+  browserReadUntrustedAt = 0;
+}
+
+/**
+ * How the assistant talks changes only on a person's own words: never on an
+ * app-composed turn, and never once the turn has read text someone else
+ * wrote, which could be asking for it.
+ */
+function assertOwnWords(context: ToolTurnContext | undefined, what: string): void {
+  if (context?.internal || context?.appTurn) throw new Error(`This turn is the app writing, not a person; ${what} can change only when someone asks`);
+  const untrusted = context
+    ? context.readWeb || context.readUntrusted
+    : Date.now() - browserReadUntrustedAt < BROWSER_UNTRUSTED_MS;
+  if (untrusted) {
+    throw new Error(`This turn read text someone else wrote, so ${what} can change only on a person's own message; ask them to say it again, or the owner can change it in Settings`);
+  }
+}
+
+/** Marks a turn as having read outside text: a page, a search result, a GIF's title. */
+function markReadWeb(context: ToolTurnContext | undefined): void {
+  if (context) {
+    context.readWeb = true;
+    context.readUntrusted = true;
+  } else {
+    browserReadUntrustedAt = Date.now();
+  }
+}
 
 /** Tools that put something in the chat besides the turn's own reply. */
 const SENDING_TOOLS = new Set(["send_message", "send_image", "send_product_cards"]);
@@ -540,7 +590,7 @@ export async function executeAgentTool(
   if (scope && OWNER_ONLY_TOOLS.has(name)) throw new Error(`${name} is not available in a group chat`);
   if (context?.readWeb && DELETE_TOOLS.has(name)) {
     throw new Error(
-      "This turn read a web page, so a delete needs the user's own go-ahead: ask them, and delete on their reply. Explicit confirmation is required",
+      "This turn read a web page or the words in a picture, so a delete needs the user's own go-ahead: ask them, and delete on their reply. Explicit confirmation is required",
     );
   }
   const ownOnly = ownRecordsOnly(context);
@@ -609,22 +659,23 @@ export async function executeAgentTool(
    * words asking for it have to be a person's.
    */
   if (name === "update_soul") {
-    if (context?.appTurn) throw new Error("This turn is the app writing, not a person; the Soul changes only when someone asks");
-    if (context?.readWeb) throw new Error("This turn read a web page, so the Soul can change only on a person's own message; ask them");
+    assertOwnWords(context, "the Soul");
     const soul = input.soul as string;
-    if (scope) {
-      const saved = setGroupSoul(db, scope.lifeAreaId, soul);
-      return { soul: saved, applies_to: "this group chat" };
-    }
-    return { soul: setOwnerSoul(db, soul), applies_to: "your own chats with the owner" };
+    const saved = scope
+      ? { soul: setGroupSoul(db, scope.lifeAreaId, soul), applies_to: "this group chat" }
+      : { soul: setOwnerSoul(db, soul), applies_to: "your own chats with the owner" };
+    if (context) context.adjustedVoice = true;
+    return saved;
   }
   if (name === "update_group_settings") {
     if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat");
-    if (context.appTurn) throw new Error("This turn is the app writing, not a person; group settings change only when someone asks");
+    assertOwnWords(context, "group settings");
     const replyMode = (input.reply_mode as ReplyMode | null | undefined) ?? undefined;
-    const nickname = (input.assistant_nickname as string | null | undefined) ?? undefined;
+    // "" clears the nickname; null leaves it as it is.
+    const nickname = input.assistant_nickname === "" ? null : (input.assistant_nickname as string | null | undefined) ?? undefined;
     if (replyMode === undefined && nickname === undefined) throw new Error("Pass reply_mode, assistant_nickname, or both");
     const voice = setGroupSettings(db, scope.lifeAreaId, { replyMode, assistantNickname: nickname });
+    context.adjustedVoice = true;
     return { reply_mode: voice.replyMode, assistant_nickname: voice.assistantNickname };
   }
 
@@ -671,7 +722,8 @@ export async function executeAgentTool(
     // should be able to talk it into ignoring one.
     const nickname = groupVoice(db, scope.lifeAreaId).assistantNickname;
     if (context.inboundText && addressesAssistant(context.inboundText, nickname)) {
-      throw new Error(`This message names ${nickname ?? ASSISTANT_NAME}; it is for you, whoever wrote it`);
+      const named = addressesAssistant(context.inboundText) ? ASSISTANT_NAME : nickname;
+      throw new Error(`This message names ${named}; it is for you, whoever wrote it`);
     }
     context.stayedQuiet = true;
     // Who was passed over is kept beside why, so a suppressed request from the
@@ -690,7 +742,7 @@ export async function executeAgentTool(
     const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 8);
     const results = await countedWebCall(db, context, () => searchWeb(input.query as string, limit));
     rememberResults(context?.threadId ?? "web", results);
-    if (context) context.readWeb = true;
+    markReadWeb(context);
     // Google answers "weather tomorrow" with its own widget and no organic
     // results at all, while "weather" alone returns the forecast sites.
     const hint = results.length ? undefined
@@ -706,7 +758,7 @@ export async function executeAgentTool(
       throw new Error("Only pages returned by web_search or links someone in this conversation sent can be read; pass one of those URLs exactly");
     }
     const page = await countedWebCall(db, context, () => readWebPage(url));
-    if (context) context.readWeb = true;
+    markReadWeb(context);
     // The pictures on a page it read are ones send_image may pass on.
     rememberImages(context?.threadId ?? "web", imagesInMarkdown(page.text));
     const hint = page.text ? undefined
@@ -725,9 +777,11 @@ export async function executeAgentTool(
     giphyConfig();
     const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 8);
     const gifs = await countedWebCall(db, context, () => searchGifs(input.query as string, limit));
+    // Uploaders write the titles, so they are outside text like a search snippet.
+    markReadWeb(context);
     rememberImages(context?.threadId ?? "web", gifs.map(gif => gif.url));
     const hint = gifs.length ? undefined : "No GIFs. Try once more with one or two plainer words, e.g. \"happy dance\"";
-    return { source: "giphy", gifs, ...(hint ? { hint } : {}) };
+    return { source: "giphy", untrusted: true, gifs, ...(hint ? { hint } : {}) };
   }
   if (name === "send_image") {
     const url = input.url as string;
@@ -735,9 +789,9 @@ export async function executeAgentTool(
     if (!isRememberedImage(context?.threadId ?? "web", url)) {
       throw new Error("Only a picture find_gif returned or one on a page read_web_page read can be sent; pass its URL exactly");
     }
-    await assertSendableImage(url);
     // The browser has nowhere to drop an attachment; the agent shows the link instead.
     if (!context || context.channel !== "sms") return { channel: "web", sent: false, url };
+    await assertSendableImage(url);
     const send = context.sendSms ?? sendSms;
     const delivered = await send(db, context.address, caption, { mediaUrl: url, ...(context.groupId ? { groupId: context.groupId } : {}) });
     insertOutboundChannelMessage(db, context.threadId, caption || "(picture)", delivered.sid, delivered.status, {
