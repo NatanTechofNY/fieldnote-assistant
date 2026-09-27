@@ -677,7 +677,6 @@ function crossChatTurn(
     SELECT content FROM channel_messages
     WHERE thread_id=? AND role='user' AND direction='inbound' AND created_at>=?
       AND COALESCE(json_extract(metadata_json,'$.internal'),0)=0
-    ORDER BY created_at DESC LIMIT 10
   `).all(context.threadId, since) as Array<{ content: string }>;
   const asked = [context.inboundText ?? "", ...recent.map(row => row.content)]
     .map(text => withoutMediaLines(text).toLowerCase()).join("\n");
