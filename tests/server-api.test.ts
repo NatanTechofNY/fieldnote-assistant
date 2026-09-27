@@ -1474,7 +1474,7 @@ describe("Agent Studio configuration sync", () => {
       agentId: "agent",
       fetcher,
     });
-    assert.equal(result.clientTools, 40);
+    assert.equal(result.clientTools, 42);
     assert.equal(result.preservedTools, 1, "unrelated tools survive, the search tool is rebuilt not preserved");
     assert.equal(result.searchIndices, 3);
     assert.deepEqual(calls.map(call => call.method), ["GET", "PATCH", "POST"]);
@@ -1533,7 +1533,7 @@ describe("Agent Studio configuration sync", () => {
       assert.deepEqual(controls.facets.default, expected, `${index.index} exposes only safe facets`);
       assert.deepEqual(parameters.facets, expected, `${index.index} requests the same set it allows`);
     }
-    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 40);
+    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 42);
     assert.ok(!patch.tools.some(tool => tool.name === "list_memories"));
     assert.ok(patch.tools.some(tool => tool.name === "list_jira_issues" && "inputSchema" in tool));
     assert.ok(patch.tools.some(tool => tool.name === "create_memory" && "inputSchema" in tool));
@@ -2245,7 +2245,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
     const declared = Object.keys(toolInput);
-    assert.equal(declared.length, 40, "the tool contract changed; extend this test with it");
+    assert.equal(declared.length, 42, "the tool contract changed; extend this test with it");
     // The Atlassian tools read a remote system rather than SQLite, so they are
     // exercised against a stubbed site in their own block instead of here, as
     // are the shopping tools, which read the store catalog, and the web tools.
@@ -2395,6 +2395,8 @@ describe("agent tools over /api/agent/tools/:name", () => {
       ...web,
       // Exercised with a stubbed GIPHY and image host in the web tools block.
       "find_gif", "send_image",
+      // Exercised in and out of a group in their own block.
+      "update_soul", "update_group_settings",
     ]);
     assert.deepEqual(declared.filter(name => !exercised.has(name)), [], "every declared tool must be covered");
   });
@@ -9966,5 +9968,64 @@ describe("authentication", () => {
     delete process.env.APP_ADMIN_PASSWORD;
     const { api } = fixture();
     await api.get("/api/todos").expect(200);
+  });
+});
+
+describe("the Soul and group settings", () => {
+  function groupContext(db: Db, threadId = "thread_soul_group") {
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES(?,?,'sms',?,?,?,?)
+    `).run(threadId, USER_ID, `group:${threadId}`, `alg_cnv_${threadId}`, stamp, stamp);
+    const area = ensureGroupLifeArea(db, threadId, "Goopers");
+    const context: ToolTurnContext = {
+      channel: "sms", address: `group:${threadId}`, threadId, provider: "sendblue", groupId: threadId,
+      scope: { lifeAreaId: area.id, threadId }, speakerIsOwner: false, inboundMessageHandle: "SB_soul",
+    };
+    return { area, context };
+  }
+
+  it("writes the group's Soul in a group and the owner's everywhere else, never one from the other", async () => {
+    const { db, api } = fixture();
+    const { area, context } = groupContext(db);
+    const run = (name: string, input: object, turn?: ToolTurnContext) => executeAgentTool(db, { flushSoon() {} }, name, input, turn);
+
+    const inGroup = await run("update_soul", { soul: "- One line.\n- No follow-up questions." }, context) as { applies_to: string };
+    assert.equal(inGroup.applies_to, "this group chat");
+    const own = (await api.post("/api/agent/tools/update_soul").send({ soul: "- Dry humour is fine." }).expect(200)).body.data;
+    assert.equal(own.applies_to, "your own chats with the owner");
+
+    const integrations = (await api.get("/api/integrations").expect(200)).body.data;
+    assert.equal(integrations.soul, "- Dry humour is fine.", "the group's feedback never reaches the owner's Soul");
+    const areas = (await api.get("/api/life-areas").expect(200)).body.data as Array<{ id: string; soul: string | null }>;
+    assert.equal(areas.find(row => row.id === area.id)?.soul, "- One line.\n- No follow-up questions.");
+
+    await assert.rejects(run("update_soul", { soul: "- Be loud." }, { ...context, readWeb: true }), /read a web page/);
+    await assert.rejects(run("update_soul", { soul: "- Be loud." }, { ...context, appTurn: "daily_digest" }), /app writing/);
+
+    // The owner edits both by hand; emptying one clears it.
+    assert.equal((await api.put("/api/integrations/soul").send({ soul: "  " }).expect(200)).body.data.soul, null);
+    await api.patch(`/api/life-areas/${area.id}`).send({ soul: "", reply_mode: "named_only", assistant_nickname: "Goop" }).expect(200);
+    const work = areas.find(row => (row as { slug?: string }).slug === "work") as { id: string };
+    await api.patch(`/api/life-areas/${work.id}`).send({ soul: "- nope" }).expect(400);
+    const edited = db.prepare("SELECT soul,reply_mode,assistant_nickname FROM life_areas WHERE id=?").get(area.id);
+    assert.deepEqual({ ...edited as object }, { soul: null, reply_mode: "named_only", assistant_nickname: "Goop" });
+  });
+
+  it("lets anyone in a group switch to answering only when named, and back", async () => {
+    const { db, api } = fixture();
+    const { area, context } = groupContext(db);
+    const quiet = await executeAgentTool(db, { flushSoon() {} }, "update_group_settings", { reply_mode: "named_only", assistant_nickname: null }, context);
+    assert.deepEqual(quiet, { reply_mode: "named_only", assistant_nickname: null });
+    const named = await executeAgentTool(db, { flushSoon() {} }, "update_group_settings", { reply_mode: null, assistant_nickname: "goop" }, context);
+    assert.deepEqual(named, { reply_mode: "named_only", assistant_nickname: "goop" }, "a field passed as null is left alone");
+    await assert.rejects(
+      executeAgentTool(db, { flushSoon() {} }, "update_group_settings", { reply_mode: null, assistant_nickname: null }, context),
+      /Pass reply_mode, assistant_nickname, or both/,
+    );
+    const web = await api.post("/api/agent/tools/update_group_settings").send({ reply_mode: "normal", assistant_nickname: null }).expect(400);
+    assert.equal(web.body.error, "This conversation is not a group chat");
+    assert.equal((db.prepare("SELECT reply_mode FROM life_areas WHERE id=?").get(area.id) as { reply_mode: string }).reply_mode, "named_only");
   });
 });

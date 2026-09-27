@@ -1506,5 +1506,50 @@
         "additionalProperties": false
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_soul",
+      "description": "Rewrites the Soul: how you talk in this conversation. In a group it is the group's; elsewhere the owner's. Call when someone gives feedback on your tone, length, or style.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "soul": {
+            "type": "string",
+            "maxLength": 1200,
+            "description": "The whole Soul, rewritten: the current rules kept, the new feedback merged in, as short plain bullets such as \"- One line. No follow-up questions.\""
+          }
+        },
+        "required": ["soul"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_group_settings",
+      "description": "Group chats only. Sets whether you answer only when named, and what the group calls you. Pass null for whichever you are not changing.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reply_mode": {
+            "type": ["string", "null"],
+            "enum": ["normal", "named_only", null],
+            "description": "named_only when someone asks you to stay out until named; normal when they ask you back; null to leave it"
+          },
+          "assistant_nickname": {
+            "type": ["string", "null"],
+            "maxLength": 40,
+            "description": "What the group calls you (\"goop\"), which you answer to like your own name; null to leave it"
+          }
+        },
+        "required": ["reply_mode", "assistant_nickname"],
+        "additionalProperties": false
+      }
+    }
   }
 ]

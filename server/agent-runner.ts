@@ -137,6 +137,7 @@ const WRITE_TOOLS = new Set([
   // Naming the group twice is harmless, but a retry should know it was done.
   "name_group_chat",
   "remember_group_member",
+  "update_soul", "update_group_settings",
 ]);
 
 /**

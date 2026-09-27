@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS life_areas (
   checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1)),
   morning_checkin_prompt TEXT,
   evening_checkin_prompt TEXT,
+  soul TEXT,
+  assistant_nickname TEXT,
+  reply_mode TEXT NOT NULL DEFAULT 'normal' CHECK(reply_mode IN ('normal','named_only')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, slug)
@@ -210,6 +213,7 @@ CREATE TABLE IF NOT EXISTS notification_preferences (
   group_allow_all INTEGER NOT NULL DEFAULT 0 CHECK(group_allow_all IN (0,1)),
   evening_checkin_time TEXT,
   evening_checkin_prompt TEXT,
+  soul TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -538,6 +542,15 @@ function migrateMessaging(db: Db): void {
   }
   if (!checkinColumns.has("evening_checkin_prompt")) {
     db.exec("ALTER TABLE notification_preferences ADD COLUMN evening_checkin_prompt TEXT");
+  }
+  // How the assistant talks: the owner's Soul on their own row, and one per
+  // group chat on its area, which also carries what the group calls it and
+  // whether it answers only when named.
+  if (!checkinColumns.has("soul")) db.exec("ALTER TABLE notification_preferences ADD COLUMN soul TEXT");
+  if (!areaColumns.has("soul")) db.exec("ALTER TABLE life_areas ADD COLUMN soul TEXT");
+  if (!areaColumns.has("assistant_nickname")) db.exec("ALTER TABLE life_areas ADD COLUMN assistant_nickname TEXT");
+  if (!areaColumns.has("reply_mode")) {
+    db.exec("ALTER TABLE life_areas ADD COLUMN reply_mode TEXT NOT NULL DEFAULT 'normal' CHECK(reply_mode IN ('normal','named_only'))");
   }
   const timestamp = now();
   db.prepare(`

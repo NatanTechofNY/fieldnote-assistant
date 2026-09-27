@@ -25,6 +25,7 @@ import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
 import { toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
+import { type ReplyMode, setGroupSettings, setGroupSoul, setOwnerSoul } from "./soul.ts";
 import { completeParentIfSettled, completionStats, hasSubtasks, startParentIfPending, syncOccurrenceCompletion } from "./todo-status.ts";
 import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 import {
@@ -589,6 +590,33 @@ export async function executeAgentTool(
     });
     search.flushSoon();
     return result;
+  }
+
+  /*
+   * The Soul follows the conversation: in a group it is the group's, and
+   * anyone there may shape how the assistant talks to them; everywhere else it
+   * is the owner's own. A group turn can never reach the owner's. Neither is
+   * changed by an app-composed turn or after a web page was read, since the
+   * words asking for it have to be a person's.
+   */
+  if (name === "update_soul") {
+    if (context?.appTurn) throw new Error("This turn is the app writing, not a person; the Soul changes only when someone asks");
+    if (context?.readWeb) throw new Error("This turn read a web page, so the Soul can change only on a person's own message; ask them");
+    const soul = input.soul as string;
+    if (scope) {
+      const saved = setGroupSoul(db, scope.lifeAreaId, soul);
+      return { soul: saved, applies_to: "this group chat" };
+    }
+    return { soul: setOwnerSoul(db, soul), applies_to: "your own chats with the owner" };
+  }
+  if (name === "update_group_settings") {
+    if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat");
+    if (context.appTurn) throw new Error("This turn is the app writing, not a person; group settings change only when someone asks");
+    const replyMode = (input.reply_mode as ReplyMode | null | undefined) ?? undefined;
+    const nickname = (input.assistant_nickname as string | null | undefined) ?? undefined;
+    if (replyMode === undefined && nickname === undefined) throw new Error("Pass reply_mode, assistant_nickname, or both");
+    const voice = setGroupSettings(db, scope.lifeAreaId, { replyMode, assistantNickname: nickname });
+    return { reply_mode: voice.replyMode, assistant_nickname: voice.assistantNickname };
   }
 
   if (name === "react_to_message") {

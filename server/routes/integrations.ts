@@ -6,7 +6,8 @@ import { completeExternalEvent, listExternalEvents, pollGranola } from "../event
 import { failure, success } from "../http.ts";
 import { disconnectAtlassian, disconnectGranola, disconnectSendblue, disconnectTwilio, getAtlassianConfig, getGranolaConfig, getNotificationPreferences, getSendbluePublicConfig, getSendblueSecret, getTaskPreferences, getTwilioPublicConfig, getTwilioSecret, saveAtlassianConfig, saveGranolaConfig, saveNotificationPreferences, saveSendblueConfig, saveTaskPreferences, saveTwilioConfig, setSmsProvider } from "../integrations.ts";
 import { isSmsProviderConnected } from "../messaging.ts";
-import { atlassianConfigInput, notificationInput, sendblueConfigInput, smsProviderInput, taskPreferencesInput, twilioConfigInput } from "../schemas.ts";
+import { atlassianConfigInput, notificationInput, ownerSoulInput, sendblueConfigInput, smsProviderInput, taskPreferencesInput, twilioConfigInput } from "../schemas.ts";
+import { ownerSoul, setOwnerSoul } from "../soul.ts";
 import { configureSendblueWebhooks, enableSendblueAcknowledgements, newSendblueWebhookSecret, SENDBLUE_INBOUND_PATH, SENDBLUE_STATUS_PATH, sendSendblueSms, validateSendblueConfig } from "../sendblue-service.ts";
 import { executeAgentTool } from "../tool-executor.ts";
 import { configureTwilioWebhook, sendTwilioSms, validateTwilioConfig } from "../twilio-service.ts";
@@ -24,6 +25,7 @@ export function registerIntegrationRoutes({ app, db, search }: RouteContext): vo
     atlassian: getAtlassianConfig(db),
     notifications: getNotificationPreferences(db),
     tasks: getTaskPreferences(db),
+    soul: ownerSoul(db),
     /* The asks the check-ins use when the owner has not reworded them, shown beside the override fields. */
     checkinDefaults: CHECKIN_DEFAULTS,
     webhookPaths: {
@@ -146,6 +148,8 @@ export function registerIntegrationRoutes({ app, db, search }: RouteContext): vo
   });
   app.put("/api/integrations/tasks", (req, res) =>
     success(res, saveTaskPreferences(db, taskPreferencesInput.parse(req.body))));
+  app.put("/api/integrations/soul", (req, res) =>
+    success(res, { soul: setOwnerSoul(db, ownerSoulInput.parse(req.body).soul) }));
   app.post("/api/integrations/granola/connect", async (req, res) => {
     const body = z.object({ apiKey: z.string().min(10).max(500) }).strict().parse(req.body);
     const response = await fetch("https://public-api.granola.ai/v1/notes?page_size=1", {

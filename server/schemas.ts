@@ -172,6 +172,12 @@ export const lifeAreaCreate = z.object({
 const checkinPrompt = z.string().trim().min(1, "Write the ask, or clear it to use the default")
   .max(CHECKIN_PROMPT_MAX, `Keep the ask under ${CHECKIN_PROMPT_MAX} characters`);
 
+/** A Soul rides on every turn's context, so it stays a short list of rules rather than an essay. */
+export const SOUL_MAX = 1200;
+const soulText = z.string().trim().max(SOUL_MAX, `Keep the Soul under ${SOUL_MAX} characters`);
+const assistantNickname = z.string().trim().min(1).max(40)
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} .'-]*$/u, "A nickname is letters, numbers, and spaces");
+
 /** A request for the agent to draft an ask: which one, what it should be like, and the group when it is a group's. */
 export const askDraftInput = z.object({
   kind: z.enum(["group_morning", "group_evening", "owner_evening"]),
@@ -200,7 +206,15 @@ export const lifeAreaPatch = lifeAreaCreate.partial().extend({
   /** The owner's wording for each ask; null returns to the default. */
   morning_checkin_prompt: checkinPrompt.nullable().optional(),
   evening_checkin_prompt: checkinPrompt.nullable().optional(),
+  /** How the assistant talks in this group; null clears it. */
+  soul: soulText.nullable().optional(),
+  /** What the group calls the assistant, which it answers to like its own name. */
+  assistant_nickname: assistantNickname.nullable().optional(),
+  reply_mode: z.enum(["normal", "named_only"]).optional(),
 }).strict().refine(value => Object.keys(value).length > 0, "No changes provided");
+
+/** The owner's own Soul, edited in Settings; null or empty clears it. */
+export const ownerSoulInput = z.object({ soul: soulText.nullable() }).strict();
 
 export const reminderCreate = z.object({
   todo_id: z.string().min(1).max(100),
@@ -614,6 +628,11 @@ export const toolInput = {
   send_image: z.object({
     url: z.string().trim().url().max(2000),
     caption: z.string().trim().max(300).nullable().optional(),
+  }),
+  update_soul: z.object({ soul: soulText }),
+  update_group_settings: z.object({
+    reply_mode: z.enum(["normal", "named_only"]).nullable().optional(),
+    assistant_nickname: assistantNickname.nullable().optional(),
   }),
 } as const;
 

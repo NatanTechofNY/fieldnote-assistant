@@ -5,16 +5,21 @@ import { categoryCreate, lifeAreaCreate, lifeAreaPatch } from "../schemas.ts";
 import type { RouteContext } from "./context.ts";
 
 /**
- * What a group chat's area carries about its check-ins: the two local times,
- * whether the owner gets a copy, and the owner's wording for each ask. Read
- * and written together; only an area a group owns may have any of them.
+ * What a group chat's area carries beyond its name: its check-ins — the two
+ * local times, whether the owner gets a copy, the owner's wording for each ask
+ * — and how the assistant behaves there: the group's Soul, what the group
+ * calls it, and whether it answers only when named. Read and written together;
+ * only an area a group owns may have any of them.
  */
-const CHECKIN_FIELDS = [
+const GROUP_FIELDS = [
   "morning_checkin_time",
   "evening_checkin_time",
   "checkin_copy_to_owner",
   "morning_checkin_prompt",
   "evening_checkin_prompt",
+  "soul",
+  "assistant_nickname",
+  "reply_mode",
 ] as const;
 
 export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void {
@@ -57,7 +62,7 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
       SELECT id,slug,name,color,
         CASE WHEN slug IN ('work','personal','side-project') THEN 1 ELSE 0 END is_builtin,
         CASE WHEN thread_id IS NOT NULL THEN 1 ELSE 0 END is_group,
-        ${CHECKIN_FIELDS.join(",")}
+        ${GROUP_FIELDS.join(",")}
       FROM life_areas WHERE user_id=? ORDER BY
         CASE slug WHEN 'work' THEN 0 WHEN 'personal' THEN 1 WHEN 'side-project' THEN 2 ELSE 3 END,name
     `).all(USER_ID);
@@ -77,17 +82,19 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
   app.patch("/api/life-areas/:id", (req, res) => {
     const body = lifeAreaPatch.parse(req.body);
     const current = db.prepare(`
-      SELECT id,slug,name,color,thread_id,${CHECKIN_FIELDS.join(",")}
+      SELECT id,slug,name,color,thread_id,${GROUP_FIELDS.join(",")}
       FROM life_areas WHERE id=? AND user_id=?
     `).get(req.params.id, USER_ID) as {
       id: string; slug: string; name: string; color: string; thread_id: string | null;
       morning_checkin_time: string | null; evening_checkin_time: string | null; checkin_copy_to_owner: 0 | 1;
       morning_checkin_prompt: string | null; evening_checkin_prompt: string | null;
+      soul: string | null; assistant_nickname: string | null; reply_mode: "normal" | "named_only";
     } | undefined;
     if (!current) return failure(res, 404, "Life area not found");
-    // The check-ins are texted into a group chat, so only an area a group owns can carry them.
-    const checkins = CHECKIN_FIELDS.some(field => body[field] !== undefined);
-    if (checkins && !current.thread_id) return failure(res, 400, "Only a group chat's area can have check-ins");
+    // The check-ins are texted into a group chat and the rest shape the
+    // assistant there, so only an area a group owns can carry them.
+    const groupSettings = GROUP_FIELDS.some(field => body[field] !== undefined);
+    if (groupSettings && !current.thread_id) return failure(res, 400, "Only a group chat's area can have check-ins or a Soul");
     // The name is on every indexed record of the area, so a rename goes through
     // the helper that queues the rewrites; the colour lives only here.
     if (body.name !== undefined && body.name !== current.name) {
@@ -98,15 +105,16 @@ export function registerTaxonomyRoutes({ app, db, search }: RouteContext): void 
       db.prepare("UPDATE life_areas SET color=?,updated_at=? WHERE id=? AND user_id=?")
         .run(body.color, now(), current.id, USER_ID);
     }
-    // Each check-in field keeps its value unless the patch names it; the copy switch is stored as 0/1.
-    const settings = Object.fromEntries(CHECKIN_FIELDS.map(field => {
+    // Each field keeps its value unless the patch names it; the copy switch is
+    // stored as 0/1, and an emptied Soul is no Soul.
+    const settings = Object.fromEntries(GROUP_FIELDS.map(field => {
       const next = body[field] === undefined ? current[field] : body[field];
-      return [field, typeof next === "boolean" ? Number(next) : next];
-    })) as Record<(typeof CHECKIN_FIELDS)[number], string | number | null>;
-    if (checkins) {
+      return [field, typeof next === "boolean" ? Number(next) : next === "" ? null : next];
+    })) as Record<(typeof GROUP_FIELDS)[number], string | number | null>;
+    if (groupSettings) {
       db.prepare(`
-        UPDATE life_areas SET ${CHECKIN_FIELDS.map(field => `${field}=?`).join(",")},updated_at=? WHERE id=? AND user_id=?
-      `).run(...CHECKIN_FIELDS.map(field => settings[field]), now(), current.id, USER_ID);
+        UPDATE life_areas SET ${GROUP_FIELDS.map(field => `${field}=?`).join(",")},updated_at=? WHERE id=? AND user_id=?
+      `).run(...GROUP_FIELDS.map(field => settings[field]), now(), current.id, USER_ID);
     }
     search.flushSoon();
     return success(res, {

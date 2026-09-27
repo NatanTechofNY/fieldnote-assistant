@@ -56,6 +56,8 @@ export const toolActivityMeta: Record<string, { active: string; done: string; so
   // the agent as a tool result it can answer in words, rather than a stall.
   send_message: { active: "Sending a text", done: "Text sent", source: "Messages" },
   name_group_chat: { active: "Naming the group chat", done: "Group chat named", source: "SQLite" },
+  update_group_settings: { active: "Changing group settings", done: "Group settings changed", source: "SQLite" },
+  update_soul: { active: "Updating how I talk", done: "Soul updated", source: "SQLite" },
 };
 
 function toolResultDetail(output: unknown): string | null {
