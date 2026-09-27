@@ -700,6 +700,13 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 .status-pick-menu button[aria-checked="true"] { color:var(--accent); }
 
 .board { display:grid; grid-template-columns:repeat(4,minmax(240px,1fr)); gap:12px; align-items:start; overflow-x:auto; padding-bottom:12px; }
+.board-lane + .board-lane { margin-top:14px; }
+.board-lane-head { display:flex; align-items:center; gap:8px; margin:0 2px 8px; font-size:12px; color:var(--text-secondary); }
+.board-lane-head strong { font-weight:500; }
+.board-lane-toggle { display:inline-flex; align-items:center; gap:6px; background:none; border:0; padding:0; color:inherit; font:inherit; font-weight:500; cursor:pointer; }
+.board-lane-toggle svg:first-child { transition:transform .12s ease; }
+.board-lane-toggle[aria-expanded="true"] svg:first-child { transform:rotate(90deg); }
+.board-lane.recurring .column { min-height:140px; }
 .column { background:var(--surface-sunken); border:1px solid var(--border); border-radius:var(--radius-md); min-height:400px; }
 .column-head { padding:10px 12px 8px; display:flex; justify-content:space-between; align-items:center; position:sticky; top:0; }
 .column-head strong { display:inline-flex; align-items:center; gap:7px; font-size:12px; font-weight:500; }

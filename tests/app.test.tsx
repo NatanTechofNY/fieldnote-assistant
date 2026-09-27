@@ -2224,6 +2224,30 @@ it("ticks a subtask off from the board card it belongs to", async () => {
   expect(within(card).queryByText("Write the outline")).not.toBeInTheDocument();
 });
 
+/** Repeating work comes round again, so it gets its own lane and folds away. */
+it("splits the board into one-off and recurring lanes", async () => {
+  const repeating = todos.find(item => item.id === "todo_open_parent")!;
+  repeating.recurrence = { freq: "daily", interval: 1, weekdays: [], time: "09:00", lead_minutes: null };
+  try {
+    renderAt("/todos");
+    expect(await screen.findByText("The board.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Board" }));
+
+    const oneOff = await screen.findByRole("group", { name: "One-off" });
+    const recurring = screen.getByRole("group", { name: "Recurring" });
+    expect(within(recurring).getByText("Wrap the sprint")).toBeInTheDocument();
+    expect(within(oneOff).queryByText("Wrap the sprint")).not.toBeInTheDocument();
+    expect(within(oneOff).getByText("Prepare the DevCon demo")).toBeInTheDocument();
+
+    await userEvent.click(within(recurring).getByRole("button", { name: /Recurring/ }));
+    expect(within(recurring).queryByText("Wrap the sprint")).not.toBeInTheDocument();
+    expect(within(recurring).getByText("1")).toBeInTheDocument();
+  } finally {
+    repeating.recurrence = null;
+    localStorage.removeItem("todos:recurring-open");
+  }
+});
+
 /** A step someone has started does not look untouched: its box, a word, and the summary say so. */
 it("shows which of a card's subtasks are in progress", async () => {
   const step = todos.find(item => item.id === "todo_open_sub")!;
