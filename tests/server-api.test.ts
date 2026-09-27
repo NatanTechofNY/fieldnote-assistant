@@ -1474,7 +1474,7 @@ describe("Agent Studio configuration sync", () => {
       agentId: "agent",
       fetcher,
     });
-    assert.equal(result.clientTools, 38);
+    assert.equal(result.clientTools, 40);
     assert.equal(result.preservedTools, 1, "unrelated tools survive, the search tool is rebuilt not preserved");
     assert.equal(result.searchIndices, 3);
     assert.deepEqual(calls.map(call => call.method), ["GET", "PATCH", "POST"]);
@@ -1533,7 +1533,7 @@ describe("Agent Studio configuration sync", () => {
       assert.deepEqual(controls.facets.default, expected, `${index.index} exposes only safe facets`);
       assert.deepEqual(parameters.facets, expected, `${index.index} requests the same set it allows`);
     }
-    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 38);
+    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 40);
     assert.ok(!patch.tools.some(tool => tool.name === "list_memories"));
     assert.ok(patch.tools.some(tool => tool.name === "list_jira_issues" && "inputSchema" in tool));
     assert.ok(patch.tools.some(tool => tool.name === "create_memory" && "inputSchema" in tool));
@@ -2245,7 +2245,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
     const declared = Object.keys(toolInput);
-    assert.equal(declared.length, 38, "the tool contract changed; extend this test with it");
+    assert.equal(declared.length, 40, "the tool contract changed; extend this test with it");
     // The Atlassian tools read a remote system rather than SQLite, so they are
     // exercised against a stubbed site in their own block instead of here, as
     // are the shopping tools, which read the store catalog, and the web tools.
@@ -2393,6 +2393,8 @@ describe("agent tools over /api/agent/tools/:name", () => {
       ...remote,
       ...shopping,
       ...web,
+      // Exercised with a stubbed GIPHY and image host in the web tools block.
+      "find_gif", "send_image",
     ]);
     assert.deepEqual(declared.filter(name => !exercised.has(name)), [], "every declared tool must be covered");
   });
@@ -2718,6 +2720,92 @@ describe("web tools", () => {
       );
     } finally {
       stub.restore();
+    }
+  });
+
+  it("finds a GIF and sends it, and sends only pictures a tool turned up", async () => {
+    const before = process.env.GIPHY_API_KEY;
+    process.env.GIPHY_API_KEY = "giphy_test_key";
+    process.env.BRIGHTDATA_API_TOKEN = "bd_test_token";
+    const gifUrl = "https://media2.giphy.com/media/abc123/giphy-downsized.gif";
+    const pageImage = "https://pics.example.com/dog.jpg";
+    const brightData = stubBrightData({
+      text: tool => tool === "scrape_as_markdown"
+        ? `# Dogs\n\n![a dog](${pageImage})\n![tracker](https://pics.example.com/pixel)`
+        : JSON.stringify({ organic: [{ title: "Dogs", link: "https://dogs.example.com/", description: "Dogs" }] }),
+    });
+    const viaBrightData = globalThis.fetch;
+    const giphyQueries: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.host === "api.giphy.com") {
+        giphyQueries.push(url.searchParams.get("q") ?? "");
+        return Response.json({ data: [
+          { id: "abc123", title: "Happy Dance", images: { downsized: { url: `${gifUrl}?cid=tracking&rid=giphy.gif` } } },
+          { id: "nolink", title: "Broken", images: {} },
+        ] });
+      }
+      if (url.host === "media2.giphy.com") return new Response(null, { headers: { "content-type": "image/gif", "content-length": "900000" } });
+      if (url.host === "pics.example.com") return new Response(null, { headers: { "content-type": "image/jpeg", "content-length": "20000" } });
+      return viaBrightData(input, init);
+    }) as typeof fetch;
+    try {
+      const { db, api } = fixture();
+      const sent: Array<{ body: string; mediaUrl?: string; groupId?: string }> = [];
+      const context: ToolTurnContext = {
+        channel: "sms", address: "+15550100", threadId: "thread_gif",
+        sendSms: async (_db, _to, body, options) => {
+          sent.push({ body, mediaUrl: options?.mediaUrl, groupId: options?.groupId });
+          return { sid: `SB_img_${sent.length}`, status: "QUEUED" };
+        },
+      };
+      db.prepare(`
+        INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+        VALUES('thread_gif',?,'sms','+15550100','alg_cnv_gif',?,?)
+      `).run(USER_ID, new Date().toISOString(), new Date().toISOString());
+
+      await assert.rejects(
+        executeAgentTool(db, { flushSoon() {} }, "send_image", { url: gifUrl, caption: null }, context),
+        /Only a picture find_gif returned/,
+        "a picture no tool turned up is one the model composed",
+      );
+      const found = await executeAgentTool(db, { flushSoon() {} }, "find_gif", { query: "happy dance", limit: 3 }, context) as {
+        gifs: Array<{ url: string }>;
+      };
+      assert.deepEqual(found.gifs.map(gif => gif.url), [gifUrl], "the tracking query is dropped so the link ends in .gif");
+      assert.deepEqual(giphyQueries, ["happy dance"]);
+
+      const result = await executeAgentTool(db, { flushSoon() {} }, "send_image", { url: gifUrl, caption: null }, context) as { sent: boolean };
+      assert.equal(result.sent, true);
+      assert.equal(context.sentText, true, "a picture can be the whole answer");
+      assert.deepEqual(sent, [{ body: "", mediaUrl: gifUrl, groupId: undefined }]);
+      const archived = db.prepare("SELECT content,metadata_json FROM channel_messages WHERE thread_id='thread_gif'").get() as { content: string; metadata_json: string };
+      assert.equal(archived.content, "(picture)");
+      assert.equal(JSON.parse(archived.metadata_json).mediaUrl, gifUrl);
+
+      // A picture on a page it read may go out too; one without an image extension may not.
+      await executeAgentTool(db, { flushSoon() {} }, "web_search", { query: "dogs", limit: 3 }, context);
+      await executeAgentTool(db, { flushSoon() {} }, "read_web_page", { url: "https://dogs.example.com/" }, context);
+      await executeAgentTool(db, { flushSoon() {} }, "send_image", { url: pageImage, caption: "this one" }, context);
+      assert.deepEqual(sent.at(-1), { body: "this one", mediaUrl: pageImage, groupId: undefined });
+      await assert.rejects(
+        executeAgentTool(db, { flushSoon() {} }, "send_image", { url: "https://pics.example.com/pixel", caption: null }, context),
+        /Only a picture find_gif returned/,
+      );
+
+      // The browser has nowhere to put an attachment.
+      await api.post("/api/agent/tools/find_gif").send({ query: "wow", limit: null }).expect(200);
+      const web = (await api.post("/api/agent/tools/send_image").send({ url: gifUrl, caption: null }).expect(200)).body.data;
+      assert.deepEqual(web, { channel: "web", sent: false, url: gifUrl });
+
+      delete process.env.GIPHY_API_KEY;
+      const unconfigured = await api.post("/api/agent/tools/find_gif").send({ query: "wow", limit: null }).expect(503);
+      assert.equal(unconfigured.body.error, "GIF search is not configured");
+    } finally {
+      globalThis.fetch = viaBrightData;
+      brightData.restore();
+      if (before === undefined) delete process.env.GIPHY_API_KEY;
+      else process.env.GIPHY_API_KEY = before;
     }
   });
 

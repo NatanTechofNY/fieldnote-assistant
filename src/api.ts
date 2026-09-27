@@ -16,7 +16,7 @@ const TOOL_TIMEOUT_MS = 20_000;
  * get longer; the server gives up at 30s (`server/web-service.ts`) and answers first.
  */
 const WEB_TOOL_TIMEOUT_MS = 35_000;
-const WEB_TOOLS = new Set(["web_search", "read_web_page"]);
+const WEB_TOOLS = new Set(["web_search", "read_web_page", "find_gif", "send_image"]);
 
 async function request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
   const controller = timeoutMs ? new AbortController() : null;

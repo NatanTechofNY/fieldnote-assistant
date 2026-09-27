@@ -607,6 +607,14 @@ export const toolInput = {
     limit: resultLimit(8),
   }),
   read_web_page: z.object({ url: z.string().trim().url().max(2000) }),
+  find_gif: z.object({
+    query: z.string().trim().min(1).max(100),
+    limit: resultLimit(8),
+  }),
+  send_image: z.object({
+    url: z.string().trim().url().max(2000),
+    caption: z.string().trim().max(300).nullable().optional(),
+  }),
 } as const;
 
 export type ToolName = keyof typeof toolInput;

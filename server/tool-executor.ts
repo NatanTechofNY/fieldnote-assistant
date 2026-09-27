@@ -13,6 +13,7 @@ import {
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
+import { assertSendableImage, giphyConfig, imagesInMarkdown, isRememberedImage, rememberImages, searchGifs } from "./image-output.ts";
 import { refreshRosterMemory, rememberGroupMember } from "./group-members.ts";
 import {
   addressesAssistant, ASSISTANT_NAME, groupIdOfAddress, OWNER_SPEAKER_NAME, speakerLabel, speakerNameOf,
@@ -668,11 +669,46 @@ export async function executeAgentTool(
     }
     const page = await countedWebCall(db, context, () => readWebPage(url));
     if (context) context.readWeb = true;
+    // The pictures on a page it read are ones send_image may pass on.
+    rememberImages(context?.threadId ?? "web", imagesInMarkdown(page.text));
     const hint = page.text ? undefined
       : shared
         ? "The page returned no text (video sites often do). Go by what the link itself shows — the site, the path, the words in it — and never say you cannot open links"
         : "The page returned no text; answer from the search snippets or read another result";
     return { source: "web", untrusted: true, url, ...page, ...(hint ? { hint } : {}) };
+  }
+
+  /*
+   * Pictures out. A GIF search reads nothing of the owner's, so a group may use
+   * it; it shares the web allowance. send_image passes on only a picture a tool
+   * in this conversation turned up: a GIF result, or one on a page it read.
+   */
+  if (name === "find_gif") {
+    giphyConfig();
+    const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 8);
+    const gifs = await countedWebCall(db, context, () => searchGifs(input.query as string, limit));
+    rememberImages(context?.threadId ?? "web", gifs.map(gif => gif.url));
+    const hint = gifs.length ? undefined : "No GIFs. Try once more with one or two plainer words, e.g. \"happy dance\"";
+    return { source: "giphy", gifs, ...(hint ? { hint } : {}) };
+  }
+  if (name === "send_image") {
+    const url = input.url as string;
+    const caption = typeof input.caption === "string" && input.caption.trim() ? input.caption.trim() : "";
+    if (!isRememberedImage(context?.threadId ?? "web", url)) {
+      throw new Error("Only a picture find_gif returned or one on a page read_web_page read can be sent; pass its URL exactly");
+    }
+    await assertSendableImage(url);
+    // The browser has nowhere to drop an attachment; the agent shows the link instead.
+    if (!context || context.channel !== "sms") return { channel: "web", sent: false, url };
+    const send = context.sendSms ?? sendSms;
+    const delivered = await send(db, context.address, caption, { mediaUrl: url, ...(context.groupId ? { groupId: context.groupId } : {}) });
+    insertOutboundChannelMessage(db, context.threadId, caption || "(picture)", delivered.sid, delivered.status, {
+      kind: "image",
+      mediaUrl: url,
+    });
+    context.sentText = true;
+    search.flushSoon();
+    return { channel: "sms", sent: true, message_handle: delivered.sid, status: delivered.status };
   }
 
   /*

@@ -133,7 +133,7 @@ const WRITE_TOOLS = new Set([
   // A tapback changes nothing in SQLite but is just as irreversible from the
   // user's side, and a retried turn that cannot see the first one sends a
   // second. The same goes for a bubble sent mid-turn.
-  "react_to_message", "send_message",
+  "react_to_message", "send_message", "send_image",
   // Naming the group twice is harmless, but a retry should know it was done.
   "name_group_chat",
   "remember_group_member",
@@ -143,9 +143,12 @@ const WRITE_TOOLS = new Set([
  * Tools that act on the conversation itself rather than look something up or
  * change a record. None of them is "working on it": a tapback, a threaded
  * reply, and an early bubble are the answer's own gestures, and the product
- * cards are messages.
+ * cards are messages. A GIF is a gesture too, and finding one is part of it:
+ * a 🔍 on the message before a meme lands would read as a stall.
  */
-const GESTURE_TOOLS = new Set(["react_to_message", "reply_in_thread", "send_product_cards", "send_message", "stay_quiet"]);
+const GESTURE_TOOLS = new Set([
+  "react_to_message", "reply_in_thread", "send_product_cards", "send_message", "stay_quiet", "find_gif", "send_image",
+]);
 
 /**
  * The tapback that sits on the user's message while the turn is looking things

@@ -45,9 +45,14 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       if (/^Atlassian /.test(message)) return failure(res, 502, message);
       // A page no search returned, or one outside the public web, is refused
       // for what it is; the day's cap is spent until tomorrow.
-      if (/^Only (?:pages returned by web_search|https pages|public web pages) /.test(message)) {
+      if (/^Only (?:pages returned by web_search|https pages|public web pages|a picture find_gif returned|https pictures) /.test(message)) {
         return failure(res, 400, message);
       }
+      // A picture the provider could not fetch or would refuse: pick another.
+      if (/^(?:That (?:link|picture|is not a picture)|The link must end|The picture could not be fetched)/.test(message)) {
+        return failure(res, 400, message);
+      }
+      if (/^GIPHY /.test(message)) return failure(res, 502, message);
       if (/^Web access has reached its limit/.test(message)) return failure(res, 429, message);
       throw error;
     }
