@@ -6729,6 +6729,24 @@ describe("Sendblue provider", () => {
       assert.deepEqual(await describeMedia(["https://cdn.example/a.jpg"]), ["[Picture attached — you cannot see pictures right now]"]);
       assert.equal(withMediaLines("look", ["[Image: x]"]), "look\n[Image: x]");
       assert.deepEqual(mediaUrlsOf({ NumMedia: "2", MediaUrl0: "https://api.twilio.com/m/0", MediaUrl1: "http://insecure/1" }), ["https://api.twilio.com/m/0"]);
+
+      // A key from a data-residency project goes to its region's host.
+      process.env.OPENAI_API_KEY = "sk-proj-test";
+      process.env.OPENAI_BASE_URL = "https://us.api.openai.com/v1/";
+      const asked: string[] = [];
+      const regional: typeof fetch = async input => {
+        asked.push(String(input));
+        return String(input).startsWith("https://cdn.example")
+          ? new Response(new Uint8Array([1]), { headers: { "content-type": "image/png" } })
+          : json({ choices: [{ message: { content: "A logo." } }] });
+      };
+      try {
+        assert.deepEqual(await describeMedia(["https://cdn.example/logo.png"], regional), ["[Image: A logo.]"]);
+        assert.equal(asked[1], "https://us.api.openai.com/v1/chat/completions");
+      } finally {
+        delete process.env.OPENAI_API_KEY;
+        delete process.env.OPENAI_BASE_URL;
+      }
     } finally {
       if (before !== undefined) process.env.OPENAI_API_KEY = before;
     }
