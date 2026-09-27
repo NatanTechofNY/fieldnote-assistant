@@ -8,6 +8,7 @@ import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import { hasImageDescription } from "./image-input.ts";
 import { relevantFacts } from "./memory-context.ts";
+import { ownerProfile } from "./profile.ts";
 import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
 import { executeAgentTool, ownRecordsOnly, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
@@ -1045,6 +1046,10 @@ export async function runChannelAgent(
   // but not the facts; their instruction already says what to draw on.
   const voice = group ? groupVoice(db, group.area.id) : undefined;
   const soul = voice ? voice.soul : ownerSoul(db);
+  // Who the owner is travels with their own turns only; a group never reads it,
+  // nor does drafting wording that a group's check-in will be written from.
+  const draftingForGroup = options.userMessageMetadata?.kind === "checkin_ask_draft";
+  const profile = voice || draftingForGroup ? null : ownerProfile(db).profile;
   const facts = options.internal ? [] : await relevantFacts(db, search, group ? { areaId: group.area.id } : { own: true }, body);
   /*
    * The turn context belongs on the message being answered. That is usually
@@ -1077,6 +1082,7 @@ export async function runChannelAgent(
         ? { appTurn: options.userMessageMetadata.kind }
         : {}),
       ...(soul ? { soul } : {}),
+      ...(profile ? { profile } : {}),
       ...(facts.length ? { [group ? "groupFacts" : "ownerFacts"]: facts } : {}),
       ...(voice ? {
         replyMode: voice.replyMode,

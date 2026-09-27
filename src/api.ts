@@ -1,5 +1,5 @@
 import type {
-  AgentTurnMemory, Category, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
+  AgentTurnMemory, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
   ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoStatus,
   UniversalSearchResult,
@@ -244,6 +244,12 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ apply: true }),
   }),
+  updateProfile: (profile: string | null) =>
+    request<OwnerProfile>("/integrations/profile", { method: "PUT", body: JSON.stringify({ profile }) }),
+  /* The agent writes it, so it gets the agent-tool deadline. */
+  refreshProfile: () => request<OwnerProfile>("/integrations/profile/refresh", { method: "POST" }, TOOL_TIMEOUT_MS * 3),
+  setFollowUps: (enabled: boolean) =>
+    request<{ followUps: boolean }>("/integrations/follow-ups", { method: "PUT", body: JSON.stringify({ enabled }) }),
   updateSoul: (soul: string | null) =>
     request<{ soul: string | null }>("/integrations/soul", { method: "PUT", body: JSON.stringify({ soul }) }),
   /* The owner's Soul and the memories that bear on a draft, for the browser chat's turn context. */

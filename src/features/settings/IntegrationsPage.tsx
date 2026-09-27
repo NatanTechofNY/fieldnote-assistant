@@ -184,6 +184,24 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
     onSuccess: (updated) => { refresh(); notify(updated.soul ? "Soul saved" : "Back to the default voice"); },
     onError: (mutationError: Error) => notify(mutationError.message),
   });
+  const profile = useMutation({
+    mutationFn: (next: string | null) => api.updateProfile(next),
+    onSuccess: (saved) => {
+      refresh();
+      notify(saved.profile ? "Profile saved" : "Profile cleared; it will be rewritten from your memories tonight");
+    },
+    onError: (mutationError: Error) => notify(mutationError.message),
+  });
+  const refreshProfile = useMutation({
+    mutationFn: () => api.refreshProfile(),
+    onSuccess: () => { refresh(); notify("Profile rewritten from your memories"); },
+    onError: (mutationError: Error) => notify(mutationError.message),
+  });
+  const followUps = useMutation({
+    mutationFn: (enabled: boolean) => api.setFollowUps(enabled),
+    onSuccess: (result) => { refresh(); notify(result.followUps ? "Follow-ups on" : "Follow-ups off"); },
+    onError: (mutationError: Error) => notify(mutationError.message),
+  });
   const tagPreferences = useMutation({
     mutationFn: () => api.tagPreferences(),
     onSuccess: (result) => notify(result.count
@@ -260,10 +278,38 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
         <SoulEditor
           name="Your Soul"
           value={data.soul ?? null}
-          placeholder={"- Short answers; skip the pleasantries.\n- Dry humour is fine.\n- No emojis."}
+          placeholder={"- Short answers; skip the pleasantries.\n- Dry humour is fine.\n- No emojis.\n- Autonomy: just reschedule things; ask before cancelling anything."}
           saving={soul.isPending}
           onSave={next => soul.mutate(next)}
         />
+        <SoulEditor
+          name="Your profile"
+          title="Profile"
+          setLabel={data.profile?.updatedAt ? `Updated ${format(new Date(data.profile.updatedAt), "MMM d")}` : "Written"}
+          emptyLabel="Not written yet"
+          saveLabel="Save profile"
+          hint="What the assistant knows about you before you say a word. It rewrites this overnight from your memories; edit it to correct anything."
+          value={data.profile?.profile ?? null}
+          placeholder={"People: wife Cementa; sister Natella…\nLife & work: …\nRoutines & preferences: …"}
+          saving={profile.isPending || refreshProfile.isPending}
+          onSave={next => profile.mutate(next)}
+          action={{
+            label: "Rewrite now",
+            icon: refreshProfile.isPending ? <LoaderCircle className="spin" size={13}/> : <RefreshCw size={13}/>,
+            pending: refreshProfile.isPending,
+            onClick: () => refreshProfile.mutate(),
+          }}
+        />
+        <div className="toolbar-actions">
+          <label className="toggle-row compact">
+            <input
+              type="checkbox"
+              checked={data.followUps !== false}
+              onChange={event => followUps.mutate(event.target.checked)}
+            />
+            <span>Follow up once on things I said I&rsquo;d do and haven&rsquo;t marked done</span>
+          </label>
+        </div>
         <p className="integration-copy">
           Each group chat has its own Soul, under Group chats. Facts about you — what you like, allergies, how you
           want things done — are memories: those tagged <code>preference</code> come with every turn.

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { liftProgressMark, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
+import { liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
@@ -31,6 +31,7 @@ import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } fr
 import { describeMedia, mediaUrlsOf, withMediaLines } from "../server/image-input.ts";
 import { relevantFacts } from "../server/memory-context.ts";
 import { assertPublicHost, setHostResolver } from "../server/public-fetch.ts";
+import { ownerProfile, profileState } from "../server/profile.ts";
 
 /** Runs `run` with these variables set (undefined unsets one), then puts back whatever was there before. */
 async function withEnv<T>(vars: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
@@ -6603,7 +6604,7 @@ describe("Sendblue provider", () => {
     `).run(USER_ID, address, stamp, stamp);
     const area = ensureGroupLifeArea(db, "thread_facts", "Home");
     db.prepare("UPDATE life_areas SET soul='- One line.',assistant_nickname='Goop',reply_mode='normal' WHERE id=?").run(area.id);
-    db.prepare("UPDATE notification_preferences SET soul='- Dry humour.' WHERE user_id=?").run(USER_ID);
+    db.prepare("UPDATE notification_preferences SET soul='- Dry humour.',life_profile='People: wife Sarah.' WHERE user_id=?").run(USER_ID);
     const memory = db.prepare(`
       INSERT INTO memories(id,user_id,title,content,kind,life_area_id,tags_json,created_at,updated_at)
       VALUES(?,?,?,?,'fact',?,?,?,?)
@@ -6626,10 +6627,12 @@ describe("Sendblue provider", () => {
     assert.equal(inGroup.replyMode, "normal");
     assert.deepEqual(inGroup.groupFacts?.map(fact => fact.content), ["Halo hates pineapple on pizza", "Sarah prefers mornings"]);
     assert.equal(inGroup.ownerFacts, undefined, "the owner's records never reach a group");
+    assert.equal((contexts[0] as { profile?: string }).profile, undefined, "nor does the owner's profile");
 
     await runSmsAgent(db, fakeSearch(db), RECIPIENT, "pizza tonight?", "SB_pizza_own", { fetcher: capture, inbound: { provider: "sendblue" } });
     const own = contexts[1] as { soul?: string; ownerFacts?: Array<{ content: string }>; groupFacts?: unknown };
     assert.equal(own.soul, "- Dry humour.");
+    assert.equal((contexts[1] as { profile?: string }).profile, "People: wife Sarah.");
     assert.deepEqual(own.ownerFacts?.map(fact => fact.content), ["The owner loves pizza from Joe's", "Keep replies short"]);
     assert.equal(own.groupFacts, undefined);
   });
@@ -9005,6 +9008,135 @@ describe("worker scheduling", () => {
     restore = atUtcTime("23:30");
     try { await runWorkerOnce(db, fakeSearch(db), dependencies); } finally { restore(); }
     assert.deepEqual(sent, ["Reminder: Quiet hours task", "digest"], "a check-in timed inside quiet hours is honoured");
+  });
+
+  it("follows up once, the next morning, on what the owner said they would do and left open", async () => {
+    const { db, api } = schedulingFixture();
+    const laundry = (await api.post("/api/todos").send({ title: "Laundry", due_at: "2030-01-14T21:00:00.000Z" }).expect(201)).body.data;
+    const fold = (await api.post("/api/todos").send({ title: "Fold laundry", parent_id: laundry.id, due_at: "2030-01-14T21:00:00.000Z" }).expect(201)).body.data;
+    await api.post("/api/todos").send({ title: "Call the dentist", due_at: "2030-01-15T08:00:00.000Z" }).expect(201);
+    // 01:00 UTC today, written with an offset: as text it would sort before the cutoff.
+    await api.post("/api/todos").send({ title: "Water the plants", due_at: "2030-01-14T21:00:00-04:00" }).expect(201);
+    // A date with no time is local midnight and means that whole day.
+    await api.post("/api/todos").send({ title: "Renew the parking permit", due_at: "2030-01-15T00:00:00.000Z" }).expect(201);
+    await api.post("/api/todos").send({ title: "Return the library books", due_at: "2030-01-14T00:00:00.000Z" }).expect(201);
+    const oldDone = (await api.post("/api/todos").send({ title: "Book flights", due_at: "2030-01-14T18:00:00.000Z" }).expect(201)).body.data;
+    await api.patch(`/api/todos/${oldDone.id}/status`).send({ status: "done" }).expect(200);
+    const prompts: string[] = [];
+    const sent: string[] = [];
+    const dependencies = {
+      sendSms: async (_db: Db, _to: string, body: string) => {
+        sent.push(body);
+        return { sid: `SM_${sent.length}`, status: "queued" };
+      },
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, prompt: string, _id?: string, options?: { userMessageMetadata?: { kind?: string } }) => {
+        if (options?.userMessageMetadata?.kind === "follow_up") prompts.push(prompt);
+        return { text: "Did the laundry happen last night, or should I move it?", threadId: "thread_follow_up" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    };
+
+    let restore = atUtcTime("09:30");
+    try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
+    assert.deepEqual(sent, [], "it waits for the follow-up time");
+
+    restore = atUtcTime("10:15");
+    try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
+    assert.deepEqual(sent, ["Did the laundry happen last night, or should I move it?"]);
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0], /"Laundry"/);
+    assert.doesNotMatch(prompts[0], /Fold laundry/, "the step rides with its parent");
+    assert.doesNotMatch(prompts[0], /Call the dentist/, "two hours overdue is not a dropped thread yet");
+    assert.doesNotMatch(prompts[0], /Water the plants/, "nine hours overdue, whatever offset the time was written with");
+    assert.doesNotMatch(prompts[0], /parking permit/, "a date-only todo is not overdue on its own day");
+    assert.match(prompts[0], /"Return the library books" \(was due 2030-01-14\)/, "yesterday's is, and it is named by its date");
+    assert.doesNotMatch(prompts[0], /Book flights/, "done is done");
+    const archived = db.prepare("SELECT metadata_json FROM channel_messages WHERE role='assistant' AND json_extract(metadata_json,'$.kind')='follow_up'").get() as { metadata_json: string };
+    const books = (db.prepare("SELECT id FROM todos WHERE title='Return the library books'").get() as { id: string }).id;
+    assert.deepEqual(JSON.parse(archived.metadata_json).todoIds, [books, laundry.id], "most recently due first");
+
+    restore = atUtcTime("11:15");
+    try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
+    assert.equal(sent.length, 1, "one follow-up a day, and each thing is asked about once");
+    assert.ok((db.prepare("SELECT followed_up_at FROM todos WHERE id=?").get(fold.id) as { followed_up_at: string | null }).followed_up_at,
+      "the step the parent's question covered is marked too, so it is not asked about alone tomorrow");
+
+    // Moving a todo to a new time lets it be asked about again at that time.
+    const followedUp = () => (db.prepare("SELECT followed_up_at FROM todos WHERE id=?").get(laundry.id) as { followed_up_at: string | null }).followed_up_at;
+    assert.ok(followedUp());
+    await api.patch(`/api/todos/${laundry.id}`).send({ due_at: "2030-01-18T21:00:00.000Z" }).expect(200);
+    assert.equal(followedUp(), null);
+
+    // The owner can turn them off.
+    await api.put("/api/integrations/follow-ups").send({ enabled: false }).expect(200);
+    assert.equal((await api.get("/api/integrations").expect(200)).body.data.followUps, false);
+  });
+
+  it("never texts the runner's fallback sentence as a follow-up", async () => {
+    const { db, api } = schedulingFixture();
+    await api.post("/api/todos").send({ title: "Laundry", due_at: "2030-01-14T21:00:00.000Z" }).expect(201);
+    const sent: string[] = [];
+    const restore = atUtcTime("10:15");
+    try {
+      await runWorkerOnce(db, fakeSearch(db), {
+        sendSms: async (_db: Db, _to: string, body: string) => { sent.push(body); return { sid: "SM_1", status: "queued" }; },
+        runSmsAgent: async () => ({ text: NO_TEXT_FALLBACK, threadId: "thread_x" }),
+        pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      } as never);
+    } finally { restore(); }
+    assert.deepEqual(sent, []);
+    assert.equal((db.prepare("SELECT followed_up_at FROM todos WHERE title='Laundry'").get() as { followed_up_at: string | null }).followed_up_at, null,
+      "still owed a follow-up");
+  });
+
+  it("rewrites the owner's profile overnight when their facts changed, and hands it to their turns", async () => {
+    const drafts: string[] = [];
+    const { db, api } = fixture(undefined, async prompt => {
+      drafts.push(prompt);
+      return "People: wife Cementa; sister Natella.";
+    });
+    const stamp = "2030-01-14T12:00:00.000Z";
+    db.prepare(`
+      INSERT INTO memories(id,user_id,title,content,kind,tags_json,created_at,updated_at)
+      VALUES('mem_prof_wife',?,'Wife','My wife is Cementa','fact','[]',?,?)
+    `).run(USER_ID, stamp, stamp);
+    db.prepare(`
+      INSERT INTO memories(id,user_id,title,content,kind,tags_json,created_at,updated_at)
+      VALUES('mem_prof_door',?,'Front door key code','Front door key code is 1234.','fact','[]',?,?)
+    `).run(USER_ID, stamp, stamp);
+    const prompts: string[] = [];
+    const dependencies = {
+      sendSms: async () => ({ sid: "SM_x", status: "queued" }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, prompt: string, _id?: string, options?: { userMessageMetadata?: { kind?: string } }) => {
+        if (options?.userMessageMetadata?.kind === "profile_refresh") prompts.push(prompt);
+        return { text: "People: wife Cementa.", threadId: "thread_profile" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    };
+    let restore = atUtcTime("04:30");
+    try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0], /Wife: My wife is Cementa/);
+    assert.doesNotMatch(prompts[0], /1234/, "a code never reaches the profile's source");
+    assert.equal((await api.get("/api/integrations").expect(200)).body.data.profile.profile, "People: wife Cementa.");
+
+    restore = atUtcTime("05:30");
+    try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
+    assert.equal(prompts.length, 1, "nothing changed since, so the night is idle");
+
+    assert.equal((await api.post("/api/agent/context").send({ text: "hi" }).expect(200)).body.data.profile, "People: wife Cementa.");
+    const edited = (await api.put("/api/integrations/profile").send({ profile: "People: wife Cementa; cats Nut and Kid." }).expect(200)).body.data;
+    assert.equal(edited.profile, "People: wife Cementa; cats Nut and Kid.");
+    const rewritten = (await api.post("/api/integrations/profile/refresh").expect(200)).body.data;
+    assert.equal(rewritten.profile, "People: wife Cementa; sister Natella.");
+    assert.match(drafts[0], /The profile as it stands:\nPeople: wife Cementa; cats Nut and Kid\./);
+
+    // Deleting a fact is a change too; with none left, the profile goes with them.
+    assert.equal(profileState(db), "current");
+    db.prepare("DELETE FROM memories WHERE id='mem_prof_wife'").run();
+    assert.equal(profileState(db), "empty");
+    assert.equal(ownerProfile(db).profile, null);
+    await api.post("/api/integrations/profile/refresh").expect(409);
   });
 
   it("sends one daily digest per local day once the digest time has passed", async () => {

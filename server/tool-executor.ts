@@ -345,7 +345,9 @@ export type ToolTurnContext = {
 /** How many rows a speaker-filtered `read_conversation` looks through per call before handing back a cursor. */
 const SPEAKER_SCAN_LIMIT = 5000;
 
-const NO_TOOL_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "checkin_ask_draft", "assistant_say"]);
+const NO_TOOL_APP_TURNS = new Set([
+  "group_morning", "group_evening", "evening_checkin", "checkin_ask_draft", "assistant_say", "follow_up", "profile_refresh",
+]);
 
 /**
  * App-composed turns that report on the owner's own day. A group's work is its
@@ -353,7 +355,7 @@ const NO_TOOL_APP_TURNS = new Set(["group_morning", "group_evening", "evening_ch
  * chat — the reverse of a group turn's fence. The owner asking on their own
  * line is not fenced: "did we clean the kitchen?" is theirs to ask.
  */
-const OWN_RECORDS_APP_TURNS = new Set(["daily_digest", "digest_brief"]);
+const OWN_RECORDS_APP_TURNS = new Set(["daily_digest", "digest_brief", "follow_up", "profile_refresh"]);
 
 export function ownRecordsOnly(context: ToolTurnContext | undefined): boolean {
   return !context?.scope && Boolean(context?.appTurn && OWN_RECORDS_APP_TURNS.has(context.appTurn));

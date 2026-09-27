@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS todos (
   last_completed_at TEXT,
   reply_thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL,
   assistant_says INTEGER NOT NULL DEFAULT 0 CHECK(assistant_says IN (0,1)),
+  followed_up_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -214,6 +215,10 @@ CREATE TABLE IF NOT EXISTS notification_preferences (
   evening_checkin_time TEXT,
   evening_checkin_prompt TEXT,
   soul TEXT,
+  life_profile TEXT,
+  life_profile_updated_at TEXT,
+  life_profile_source TEXT,
+  follow_ups_enabled INTEGER NOT NULL DEFAULT 1 CHECK(follow_ups_enabled IN (0,1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -302,7 +307,7 @@ CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS scheduled_dispatches (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin','evening_checkin')),
+  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin','evening_checkin','follow_up','profile_refresh')),
   idempotency_key TEXT NOT NULL UNIQUE,
   scheduled_for TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending'
@@ -547,6 +552,13 @@ function migrateMessaging(db: Db): void {
   // group chat on its area, which also carries what the group calls it and
   // whether it answers only when named.
   if (!checkinColumns.has("soul")) db.exec("ALTER TABLE notification_preferences ADD COLUMN soul TEXT");
+  // What the assistant knows about the owner's life in a paragraph, rewritten
+  // overnight from their facts, and whether it follows up on dropped threads.
+  if (!checkinColumns.has("life_profile")) db.exec("ALTER TABLE notification_preferences ADD COLUMN life_profile TEXT");
+  if (!checkinColumns.has("life_profile_updated_at")) db.exec("ALTER TABLE notification_preferences ADD COLUMN life_profile_updated_at TEXT");
+  if (!checkinColumns.has("follow_ups_enabled")) {
+    db.exec("ALTER TABLE notification_preferences ADD COLUMN follow_ups_enabled INTEGER NOT NULL DEFAULT 1 CHECK(follow_ups_enabled IN (0,1))");
+  }
   if (!areaColumns.has("soul")) db.exec("ALTER TABLE life_areas ADD COLUMN soul TEXT");
   if (!areaColumns.has("assistant_nickname")) db.exec("ALTER TABLE life_areas ADD COLUMN assistant_nickname TEXT");
   if (!areaColumns.has("reply_mode")) {
@@ -874,6 +886,31 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
     }
     db.prepare("UPDATE scheduled_dispatches SET kind='evening_checkin' WHERE kind='daily_digest' AND idempotency_key LIKE 'evening_checkin:%'").run();
     db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(16,?)").run(now());
+  }
+  const followUpDispatchApplied = db.prepare(
+    "SELECT 1 found FROM schema_migrations WHERE version=17",
+  ).get();
+  if (!followUpDispatchApplied) {
+    // The daily follow-up text and the overnight profile rewrite each claim one dispatch a day.
+    if (!dispatchKindAllows(db, "profile_refresh")) {
+      rebuildScheduledDispatches(db, "v17", [
+        "daily_digest", "reminder", "digest_brief", "group_checkin", "evening_checkin", "follow_up", "profile_refresh",
+      ]);
+    }
+    db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(17,?)").run(now());
+  }
+  // Set once a todo has been followed up on, so a dropped thread is raised once, not every morning.
+  if (!columns(db, "todos").has("followed_up_at")) db.exec("ALTER TABLE todos ADD COLUMN followed_up_at TEXT");
+  // A todo moved to a new time — by the tool or the app — can be asked about
+  // again at that time. A trigger, so no write path can forget to clear it.
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS todos_follow_up_moved AFTER UPDATE OF due_at ON todos
+    WHEN NEW.due_at IS NOT OLD.due_at AND NEW.followed_up_at IS NOT NULL
+    BEGIN UPDATE todos SET followed_up_at=NULL WHERE id=NEW.id; END
+  `);
+  // The fact set the profile was last written from, so a delete or a move is noticed too.
+  if (!columns(db, "notification_preferences").has("life_profile_source")) {
+    db.exec("ALTER TABLE notification_preferences ADD COLUMN life_profile_source TEXT");
   }
   // NeuralSearch is opt-in: it is a paid add-on, so an application without the
   // entitlement gets plain keyword search rather than a failed setup.

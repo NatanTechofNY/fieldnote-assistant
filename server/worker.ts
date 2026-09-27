@@ -14,7 +14,11 @@ import {
   claimExternalEvents, completeExternalEvent, deferExternalEvent, nextExternalEventAvailableAt, pollGranola,
   pruneSettledExternalEvents, STALE_CLAIM_MS, unsettledExternalEventsBefore,
 } from "./event-ingestion.ts";
+import {
+  composeFollowUpTurn, FOLLOW_UP_TIME, FOLLOW_UP_UNTIL, followUpCandidates, followUpsEnabled, markFollowedUp,
+} from "./follow-ups.ts";
 import { describeMedia, mediaUrlsOf, withMediaLines } from "./image-input.ts";
+import { composeProfileTurn, PROFILE_REFRESH_TIME, PROFILE_REFRESH_UNTIL, profileState, setOwnerProfile } from "./profile.ts";
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks, syncOccurrenceCompletion } from "./todo-status.ts";
@@ -622,7 +626,7 @@ async function deliverReminder(
  */
 function claimDispatch(
   db: Db,
-  kind: "daily_digest" | "digest_brief" | "group_checkin" | "evening_checkin",
+  kind: "daily_digest" | "digest_brief" | "group_checkin" | "evening_checkin" | "follow_up" | "profile_refresh",
   key: string,
   scheduledFor: string,
 ): string | null {
@@ -809,6 +813,87 @@ async function deliverEveningCheckin(
     `).run(sent.sid, now(), dispatchId);
   } catch (error) {
     recordDispatchFailure(db, dispatchId, error, "Evening check-in failed");
+  }
+}
+
+/**
+ * One text a day, at most, about what the owner said they would do and has
+ * not marked done. It goes out on the owner's own thread as the assistant's
+ * message, so "yep, did it" or "push it to Sunday" is answered against it.
+ */
+async function deliverFollowUp(
+  db: Db,
+  search: SearchWriter,
+  recipient: string,
+  local: { date: string; time: string },
+  timezone: string,
+  runAgent: typeof runSmsAgent,
+  send: typeof sendSms,
+): Promise<void> {
+  const key = `follow_up:${USER_ID}:${local.date}`;
+  if (dispatchSettled(db, key)) return;
+  const items = followUpCandidates(db, timezone);
+  if (!items.length) return;
+  const dispatchId = claimDispatch(db, "follow_up", key, now());
+  if (!dispatchId) return;
+  try {
+    const response = await runAgent(db, search, `digest:${recipient}`, composeFollowUpTurn(items, { date: local.date, timezone }), undefined, {
+      internal: true,
+      userMessageMetadata: { kind: "follow_up", date: local.date },
+    });
+    // The runner stands a fallback sentence in for an empty answer; it is not something to text.
+    if (!response.text.trim() || response.text === NO_TEXT_FALLBACK) {
+      failAgentTurn(db, response);
+      throw new Error("The follow-up came back empty");
+    }
+    const sent = await send(db, recipient, response.text);
+    recordOutboundChannelMessage(db, "sms", recipient, response.text, sent.sid, sent.status, {
+      kind: "follow_up",
+      date: local.date,
+      todoIds: items.map(item => item.id),
+    });
+    markFollowedUp(db, items);
+    search.flushSoon();
+    db.prepare(`
+      UPDATE scheduled_dispatches SET status='sent',provider_message_id=?,updated_at=? WHERE id=?
+    `).run(sent.sid, now(), dispatchId);
+  } catch (error) {
+    recordDispatchFailure(db, dispatchId, error, "Follow-up failed");
+  }
+}
+
+/** Whether today's dispatch for this key has already gone out or been given up on, so the checks before it can be skipped. */
+function dispatchSettled(db: Db, key: string): boolean {
+  const row = db.prepare("SELECT status FROM scheduled_dispatches WHERE idempotency_key=?").get(key) as { status: string } | undefined;
+  return row?.status === "sent" || row?.status === "failed";
+}
+
+/** Rewrites the owner's profile from their facts once a night, and only when a fact changed. */
+async function refreshProfileOvernight(
+  db: Db,
+  search: SearchWriter,
+  date: string,
+  runAgent: typeof runSmsAgent,
+): Promise<void> {
+  const key = `profile_refresh:${USER_ID}:${date}`;
+  if (dispatchSettled(db, key)) return;
+  if (profileState(db) !== "stale") return;
+  const dispatchId = claimDispatch(db, "profile_refresh", key, now());
+  if (!dispatchId) return;
+  try {
+    const response = await runAgent(db, search, "profile:owner", composeProfileTurn(db), undefined, {
+      internal: true,
+      userMessageMetadata: { kind: "profile_refresh", date },
+    });
+    // An empty answer comes back as the runner's fallback sentence, which must never become the profile.
+    if (!response.text.trim() || response.text === NO_TEXT_FALLBACK) {
+      failAgentTurn(db, response);
+      throw new Error("The profile came back empty");
+    }
+    setOwnerProfile(db, response.text);
+    db.prepare("UPDATE scheduled_dispatches SET status='sent',updated_at=? WHERE id=?").run(now(), dispatchId);
+  } catch (error) {
+    recordDispatchFailure(db, dispatchId, error, "Profile refresh failed");
   }
 }
 
@@ -1092,6 +1177,9 @@ export async function runWorkerOnce(
         send,
       );
     }
+    if (local.time >= FOLLOW_UP_TIME && local.time < FOLLOW_UP_UNTIL && followUpsEnabled(db)) {
+      await deliverFollowUp(db, search, recipient, local, preferences.timezone, runAgent, send);
+    }
     // Briefs run on their own send times inside the same quiet-hours gate, so
     // one enforcement covers every outbound channel message.
     for (const brief of dueDigestBriefs(db, local.time)) {
@@ -1117,6 +1205,11 @@ export async function runWorkerOnce(
         }
       }
     }
+  }
+  // Nothing is sent, so no recipient or quiet hours come into it. Only in its
+  // window: a completion here holds up every inbound reply behind it.
+  if (local.time >= PROFILE_REFRESH_TIME && local.time < PROFILE_REFRESH_UNTIL) {
+    await refreshProfileOvernight(db, search, local.date, runAgent);
   }
   try {
     await pollMeetings(db);

@@ -31,7 +31,9 @@ export type ReplyMode = "normal" | "named_only";
 
 /** A memory the server hands the browser chat to carry on a turn. */
 export type MemoryFact = { title: string | null; content: string; tags: string[] };
-export type AgentTurnMemory = { soul: string | null; ownerFacts: MemoryFact[] };
+export type AgentTurnMemory = { soul: string | null; profile?: string | null; ownerFacts: MemoryFact[] };
+/** The owner's life summary the assistant reads on every one of their turns. */
+export type OwnerProfile = { profile: string | null; updatedAt: string | null };
 
 export interface Category {
   id: string;
@@ -242,6 +244,9 @@ export interface IntegrationState {
   secretStorageReady: boolean;
   /** How the assistant talks with the owner, on their line and in the browser. */
   soul?: string | null;
+  profile?: OwnerProfile;
+  /** Whether the assistant texts once about something left open past its time. */
+  followUps?: boolean;
   twilio: {
     configured: boolean;
     status: "disconnected" | "connected" | "error";
