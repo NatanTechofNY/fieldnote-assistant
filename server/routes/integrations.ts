@@ -172,7 +172,7 @@ export function registerIntegrationRoutes({ app, db, search, draftWithAgent }: R
       return failure(res, 502, "The assistant could not write the profile right now; try again in a minute");
     }
     if (!text.trim() || text === NO_TEXT_FALLBACK) return failure(res, 502, "The assistant returned no profile; try again in a minute");
-    setOwnerProfile(db, text);
+    setOwnerProfile(db, text, { written: true });
     return success(res, ownerProfile(db));
   });
   app.put("/api/integrations/follow-ups", (req, res) => {

@@ -3,7 +3,7 @@ import { USER_ID, id, now, queueIndexJob } from "../db.ts";
 import { failure, success } from "../http.ts";
 import { currentConversation, messageJson } from "../serializers.ts";
 import { relevantFacts } from "../memory-context.ts";
-import { ownerProfile } from "../profile.ts";
+import { servableOwnerProfile } from "../profile.ts";
 import { ownerSoul } from "../soul.ts";
 import { executeAgentTool } from "../tool-executor.ts";
 import { linksIn, rememberLinks } from "../web-service.ts";
@@ -21,7 +21,7 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
     const { text } = z.object({ text: z.string().max(20_000) }).strict().parse(req.body);
     rememberLinks("web", linksIn(text));
     const ownerFacts = await relevantFacts(db, search, { own: true }, text);
-    return success(res, { soul: ownerSoul(db), profile: ownerProfile(db).profile, ownerFacts });
+    return success(res, { soul: ownerSoul(db), profile: servableOwnerProfile(db), ownerFacts });
   });
   app.post("/api/agent/tools/:name", async (req, res) => {
     const input = z.record(z.string(), z.unknown()).parse(req.body);

@@ -31,7 +31,10 @@ import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } fr
 import { describeMedia, mediaUrlsOf, withMediaLines } from "../server/image-input.ts";
 import { relevantFacts } from "../server/memory-context.ts";
 import { assertPublicHost, setHostResolver } from "../server/public-fetch.ts";
-import { groupProfile, groupProfileState, ownerProfile, profileState } from "../server/profile.ts";
+import {
+  composeGroupProfileTurn, groupProfile, groupProfileState, ownerProfile, profileState, servableGroupProfile, servableOwnerProfile,
+  setGroupProfile,
+} from "../server/profile.ts";
 
 /** Runs `run` with these variables set (undefined unsets one), then puts back whatever was there before. */
 async function withEnv<T>(vars: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
@@ -6665,6 +6668,15 @@ describe("Sendblue provider", () => {
     const turn = [...(body?.messages ?? [])].reverse().find(message => message.metadata?.turnContext)?.metadata?.turnContext ?? {};
     assert.equal(turn.profile, undefined, "the owner's profile never goes into a group's");
     assert.equal(turn.soul, undefined, "nor the owner's Soul");
+
+    // Without a group chat to fence to, it does not run at all.
+    const work = db.prepare("SELECT id FROM life_areas WHERE slug='work'").get() as { id: string };
+    await assert.rejects(
+      runSmsAgent(db, fakeSearch(db), "profile:work", "Rewrite the profile", undefined, {
+        fetcher: capture, internal: true, userMessageMetadata: { kind: "group_profile_refresh", lifeAreaId: work.id },
+      }),
+      /only be written for a group chat's own area/,
+    );
   });
 
   /*
@@ -9148,12 +9160,15 @@ describe("worker scheduling", () => {
       },
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
     };
-    const restore = atUtcTime("04:30");
+    let restore = atUtcTime("04:30");
+    try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
+    assert.equal(calls.length, 1, "one rewrite per pass, so replies never wait behind more than one");
+    assert.equal(calls[0].metadata?.kind, "profile_refresh", "the owner's first");
+    restore = atUtcTime("04:31");
     try { await runWorkerOnce(db, fakeSearch(db), dependencies as never); } finally { restore(); }
     const group = calls.find(call => call.metadata?.kind === "group_profile_refresh");
-    assert.ok(group, "the group's profile was rewritten");
-    assert.deepEqual({ lifeAreaId: group.metadata?.lifeAreaId, threadId: group.metadata?.threadId }, { lifeAreaId: area.id, threadId: "thread_gp" },
-      "its hosted search is fenced to the group");
+    assert.ok(group, "the group's profile was rewritten on the next pass");
+    assert.equal(group.metadata?.lifeAreaId, area.id, "the runner fences its search to this area's own chat");
     assert.match(group.prompt, /Halo: Natella's boyfriend/);
     assert.match(group.prompt, /Halo's birthday is November 26/);
     assert.doesNotMatch(group.prompt, /Life Time/, "the owner's facts never reach a group's profile");
@@ -9167,10 +9182,35 @@ describe("worker scheduling", () => {
     assert.equal(groupProfileState(db, area.id), "current");
     const rewritten = (await api.post(`/api/life-areas/${area.id}/profile/refresh`).expect(200)).body.data;
     assert.equal(rewritten.profile, "People: Halo — Natella's boyfriend.");
-    assert.deepEqual(drafts[0].context, { kind: "group_profile_refresh", lifeAreaId: area.id, threadId: "thread_gp" });
-    // A new member is a change too.
+    assert.deepEqual(drafts[0].context, { kind: "group_profile_refresh", lifeAreaId: area.id });
+    // A new member is a change too, but the profile still holds.
     db.prepare("UPDATE group_members SET name='Natella',relationship='the owner''s sister' WHERE thread_id='thread_gp'").run();
     assert.equal(groupProfileState(db, area.id), "stale");
+    assert.equal(servableGroupProfile(db, area.id), "People: Halo — Natella's boyfriend.");
+    // A removed fact takes the profile off the turns until it is rewritten, and the rewrite starts fresh.
+    db.prepare("DELETE FROM memories WHERE id='mem_gp_bday'").run();
+    assert.equal(servableGroupProfile(db, area.id), null);
+    assert.doesNotMatch(composeGroupProfileTurn(db, area.id), /The profile as it stands/);
+    // Members alone are enough to write from; a manual edit there is kept.
+    assert.equal(groupProfileState(db, area.id), "stale");
+    await api.put(`/api/life-areas/${area.id}/profile`).send({ profile: "People: Natella." }).expect(200);
+    assert.equal(groupProfileState(db, area.id), "current");
+    assert.equal(groupProfile(db, area.id).profile, "People: Natella.");
+
+    // What the model writes is screened for anything that looks like a secret.
+    setGroupProfile(db, area.id, "People: Natella; door code 1234; wedding 2012-07-12\nPreferences: call 5550188", { written: true });
+    assert.equal(groupProfile(db, area.id).profile, "People: Natella; wedding 2012-07-12");
+
+    // Not a group, or nothing at all to write from.
+    const work = (await api.get("/api/life-areas").expect(200)).body.data.find((row: { slug: string }) => row.slug === "work");
+    await api.put(`/api/life-areas/${work.id}/profile`).send({ profile: "x" }).expect(404);
+    await api.post(`/api/life-areas/${work.id}/profile/refresh`).expect(404);
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_gp_empty',?,'sms','group:gp_empty','alg_cnv_gp_empty',?,?)
+    `).run(USER_ID, stamp, stamp);
+    const empty = ensureGroupLifeArea(db, "thread_gp_empty", "Quiet");
+    await api.post(`/api/life-areas/${empty.id}/profile/refresh`).expect(409);
   });
 
   it("rewrites the owner's profile overnight when their facts changed, and hands it to their turns", async () => {
@@ -9217,7 +9257,9 @@ describe("worker scheduling", () => {
 
     // Deleting a fact is a change too; with none left, the profile goes with them.
     assert.equal(profileState(db), "current");
+    assert.equal(servableOwnerProfile(db), "People: wife Cementa; sister Natella.");
     db.prepare("DELETE FROM memories WHERE id='mem_prof_wife'").run();
+    assert.equal(servableOwnerProfile(db), null, "a removed fact takes the profile off the turns at once");
     assert.equal(profileState(db), "empty");
     assert.equal(ownerProfile(db).profile, null);
     await api.post("/api/integrations/profile/refresh").expect(409);

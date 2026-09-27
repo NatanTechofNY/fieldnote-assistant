@@ -25,7 +25,9 @@ export default defineConfig(({ mode }) => ({
     setupFiles: "./tests/setup.ts",
     globals: true,
     // Each test renders the whole app and clicks through it; on a busy runner
-    // the default 5s cut off tests that pass in under two when the machine is idle.
+    // the default 5s cut off tests that pass in under two when the machine is
+    // idle. One that times out mid-test also skips its own cleanup (a patched
+    // window.location, say) and fails the next.
     testTimeout: 20_000,
     // Pinned so the suite always exercises the Agent Studio chat path. Left to
     // a developer's .env, the same tests would silently cover the local

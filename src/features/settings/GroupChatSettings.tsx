@@ -177,13 +177,13 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
             saveLabel="Save profile"
             hint="What the assistant knows about the people here. It rewrites this overnight from the group's memories and who's in it; edit it to correct anything."
             value={group.profile ?? null}
-            placeholder={"People: Natella — the owner's sister; Halo — Natella's boyfriend, birthday Nov 26…\nShared: …\nPreferences: …"}
-            saving={profile.isPending || rewrite.isPending}
+            placeholder={"People: Sam — the owner's sister; Alex — Sam's partner, birthday Mar 3…\nShared: …\nPreferences: …"}
+            saving={(profile.isPending && profile.variables?.id === group.id) || (rewrite.isPending && rewrite.variables === group.id)}
             onSave={text => profile.mutate({ id: group.id, profile: text })}
             action={{
               label: "Rewrite now",
-              icon: rewrite.isPending ? <LoaderCircle className="spin" size={13}/> : <RefreshCw size={13}/>,
-              pending: rewrite.isPending,
+              icon: rewrite.isPending && rewrite.variables === group.id ? <LoaderCircle className="spin" size={13}/> : <RefreshCw size={13}/>,
+              pending: rewrite.isPending && rewrite.variables === group.id,
               onClick: () => rewrite.mutate(group.id),
             }}
           />

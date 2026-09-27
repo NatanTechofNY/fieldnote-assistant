@@ -51,6 +51,7 @@ const SCHEDULED_KINDS = new Map<string, string>([
   ["checkin_ask_draft", "Check-in wording draft"],
   ["follow_up", "Follow-up"],
   ["profile_refresh", "Profile rewrite"],
+  ["group_profile_refresh", "Group profile rewrite"],
 ]);
 
 function DigestBlock({ message }: { message: ChannelMessage }) {

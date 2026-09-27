@@ -88,18 +88,18 @@ export function registerTaxonomyRoutes({ app, db, search, draftWithAgent }: Rout
   app.post("/api/life-areas/:id/profile/refresh", async (req, res) => {
     const area = groupArea(req.params.id);
     if (!area?.thread_id) return failure(res, 404, "Group chat not found");
-    if (groupProfileState(db, area.id) === "empty") return failure(res, 409, "Nothing has been saved about this group yet to write a profile from");
+    if (groupProfileState(db, area.id) === "empty") return failure(res, 409, "Nobody in this group has been named and nothing has been saved about it yet");
     let text: string;
     try {
       text = await draftWithAgent(composeGroupProfileTurn(db, area.id), `profile:${area.id}`, {
-        context: { kind: "group_profile_refresh", lifeAreaId: area.id, threadId: area.thread_id },
+        context: { kind: "group_profile_refresh", lifeAreaId: area.id },
       });
     } catch (error) {
       console.warn("Group profile rewrite failed:", error instanceof Error ? error.message : error);
       return failure(res, 502, "The assistant could not write the profile right now; try again in a minute");
     }
     if (!text.trim() || text === NO_TEXT_FALLBACK) return failure(res, 502, "The assistant returned no profile; try again in a minute");
-    setGroupProfile(db, area.id, text);
+    setGroupProfile(db, area.id, text, { written: true });
     return success(res, groupProfile(db, area.id));
   });
   app.post("/api/life-areas", (req, res) => {

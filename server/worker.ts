@@ -19,8 +19,8 @@ import {
 } from "./follow-ups.ts";
 import { describeMedia, mediaUrlsOf, withMediaLines } from "./image-input.ts";
 import {
-  composeGroupProfileTurn, composeProfileTurn, groupProfileState, PROFILE_REFRESH_TIME, PROFILE_REFRESH_UNTIL, profileState,
-  setGroupProfile, setOwnerProfile,
+  composeGroupProfileTurn, composeProfileTurn, groupProfileSnapshot, groupProfileState, ownerProfileSnapshot,
+  PROFILE_REFRESH_TIME, PROFILE_REFRESH_UNTIL, profileState, setGroupProfile, setOwnerProfile,
 } from "./profile.ts";
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
@@ -871,30 +871,52 @@ function dispatchSettled(db: Db, key: string): boolean {
   return row?.status === "sent" || row?.status === "failed";
 }
 
-/** Rewrites the owner's profile from their facts once a night, and only when a fact changed. */
+/**
+ * Rewrites profiles overnight — the owner's, then each group's — when what
+ * they are written from changed. At most one completion per pass: a
+ * completion here holds up every inbound reply behind it, and the window has
+ * a hundred-odd passes for the rest. A profile found up to date is recorded
+ * as settled for the night, so later passes skip it with one lookup.
+ */
 async function refreshProfileOvernight(
   db: Db,
   search: SearchWriter,
   date: string,
   runAgent: typeof runSmsAgent,
 ): Promise<void> {
-  await refreshOwnerProfile(db, search, date, runAgent);
-  for (const area of groupAreas(db)) await refreshGroupProfile(db, search, date, area, runAgent);
+  if (await refreshOwnerProfile(db, search, date, runAgent)) return;
+  for (const area of groupAreas(db)) {
+    if (await refreshGroupProfile(db, search, date, area, runAgent)) return;
+  }
 }
 
+/** Marks tonight's check for this profile done without a rewrite. */
+function settleProfileCheck(db: Db, key: string, reason: string): void {
+  const dispatchId = claimDispatch(db, "profile_refresh", key, now());
+  if (dispatchId) {
+    db.prepare("UPDATE scheduled_dispatches SET status='sent',last_error=?,updated_at=? WHERE id=?").run(reason, now(), dispatchId);
+  }
+}
+
+/** Whether it ran a completion this pass. */
 async function refreshOwnerProfile(
   db: Db,
   search: SearchWriter,
   date: string,
   runAgent: typeof runSmsAgent,
-): Promise<void> {
+): Promise<boolean> {
   const key = `profile_refresh:${USER_ID}:${date}`;
-  if (dispatchSettled(db, key)) return;
-  if (profileState(db) !== "stale") return;
+  if (dispatchSettled(db, key)) return false;
+  const snapshot = ownerProfileSnapshot(db);
+  const state = profileState(db, snapshot);
+  if (state !== "stale") {
+    settleProfileCheck(db, key, state === "empty" ? "No facts to write from" : "Up to date");
+    return false;
+  }
   const dispatchId = claimDispatch(db, "profile_refresh", key, now());
-  if (!dispatchId) return;
+  if (!dispatchId) return false;
   try {
-    const response = await runAgent(db, search, "profile:owner", composeProfileTurn(db), undefined, {
+    const response = await runAgent(db, search, "profile:owner", composeProfileTurn(db, snapshot), undefined, {
       internal: true,
       userMessageMetadata: { kind: "profile_refresh", date },
     });
@@ -903,11 +925,12 @@ async function refreshOwnerProfile(
       failAgentTurn(db, response);
       throw new Error("The profile came back empty");
     }
-    setOwnerProfile(db, response.text);
+    setOwnerProfile(db, response.text, { written: true, snapshot });
     db.prepare("UPDATE scheduled_dispatches SET status='sent',updated_at=? WHERE id=?").run(now(), dispatchId);
   } catch (error) {
     recordDispatchFailure(db, dispatchId, error, "Profile refresh failed");
   }
+  return true;
 }
 
 /** The same for one group chat, written from that group's roster and facts alone. */
@@ -917,26 +940,32 @@ async function refreshGroupProfile(
   date: string,
   area: { id: string; thread_id: string },
   runAgent: typeof runSmsAgent,
-): Promise<void> {
+): Promise<boolean> {
   const key = `profile_refresh:${area.id}:${date}`;
-  if (dispatchSettled(db, key)) return;
-  if (groupProfileState(db, area.id) !== "stale") return;
+  if (dispatchSettled(db, key)) return false;
+  const snapshot = groupProfileSnapshot(db, area.id);
+  const state = groupProfileState(db, area.id, snapshot);
+  if (!snapshot || state !== "stale") {
+    settleProfileCheck(db, key, state === "empty" ? "Nothing to write from" : "Up to date");
+    return false;
+  }
   const dispatchId = claimDispatch(db, "profile_refresh", key, now());
-  if (!dispatchId) return;
+  if (!dispatchId) return false;
   try {
-    const response = await runAgent(db, search, `profile:${area.id}`, composeGroupProfileTurn(db, area.id), undefined, {
+    const response = await runAgent(db, search, `profile:${area.id}`, composeGroupProfileTurn(db, area.id, snapshot), undefined, {
       internal: true,
-      userMessageMetadata: { kind: "group_profile_refresh", date, lifeAreaId: area.id, threadId: area.thread_id },
+      userMessageMetadata: { kind: "group_profile_refresh", date, lifeAreaId: area.id },
     });
     if (!response.text.trim() || response.text === NO_TEXT_FALLBACK) {
       failAgentTurn(db, response);
       throw new Error("The group's profile came back empty");
     }
-    setGroupProfile(db, area.id, response.text);
+    setGroupProfile(db, area.id, response.text, { written: true, snapshot });
     db.prepare("UPDATE scheduled_dispatches SET status='sent',updated_at=? WHERE id=?").run(now(), dispatchId);
   } catch (error) {
     recordDispatchFailure(db, dispatchId, error, "Group profile refresh failed");
   }
+  return true;
 }
 
 /** A group's area with a check-in set, and the chat it belongs to. */
