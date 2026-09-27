@@ -4,7 +4,7 @@ import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
-  archiveReactionText, failAgentTurn, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
+  archiveReactionText, failAgentTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
   recordOutboundProviderMessage, runSmsAgent,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
@@ -986,6 +986,19 @@ export async function runWorkerOnce(
           completeExternalEvent(db, event.id, "processed");
           continue;
         }
+        const inbound = {
+          provider: source,
+          replyTo: message.replyTo,
+          threadOriginator: message.threadOriginator,
+          ...(message.groupId ? { groupId: message.groupId, participants: message.participants } : {}),
+        };
+        // A group that asked the assistant to stay out until named gets no
+        // answer, and no completion is spent, on a message that does not name it.
+        const heldText = withMediaLines(message.body, media.map(() => "[Picture attached]"));
+        if (group && holdUntilNamed(db, address, heldText, message.messageId, inbound, { ...group.metadata, ...(media.length ? { mediaUrls: media } : {}) })) {
+          completeExternalEvent(db, event.id, "processed");
+          continue;
+        }
         // The bubble goes up before the turn starts and comes down once the reply
         // is out rather than in between, so the wait is covered end to end and no
         // bubble outlives the answer.
@@ -995,12 +1008,7 @@ export async function runWorkerOnce(
         const text = withMediaLines(message.body, await describeMedia(media, dependencies.fetch));
         const metadata = { ...group?.metadata, ...(media.length ? { mediaUrls: media } : {}) };
         const response = await runAgent(db, search, address, text, message.messageId, {
-          inbound: {
-            provider: source,
-            replyTo: message.replyTo,
-            threadOriginator: message.threadOriginator,
-            ...(message.groupId ? { groupId: message.groupId, participants: message.participants } : {}),
-          },
+          inbound,
           ...(Object.keys(metadata).length ? { userMessageMetadata: metadata } : {}),
           sendSms: send,
         });

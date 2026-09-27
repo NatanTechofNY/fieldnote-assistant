@@ -5891,7 +5891,7 @@ describe("Sendblue provider", () => {
    * answer given after it stands, receipt included; and it is never a way to
    * leave a write unconfirmed.
    */
-  it("lets an answer given after stay_quiet stand, and refuses it on the first turn and after a write", async () => {
+  it("holds a group turn to stay_quiet once called, and refuses it on the first turn and after a write", async () => {
     const { db } = connectedFixture();
     agentStudioEnv();
     withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
@@ -5905,7 +5905,7 @@ describe("Sendblue provider", () => {
     assert.equal(intro.text, "Hi both, I'm Fieldnote.");
     assert.match(toolOutputs(db, address).stay_quiet.error ?? "", /Nobody here has heard from you yet/);
 
-    // Changed its mind: quiet, then a lookup, then an answer.
+    // Quiet, then a lookup, then chatter anyway: in a group the quiet stands.
     let round = 0;
     const quietThenAnswers: typeof fetch = async () => {
       round += 1;
@@ -5919,10 +5919,10 @@ describe("Sendblue provider", () => {
     let stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
     try {
       const answered = await runSmsAgent(db, search, address, "did anyone order the sheet?", "SB_sheet_q", groupTurnOptions(quietThenAnswers));
-      assert.equal(answered.text, "Actually, that one's on the list for Saturday.", "the answer stands");
+      assert.equal(answered.text, "", "text after stay_quiet is dropped");
       // Sarah is carrying on with the assistant, so the working mark goes up at
-      // once and the lookup's mark replaces it.
-      assert.deepEqual(stub.calls.map(call => call.body.reaction), ["👀", "📋", "like"], "and it closes like any lookup, quiet or not");
+      // once and the lookup's mark replaces it; a quiet turn leaves no receipt.
+      assert.deepEqual(stub.calls.map(call => call.body.reaction), ["👀", "📋", "-📋"]);
     } finally { stub.restore(); }
 
     // Named, so for the assistant whatever else it says, and whoever says it:
@@ -6462,6 +6462,51 @@ describe("Sendblue provider", () => {
         "no reaction is taken back; only the give-up line goes out",
       );
     } finally { stub.restore(); }
+  });
+
+  it("answers only messages that name it once a group asks it to wait, except answers to the evening question", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_named',?,'sms',?,'alg_cnv_named',?,?)
+    `).run(USER_ID, address, stamp, stamp);
+    const area = ensureGroupLifeArea(db, "thread_named", "Goopers");
+    db.prepare("UPDATE life_areas SET reply_mode='named_only',assistant_nickname='Goop' WHERE id=?").run(area.id);
+
+    const answered: string[] = [];
+    const worker = {
+      runSmsAgent: async (...args: Parameters<typeof runSmsAgent>) => {
+        answered.push(args[3]);
+        return { text: "", threadId: "thread_named" } as Awaited<ReturnType<typeof runSmsAgent>>;
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    };
+    const post = (content: string, handle: string) =>
+      api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, content, { message_handle: handle })).expect(200);
+
+    await post("the tide is coming in tonight", "SB_held");
+    await post("goop what time is high tide?", "SB_nick");
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(answered, ["goop what time is high tide?"], "the nickname is the assistant's name here");
+    const held = db.prepare("SELECT metadata_json FROM channel_messages WHERE provider_message_id='SB_held'").get() as { metadata_json: string };
+    assert.equal(JSON.parse(held.metadata_json).heldUntilNamed, true, "a held message is still in the archive");
+
+    // Once the evening question is out, every answer reaches the agent for the journal.
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('msg_evening','thread_named','outbound','assistant','How did today go?','sent','{"kind":"group_evening"}',?,?)
+    `).run(stamp, stamp);
+    await post("tired, 3", "SB_evening_answer");
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(answered.at(-1), "tired, 3");
+
+    assert.equal(addressesAssistant("Goop, stop", "goop"), true);
+    assert.equal(addressesAssistant("goopy mood", "goop"), false, "a word that merely contains the nickname is not the name");
+    assert.equal(addressesAssistant("fieldnote?", "goop"), true, "its own name still counts");
   });
 
   /*

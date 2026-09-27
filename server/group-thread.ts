@@ -37,9 +37,15 @@ export const OWNER_SPEAKER_NAME = "the owner";
  */
 export const ASSISTANT_NAME = "Fieldnote";
 
-/** Whether `text` names the assistant, as a word of its own rather than part of another. */
-export function addressesAssistant(text: string): boolean {
-  return new RegExp(`(^|[^\\p{L}\\p{N}])${ASSISTANT_NAME}(?![\\p{L}\\p{N}])`, "iu").test(text);
+/**
+ * Whether `text` names the assistant, as a word of its own rather than part of
+ * another: its own name, or the nickname a group gave it ("goop"), which in
+ * that group is just as much its name.
+ */
+export function addressesAssistant(text: string, nickname?: string | null): boolean {
+  const names = [ASSISTANT_NAME, nickname?.trim()].filter((name): name is string => Boolean(name))
+    .map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"));
+  return new RegExp(`(^|[^\\p{L}\\p{N}])(?:${names.join("|")})(?![\\p{L}\\p{N}])`, "iu").test(text);
 }
 
 /*

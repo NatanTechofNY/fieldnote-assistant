@@ -25,7 +25,7 @@ import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
 import { toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
-import { type ReplyMode, setGroupSettings, setGroupSoul, setOwnerSoul } from "./soul.ts";
+import { groupVoice, type ReplyMode, setGroupSettings, setGroupSoul, setOwnerSoul } from "./soul.ts";
 import { completeParentIfSettled, completionStats, hasSubtasks, startParentIfPending, syncOccurrenceCompletion } from "./todo-status.ts";
 import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 import {
@@ -660,8 +660,9 @@ export async function executeAgentTool(
     // whether a message is for the assistant is the model's call, but a
     // message that says its name is not a close call, and no one in the chat
     // should be able to talk it into ignoring one.
-    if (context.inboundText && addressesAssistant(context.inboundText)) {
-      throw new Error(`This message names ${ASSISTANT_NAME}; it is for you, whoever wrote it`);
+    const nickname = groupVoice(db, scope.lifeAreaId).assistantNickname;
+    if (context.inboundText && addressesAssistant(context.inboundText, nickname)) {
+      throw new Error(`This message names ${nickname ?? ASSISTANT_NAME}; it is for you, whoever wrote it`);
     }
     context.stayedQuiet = true;
     // Who was passed over is kept beside why, so a suppressed request from the

@@ -6,6 +6,7 @@ import { getNotificationPreferences, type SmsProvider } from "./integrations.ts"
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
+import { groupVoiceForThread } from "./soul.ts";
 import { executeAgentTool, ownRecordsOnly, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
 import type { Db } from "./types.ts";
@@ -604,6 +605,50 @@ export function archiveReactionText(
   return saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, reactionText: true });
 }
 
+/** Whether the message is an inline reply to one of the assistant's own messages. */
+function repliesToAssistant(db: Db, threadId: string, inbound: InboundContext | undefined): boolean {
+  const parents = [inbound?.replyTo, inbound?.threadOriginator].filter((handle): handle is string => Boolean(handle));
+  return parents.some(handle => Boolean(db.prepare(`
+    SELECT 1 found FROM channel_messages WHERE thread_id=? AND provider_message_id=? AND role='assistant'
+  `).get(threadId, handle)));
+}
+
+/** How long after the evening question the answers to it are still coming in. */
+const EVENING_ANSWER_WINDOW_MS = 6 * 60 * 60_000;
+
+/**
+ * Files a group message without answering it, when the group has asked the
+ * assistant to stay out until named and this message does not name it or
+ * reply to it. Returns false — nothing filed — when the message is for it after
+ * all. The evening question is the one exception: answers to it are the day's
+ * shared journal entry, which only the assistant writes, so for a few hours
+ * after it went out every message still reaches the agent.
+ */
+export function holdUntilNamed(
+  db: Db,
+  address: string,
+  body: string,
+  providerMessageId: string | undefined,
+  inbound: InboundContext | undefined,
+  metadata: Record<string, unknown>,
+): boolean {
+  const thread = db.prepare("SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address=?")
+    .get(USER_ID, address) as { id: string } | undefined;
+  if (!thread) return false;
+  const voice = groupVoiceForThread(db, thread.id);
+  if (voice?.replyMode !== "named_only") return false;
+  if (addressesAssistant(body, voice.assistantNickname) || repliesToAssistant(db, thread.id, inbound)) return false;
+  const since = new Date(Date.now() - EVENING_ANSWER_WINDOW_MS).toISOString();
+  const eveningAsked = db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role='assistant' AND json_extract(metadata_json,'$.kind')='group_evening' AND created_at>=?
+    LIMIT 1
+  `).get(thread.id, since);
+  if (eveningAsked) return false;
+  saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, heldUntilNamed: true });
+  return true;
+}
+
 /** How recently the assistant has to have spoken for a message to read as a reply to it. */
 const FOLLOW_UP_WINDOW_MS = 10 * 60_000;
 
@@ -623,14 +668,8 @@ function aimedAtAssistant(
   inbound: InboundContext | undefined,
   speakerPhone: string | undefined,
 ): boolean {
-  if (addressesAssistant(text)) return true;
-  const parents = [inbound?.replyTo, inbound?.threadOriginator].filter((handle): handle is string => Boolean(handle));
-  for (const handle of parents) {
-    const parent = db.prepare(`
-      SELECT 1 found FROM channel_messages WHERE thread_id=? AND provider_message_id=? AND role='assistant'
-    `).get(threadId, handle);
-    if (parent) return true;
-  }
+  if (addressesAssistant(text, groupVoiceForThread(db, threadId)?.assistantNickname)) return true;
+  if (repliesToAssistant(db, threadId, inbound)) return true;
   if (!speakerPhone) return false;
   // The last few rows before this one, newest first, read off the thread's
   // (thread_id, created_at) index rather than a sort of the whole thread.
@@ -1133,11 +1172,18 @@ export async function runChannelAgent(
         && (part.toolCallId || part.tool_call_id),
       );
       if (!toolParts.length) {
-        const text = response.parts
+        const written = response.parts
           .filter(part => part.type === "text" && typeof part.text === "string")
           .map(part => part.text)
           .join("\n")
           .trim();
+        /*
+         * In a group, staying quiet is final. A model that called stay_quiet and
+         * then chatted anyway ("We hit collective idle mode") was the room's
+         * top complaint, so the text is dropped — unless a record changed
+         * after the call, which the room has to be told about.
+         */
+        const text = context.scope && context.stayedQuiet && !changedRecord ? "" : written;
         // Once per turn, so a model that insists cannot loop the turn out of its budget.
         if (!changedStatus && !checkedStatusClaim && STATUS_CLAIM.test(text)) {
           checkedStatusClaim = true;
@@ -1152,9 +1198,8 @@ export async function runChannelAgent(
         // The answer is in. The progress mark gives way to the closing one, or
         // comes down when there is nothing to confirm; the agent's own reaction,
         // if it made one, is left exactly where it is. A turn that decided the
-        // message was not for it, and held to that, leaves no receipt at all,
-        // whatever it read on the way to deciding; one that changed its mind
-        // and answered is answered, receipt and all.
+        // message was not for it leaves no receipt at all, whatever it read on
+        // the way to deciding.
         const quiet = context.stayedQuiet && !text;
         await setMark(quiet ? undefined : closingMark());
         /*
