@@ -155,7 +155,7 @@ const WRITE_TOOLS = new Set([
  */
 const GESTURE_TOOLS = new Set([
   "react_to_message", "reply_in_thread", "send_product_cards", "send_message", "stay_quiet", "find_gif", "send_image",
-  "list_group_chats", "send_to_group", "react_in_group",
+  "send_to_group", "react_in_group",
 ]);
 
 /**
@@ -185,7 +185,7 @@ const PROGRESS_REACTIONS: Record<string, string> = {
   get_memory: "🧠", create_memory: "🧠", update_memory: "🧠", delete_memory: "🧠",
   list_reminders: "⏰", create_reminder: "⏰", update_reminder: "⏰", delete_reminder: "⏰",
   get_agenda: "📅",
-  get_conversation_context: "💬", read_conversation: "💬",
+  get_conversation_context: "💬", read_conversation: "💬", list_group_chats: "💬",
   remember_group_member: "🧠",
   list_life_areas: "🗂️",
   get_review_evidence: "🪞", get_reflection_evidence: "🪞",
@@ -1379,13 +1379,21 @@ export async function runChannelAgent(
    * read can hand back what someone in a group wrote. That text could be
    * asking to change how the assistant talks to the owner, so once a result
    * carries a group's area or thread, the owner's Soul is off limits for the
-   * rest of the turn.
+   * rest of the turn. Which groups it came from is kept too: text from one
+   * group can then post only into that group, never steer a post into another.
    */
-  const groupMarkers = context.scope ? [] : groupAreas(db).flatMap(area => [area.id, area.thread_id]);
-  const noteGroupContent = (turn: ToolTurnContext, output: unknown) => {
-    if (turn.readUntrusted || !groupMarkers.length || output === undefined) return;
+  const groupThreadOf = new Map(context.scope ? [] : groupAreas(db).flatMap(area => [
+    [area.id, area.thread_id] as const, [area.thread_id, area.thread_id] as const,
+  ]));
+  const noteGroupContent = (turn: ToolTurnContext, output: unknown, toolName?: string) => {
+    if (!groupThreadOf.size || output === undefined) return;
     const serialized = JSON.stringify(output) ?? "";
-    if (groupMarkers.some(marker => serialized.includes(marker))) turn.readUntrusted = true;
+    const threads = [...groupThreadOf].filter(([marker]) => serialized.includes(marker)).map(([, threadId]) => threadId);
+    if (!threads.length) return;
+    turn.readUntrusted = true;
+    // The directory names every group and quotes nobody in any of them.
+    if (toolName === "list_group_chats") return;
+    turn.groupThreadsRead = new Set([...turn.groupThreadsRead ?? [], ...threads]);
   };
   const deadline = Date.now() + TURN_BUDGET_MS;
   try {
@@ -1492,7 +1500,7 @@ export async function runChannelAgent(
         if (!GESTURE_TOOLS.has(toolName)) lookedUp = true;
         try {
           const data = await executeAgentTool(db, search, toolName, part.input || {}, context);
-          noteGroupContent(context, data);
+          noteGroupContent(context, data, toolName);
           // An undefined payload disappears from the serialized body, leaving a
           // bare `{"success":true}` that reads as a truncated result rather than
           // a confirmation. An explicit null says the write landed and returned

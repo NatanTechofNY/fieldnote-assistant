@@ -11,7 +11,7 @@
  */
 import { getMemory, id, now, queueIndexJob, USER_ID } from "./db.ts";
 import { getNotificationPreferences, getSendbluePublicConfig, upsertTrustedContact } from "./integrations.ts";
-import { ASSISTANT_NAME, OWNER_SPEAKER_NAME, redactedNumber } from "./group-thread.ts";
+import { ASSISTANT_NAME, groupAddress, OWNER_SPEAKER_NAME, redactedNumber } from "./group-thread.ts";
 import type { Db } from "./types.ts";
 
 export type GroupMemberRow = {
@@ -74,6 +74,28 @@ export function recordGroupParticipants(
     }
     // The roster memory says who is here, so a departure or a return rewrites it.
     if (changed) refreshRosterMemory(db, lifeAreaId);
+  })();
+}
+
+/**
+ * Marks the owner as gone from a group the app knows, when the provider lists
+ * that group's people without them. Their messages there are refused from then
+ * on, so this is the only moment the departure can be seen; their next message
+ * in it, once they are back, clears it through `recordGroupParticipants`.
+ */
+export function markOwnerLeftGroup(db: Db, groupId: string, ownerPhone: string): void {
+  const timestamp = now();
+  db.transaction(() => {
+    const left = db.prepare(`
+      UPDATE group_members SET left_at=?,updated_at=?
+      WHERE phone=? AND is_owner=1 AND left_at IS NULL
+        AND thread_id IN (SELECT id FROM channel_threads WHERE user_id=? AND address=?)
+      RETURNING thread_id
+    `).all(timestamp, timestamp, ownerPhone, USER_ID, groupAddress(groupId)) as Array<{ thread_id: string }>;
+    for (const { thread_id } of left) {
+      const area = db.prepare("SELECT id FROM life_areas WHERE thread_id=?").get(thread_id) as { id: string } | undefined;
+      if (area) refreshRosterMemory(db, area.id);
+    }
   })();
 }
 
