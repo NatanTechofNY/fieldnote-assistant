@@ -1421,13 +1421,10 @@ export async function runChannelAgent(
          * top complaint, so the text is dropped — unless a record changed
          * after the call, which the room has to be told about.
          */
-        // A closing line that only repeats what already went out — the model
-        // restating the caption it sent with a GIF — would text it twice.
-        const said = new Set((context.sentWords ?? []).map(sameWords));
-        const unsaid = said.has(sameWords(written)) ? "" : written;
-        const text = context.scope && context.stayedQuiet && !changedRecord ? "" : unsaid;
+        const kept = context.scope && context.stayedQuiet && !changedRecord ? "" : written;
         // Once per turn, so a model that insists cannot loop the turn out of its budget.
-        if (!changedStatus && !checkedStatusClaim && STATUS_CLAIM.test(text)) {
+        // Checked before a repeat is dropped: "checked it off" said twice is still a claim to back.
+        if (!changedStatus && !checkedStatusClaim && STATUS_CLAIM.test(kept)) {
           checkedStatusClaim = true;
           appendResponse(messages, response);
           messages.push({
@@ -1437,6 +1434,10 @@ export async function runChannelAgent(
           });
           continue;
         }
+        // A closing line that only repeats what already went out — the model
+        // restating the caption it sent with a GIF — would text it twice.
+        const said = new Set((context.sentWords ?? []).map(sameWords));
+        const text = said.has(sameWords(kept)) ? "" : kept;
         // The answer is in. The progress mark gives way to the closing one, or
         // comes down when there is nothing to confirm; the agent's own reaction,
         // if it made one, is left exactly where it is. A turn that decided the

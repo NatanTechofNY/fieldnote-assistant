@@ -8089,6 +8089,11 @@ describe("Sendblue provider", () => {
       fetcher: agentCallingMany([{ tool: "send_message", input: { text: "lol" } }], "Clears up by noon.").fetcher,
     });
     assert.equal(added.text, "Clears up by noon.", "a closing line that adds something still goes out");
+
+    // A status claim said twice is still checked before the repeat is dropped.
+    const claim = agentCallingMany([{ tool: "send_message", input: { text: "Checked it off" } }], "Checked it off");
+    await runSmsAgent(db, fakeSearch(db), address, "Fieldnote, laundry's done", "SB_storm_3", { ...options, fetcher: claim.fetcher });
+    assert.match(JSON.stringify(claim.requests.at(-1)), /runtime check, not from the user/, "the claim earns the corrective round");
   });
 
   it("writes a said todo itself when its time comes, logs it done, and keeps it off the morning note", async () => {
