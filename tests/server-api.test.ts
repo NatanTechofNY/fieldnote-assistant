@@ -9014,6 +9014,8 @@ describe("worker scheduling", () => {
     const laundry = (await api.post("/api/todos").send({ title: "Laundry", due_at: "2030-01-14T21:00:00.000Z" }).expect(201)).body.data;
     await api.post("/api/todos").send({ title: "Fold laundry", parent_id: laundry.id, due_at: "2030-01-14T21:00:00.000Z" }).expect(201);
     await api.post("/api/todos").send({ title: "Call the dentist", due_at: "2030-01-15T08:00:00.000Z" }).expect(201);
+    // 01:00 UTC today, written with an offset: as text it would sort before the cutoff.
+    await api.post("/api/todos").send({ title: "Water the plants", due_at: "2030-01-14T21:00:00-04:00" }).expect(201);
     const oldDone = (await api.post("/api/todos").send({ title: "Book flights", due_at: "2030-01-14T18:00:00.000Z" }).expect(201)).body.data;
     await api.patch(`/api/todos/${oldDone.id}/status`).send({ status: "done" }).expect(200);
     const prompts: string[] = [];
@@ -9041,6 +9043,7 @@ describe("worker scheduling", () => {
     assert.match(prompts[0], /"Laundry"/);
     assert.doesNotMatch(prompts[0], /Fold laundry/, "the step rides with its parent");
     assert.doesNotMatch(prompts[0], /Call the dentist/, "two hours overdue is not a dropped thread yet");
+    assert.doesNotMatch(prompts[0], /Water the plants/, "nine hours overdue, whatever offset the time was written with");
     assert.doesNotMatch(prompts[0], /Book flights/, "done is done");
     const archived = db.prepare("SELECT metadata_json FROM channel_messages WHERE role='assistant' AND json_extract(metadata_json,'$.kind')='follow_up'").get() as { metadata_json: string };
     assert.deepEqual(JSON.parse(archived.metadata_json).todoIds, [laundry.id]);

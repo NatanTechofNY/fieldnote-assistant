@@ -33,8 +33,11 @@ export function followUpCandidates(db: Db, at = new Date()): FollowUpItem[] {
     SELECT t.id,t.title,t.due_at,t.parent_id FROM todos t
     WHERE t.user_id=? AND t.status IN ('pending','in_progress','blocked')
       AND t.recurrence_json IS NULL AND t.assistant_says=0 AND t.followed_up_at IS NULL
-      AND t.due_at IS NOT NULL AND t.due_at<=? AND t.due_at>=? AND ${OWN_AREA_CLAUSE("t")}
-    ORDER BY t.due_at DESC
+      AND t.due_at IS NOT NULL AND ${OWN_AREA_CLAUSE("t")}
+      -- Compared as instants: due_at carries the owner's offset, and as text
+      -- "21:00-04:00" sorts before "00:30Z" the next day, hours before it is due.
+      AND julianday(t.due_at)<=julianday(?) AND julianday(t.due_at)>=julianday(?)
+    ORDER BY julianday(t.due_at) DESC
   `).all(USER_ID, until, since) as Array<FollowUpItem & { parent_id: string | null }>;
   const ids = new Set(rows.map(row => row.id));
   return rows.filter(row => !row.parent_id || !ids.has(row.parent_id)).slice(0, MAX_ITEMS)
