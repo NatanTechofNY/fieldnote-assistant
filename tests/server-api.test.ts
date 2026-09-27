@@ -9989,7 +9989,7 @@ describe("the Soul and group settings", () => {
   it("writes the group's Soul in a group and the owner's everywhere else, never one from the other", async () => {
     const { db, api } = fixture();
     const { area, context } = groupContext(db);
-    const run = (name: string, input: object, turn?: ToolTurnContext) => executeAgentTool(db, { flushSoon() {} }, name, input, turn);
+    const run = (name: string, input: Record<string, unknown>, turn?: ToolTurnContext) => executeAgentTool(db, { flushSoon() {} }, name, input, turn);
 
     const inGroup = await run("update_soul", { soul: "- One line.\n- No follow-up questions." }, context) as { applies_to: string };
     assert.equal(inGroup.applies_to, "this group chat");
