@@ -108,6 +108,18 @@ function replyParent(
   return byProviderId.get(handle) ?? { content: "an earlier message" };
 }
 
+/**
+ * The picture a message the assistant sent carried: a GIF, a picture off a
+ * page, a product card's photo. The text of a picture sent alone is only the
+ * archive's "(picture)" placeholder, so the picture stands in for it.
+ */
+const PICTURE_PLACEHOLDER = "(picture)";
+
+function sentPicture(message: ChannelMessage): string | null {
+  const url = message.role === "assistant" ? message.metadata.mediaUrl : undefined;
+  return typeof url === "string" && url.startsWith("https://") ? url : null;
+}
+
 function StartConversationButton() {
   const panel = useAgentPanel();
   return <button type="button" className="button primary" onClick={panel.open}>
@@ -329,6 +341,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
             const isJumpTarget = jump?.messageId === message.id;
             const parent = replyParent(message, byProviderId);
             const reactions = messageReactions(message);
+            const picture = sentPicture(message);
             // Several people write into a group, so each of their bubbles says
             // who: by name, or by redacted number for a participant the owner
             // never named, so two unnamed voices still read as two.
@@ -350,14 +363,19 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
                   <CornerUpLeft size={11}/>
                   <span>{parent.content}</span>
                 </div>}
+                {picture && <a className="history-picture" href={picture} target="_blank" rel="noreferrer">
+                  <img src={picture} alt="Picture sent" loading="lazy" referrerPolicy="no-referrer"/>
+                </a>}
                 {isReflectionRequest
                   ? <ReflectionGenerationBlock message={message}/>
                   : isDigestRequest
                     ? <DigestBlock message={message}/>
-                    : <MarkdownContent
-                      content={message.content}
-                      highlight={isJumpTarget ? jump.terms : undefined}
-                    />}
+                    : picture && message.content === PICTURE_PLACEHOLDER
+                      ? null
+                      : <MarkdownContent
+                        content={message.content}
+                        highlight={isJumpTarget ? jump.terms : undefined}
+                      />}
                 {reactions.length > 0 && <div className="history-reactions">
                   {reactions.map(reaction => <span key={reaction}>{reaction}</span>)}
                 </div>}

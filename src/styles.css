@@ -2116,6 +2116,12 @@ tr:hover .attach-button,
 .history-reply-quote span { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 /* A tapback is the whole reply, not a step toward one, so it is drawn on the
    message it landed on instead of being left as a tool card further down. */
+/* A GIF or picture the assistant sent, drawn the way Messages shows it. */
+.history-picture { display:block; margin-bottom:6px; }
+.history-picture img {
+  display:block; max-width:min(260px, 100%); max-height:260px; border-radius:var(--radius-sm); object-fit:cover;
+}
+.history-picture:last-child { margin-bottom:0; }
 .history-reactions { display:flex; gap:4px; margin-top:7px; }
 .history-reactions span {
   display:grid; place-items:center; min-width:22px; height:22px; padding:0 5px; border:1px solid var(--border);
