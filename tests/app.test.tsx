@@ -533,6 +533,48 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       metadata: { kind: "group_evening", date: "2026-07-20", groupId: "3fa85f64-5717-4562-b3fc-2c963f66afa6", copyOf: "area_group", groupName: "Home", internal: true },
       createdAt: "2026-07-20T20:30:00.000Z",
       updatedAt: "2026-07-20T20:30:00.000Z",
+    }, {
+      // A reply inside a thread: Sendblue's `replyTo` is only the message before
+      // it (a tapback here), and `threadOriginator` is what it hangs off.
+      id: "message_thread_root",
+      direction: "inbound",
+      role: "user",
+      content: "Where is your check in?",
+      providerMessageId: "SB_thread_root",
+      status: "received",
+      metadata: {},
+      createdAt: "2026-07-20T21:00:00.000Z",
+      updatedAt: "2026-07-20T21:00:00.000Z",
+    }, {
+      id: "message_thread_previous",
+      direction: "inbound",
+      role: "user",
+      content: "Liked “Evening, both!”",
+      providerMessageId: "SB_thread_previous",
+      status: "received",
+      metadata: { reactionText: true },
+      createdAt: "2026-07-20T21:01:00.000Z",
+      updatedAt: "2026-07-20T21:01:00.000Z",
+    }, {
+      id: "message_thread_reply",
+      direction: "inbound",
+      role: "user",
+      content: "anxious 2/5",
+      providerMessageId: "SB_thread_reply",
+      status: "received",
+      metadata: { replyTo: "SB_thread_previous", threadOriginator: "SB_thread_root" },
+      createdAt: "2026-07-20T21:02:00.000Z",
+      updatedAt: "2026-07-20T21:02:00.000Z",
+    }, {
+      id: "message_thread_answer",
+      direction: "outbound",
+      role: "assistant",
+      content: "valid, that's a lot at once",
+      providerMessageId: "SB_thread_answer",
+      status: "delivered",
+      metadata: { replyTo: "SB_thread_reply" },
+      createdAt: "2026-07-20T21:02:05.000Z",
+      updatedAt: "2026-07-20T21:02:05.000Z",
     }],
   }));
   if (url.includes("/api/conversations/channels/thread_reflection/messages")) return new Response(JSON.stringify({
@@ -2044,6 +2086,11 @@ it("renders complete channel conversation history", async () => {
   const threaded = [...document.querySelectorAll(".history-message")]
     .find(node => node.textContent?.includes("Saved it as today's journal entry."));
   expect(threaded?.querySelector(".history-reply-quote")).toHaveTextContent("Remember this conversation");
+  // Inside a thread, both sides show the thread's first message, as Messages draws it.
+  for (const text of ["anxious 2/5", "valid, that's a lot at once"]) {
+    const inThread = [...document.querySelectorAll(".history-message")].find(node => node.textContent?.includes(text));
+    expect(inThread?.querySelector(".history-reply-quote")).toHaveTextContent("Where is your check in?");
+  }
   // A group's check-in echoed to the owner's own line says which group it came from.
   const echoed = [...document.querySelectorAll(".history-message")]
     .find(node => node.textContent?.includes("[Home] Evening, both!"));

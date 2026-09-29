@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
+import { archiveReactionText, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
@@ -57,6 +57,7 @@ async function withEnv<T>(vars: Record<string, string | undefined>, run: () => P
 setHostResolver(async () => ["93.184.216.34"]);
 import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
+import { z } from "zod";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { executeAgentTool, resetBrowserTurnState, type ToolTurnContext } from "../server/tool-executor.ts";
 import { resetWebState } from "../server/web-service.ts";
@@ -719,6 +720,20 @@ describe("frontend API contract", () => {
     }).expect(409);
     const unchanged = (await api.get(`/api/memories/${memory.id}`).expect(200)).body.data;
     assert.equal(unchanged.life_area_id, "area_personal");
+
+    // The patch as a strict-mode model sends it: every field, null for unchanged.
+    await api.post("/api/agent/tools/update_memory").send({
+      id: memory.id,
+      patch: {
+        kind: null, title: null, content: "Private appointment, moved to 3pm", mood_label: null, mood_score: null, moods: null,
+        category_id: null, life_area_id: null, occurred_at: null, review_worthy: null, tags: null, clear_fields: [],
+      },
+      override_user_classification: false,
+    }).expect(200);
+    const edited = (await api.get(`/api/memories/${memory.id}`).expect(200)).body.data;
+    assert.equal(edited.content, "Private appointment, moved to 3pm");
+    assert.equal(edited.kind, "note");
+    assert.equal(edited.life_area_id, "area_personal", "a null area is unchanged, not a move that needs an override");
   });
 
   it("builds and persists a grounded quarterly review draft", async () => {
@@ -1600,6 +1615,37 @@ describe("Agent Studio configuration sync", () => {
       Object.keys(toolInput).sort(),
       "the published tools and the validated tools are the same set",
     );
+
+    /*
+     * Strict mode makes the model send every property, so a published
+     * `["…", "null"]` is a null it will send whenever it means "unchanged" or
+     * "none". A Zod field that refuses it fails every such call at run time.
+     */
+    type JsonProperty = { type?: string | string[]; properties?: Record<string, JsonProperty> };
+    const objectShape = (schema: z.ZodType): Record<string, z.ZodType> | undefined => {
+      let current: z.ZodType = schema;
+      while (current instanceof z.ZodOptional || current instanceof z.ZodNullable || current instanceof z.ZodDefault) {
+        current = current.unwrap() as z.ZodType;
+      }
+      return current instanceof z.ZodObject ? current.shape as Record<string, z.ZodType> : undefined;
+    };
+    const assertNullsAccepted = (path: string, properties: Record<string, JsonProperty>, shape: Record<string, z.ZodType>) => {
+      for (const [key, property] of Object.entries(properties)) {
+        const field = shape[key];
+        if (!field) continue;
+        const types = Array.isArray(property.type) ? property.type : [property.type];
+        if (types.includes("null")) {
+          assert.ok(field.safeParse(null).success, `${path}.${key} is published as nullable but toolInput refuses null`);
+        }
+        const nested = objectShape(field);
+        if (property.properties && nested) assertNullsAccepted(`${path}.${key}`, property.properties, nested);
+      }
+    };
+    for (const tool of published) {
+      const shape = objectShape(toolInput[String(tool.name) as keyof typeof toolInput] as z.ZodType);
+      const properties = (tool.inputSchema as { properties?: Record<string, JsonProperty> }).properties;
+      if (shape && properties) assertNullsAccepted(String(tool.name), properties, shape);
+    }
   });
 });
 
@@ -4948,6 +4994,32 @@ describe("Sendblue provider", () => {
     assert.equal(JSON.parse(stored.metadata_json).replyTo, "SB_parent");
   });
 
+  /*
+   * What Sendblue sends for a reply inside an iMessage thread: `reply_to` is
+   * the message before it in the chat, which here is the owner's own tapback,
+   * and `thread_originator` is the message the thread hangs off.
+   */
+  it("quotes the thread's root, not the message before it, for a reply inside a thread", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const search = fakeSearch(db);
+    const reply = (text: string): typeof fetch => async () => new Response(JSON.stringify({
+      role: "assistant", parts: [{ type: "text", text }],
+    }), { status: 200 });
+    await runSmsAgent(db, search, RECIPIENT, "LMAO you and this bot", "SB_root", { fetcher: reply("haha"), inbound: { provider: "sendblue" } });
+    archiveReactionText(db, RECIPIENT, "Liked “haha”", "SB_tapback");
+    const answered: unknown[] = [];
+    await runSmsAgent(db, search, RECIPIENT, "I can remove it if you want btw", "SB_in_thread", {
+      fetcher: async (_input, init) => {
+        answered.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "nah it's good" }] }), { status: 200 });
+      },
+      inbound: { provider: "sendblue", replyTo: "SB_tapback", threadOriginator: "SB_root" },
+    });
+    const messages = (answered[0] as { messages: Array<{ parts: Array<{ text: string }> }> }).messages;
+    assert.equal(messages.at(-1)?.parts[0].text, '[replying to "LMAO you and this bot"] I can remove it if you want btw');
+  });
+
   it("carries an inline reply's target from the webhook through to the agent", async () => {
     const { db, api } = connectedFixture();
     await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send({
@@ -5140,6 +5212,13 @@ describe("Sendblue provider", () => {
     assert.equal(stranger.body.received, false);
     await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`)
       .send({ from_number: RECIPIENT, content: "   ", message_handle: "SB_empty" }).expect(400);
+    // A link's preview card arrives as its own wordless message: acknowledged, never a turn.
+    const preview = await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send({
+      from_number: RECIPIENT, content: "", message_handle: "SB_preview",
+      media_url: "https://storage.googleapis.com/inbound-file-store/R7j2VwI9_4A4904E8.pluginPayloadAttachment",
+    }).expect(200);
+    assert.equal(preview.body.ignored, "link_preview");
+    assert.equal(db.prepare("SELECT 1 FROM external_events WHERE payload_json LIKE '%SB_preview%'").get(), undefined);
 
     await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`)
       .send({ from_number: RECIPIENT, content: "STOP", message_handle: "SB_stop" }).expect(200);
@@ -5186,6 +5265,45 @@ describe("Sendblue provider", () => {
     assert.equal(message.status, "failed");
     assert.equal(message.reason.length, 500);
     assert.match(message.reason, /^Carrier rejected x+$/);
+  });
+
+  it("resends a threaded reply unthreaded once Sendblue reports it could not place it", async () => {
+    const { db, api } = connectedFixture();
+    const timestamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_sb_group','${USER_ID}','sms','group:sb_group_lost','cnv_group',?,?)
+    `).run(timestamp, timestamp);
+    db.prepare(`
+      INSERT INTO channel_messages(
+        id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at
+      ) VALUES('msg_lost','thread_sb_group','outbound','assistant','Dragonwilds is free on Game Pass','SB_lost','queued',?,?,?)
+    `).run(JSON.stringify({ replyTo: "43B1DE23-6F4D-4F1D-93A4-54A54EB41142" }), timestamp, timestamp);
+    const stub = stubSendblue({ "/api/send-group-message": () => accepted("SB_resent") });
+    try {
+      const receipt = {
+        message_handle: "SB_lost", status: "ERROR",
+        error_message: "Invalid reply target: Unable to resolve inline reply thread for selected message part",
+      };
+      await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt).expect(204);
+      for (let tries = 0; tries < 50 && !stub.calls.length; tries += 1) await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(stub.calls.length, 1);
+      assert.equal(stub.calls[0].body.group_id, "sb_group_lost");
+      assert.equal(stub.calls[0].body.content, "Dragonwilds is free on Game Pass");
+      assert.equal(stub.calls[0].body.reply_to, undefined, "sent on its own this time");
+      const row = db.prepare(`
+        SELECT provider_message_id,status,json_extract(metadata_json,'$.replyTo') reply_to,
+          json_extract(metadata_json,'$.deliveryError') reason,json_extract(metadata_json,'$.resentUnthreaded') resent
+        FROM channel_messages WHERE id='msg_lost'
+      `).get();
+      assert.deepEqual({ ...row as object }, { provider_message_id: "SB_resent", status: "queued", reply_to: null, reason: null, resent: 1 });
+
+      // A repeated receipt for the old handle finds nothing left to resend.
+      await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt).expect(204);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      assert.equal(stub.calls.length, 1);
+    } finally { stub.restore(); }
   });
 
   it("requires a recipient before the connection test and can disconnect", async () => {
@@ -6037,9 +6155,28 @@ describe("Sendblue provider", () => {
     const named = agentCallingMany([{ tool: "stay_quiet", input: { reason: "they're chatting" } }], "Saturday works, I'll remind you both.");
     const answeredAnyway = await runSmsAgent(db, search, address, "tom says fieldnote can remind us saturday", "SB_named", groupTurnOptions(named.fetcher));
     assert.equal(answeredAnyway.text, "Saturday works, I'll remind you both.");
-    assert.equal(toolOutputs(db, address).stay_quiet.error, "This message names Fieldnote; it is for you, whoever wrote it");
+    assert.match(toolOutputs(db, address).stay_quiet.error ?? "", /^This message names Fieldnote, so it is for you, whoever wrote it: .*a tapback alone is enough/);
     assert.equal(addressesAssistant("FIELDNOTE, remind us"), true);
     assert.equal(addressesAssistant("my fieldnotes from the trip"), false, "a word that merely contains the name is not the name");
+
+    // The name inside a quote is someone quoting a message, not talking to it.
+    const quoting = agentCallingMany([{ tool: "stay_quiet", input: { reason: "quoting the owner" } }], "should not be sent");
+    const quoted = await runSmsAgent(db, search, address, "lol he said “fieldnote stop quoting us” again", "SB_quoted_name", groupTurnOptions(quoting.fetcher));
+    assert.equal(quoted.text, "");
+    assert.equal(toolOutputs(db, address).stay_quiet.success, true);
+
+    // Named but asking nothing: a tapback is the answer, and quiet after it stands.
+    stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      const tapped = agentCallingMany([
+        { tool: "react_to_message", input: { reaction: "laugh" } },
+        { tool: "stay_quiet", input: { reason: "banter about the assistant" } },
+      ], "should not be sent");
+      const banter = await runSmsAgent(db, search, address, "LMAO fieldnote is so dramatic", "SB_banter_name", groupTurnOptions(tapped.fetcher));
+      assert.equal(banter.text, "");
+      assert.equal(toolOutputs(db, address).stay_quiet.success, true);
+      assert.ok(stub.calls.some(call => call.body.reaction === "laugh"));
+    } finally { stub.restore(); }
 
     // Wrote first, then tried to say nothing.
     round = 0;
@@ -6809,6 +6946,25 @@ describe("Sendblue provider", () => {
    * unviewed. Naming the assistant right after one is usually asking about
    * it, so that turn looks at what was held since the assistant last spoke.
    */
+  it("reads a reply inside someone else's thread as theirs, even when the message before it was the assistant's", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    await runSmsAgent(db, fakeSearch(db), address, "hello", "SB_hello_thread", groupTurnOptions(agentCallingMany([], "Hi!").fetcher, RECIPIENT, "the owner"));
+    const threadId = (db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string }).id;
+    db.prepare("UPDATE life_areas SET reply_mode='named_only' WHERE thread_id=?").run(threadId);
+    recordOutboundChannelMessage(db, "sms", address, "balance restored", "SB_assistant_line");
+    const metadata = { groupId: GROUP, speaker: WIFE, speakerName: "Sarah", speakerIsOwner: false };
+    // `reply_to` names the assistant's line only because it came just before; the thread is the owner's check-in question.
+    assert.equal(holdUntilNamed(db, address, "anxious 2/5", "SB_anxious", {
+      provider: "sendblue", groupId: GROUP, replyTo: "SB_assistant_line", threadOriginator: "SB_hello_thread",
+    }, metadata), true, "held: it answers the owner's thread, not the assistant");
+    assert.equal(holdUntilNamed(db, address, "lol same", "SB_in_assistant_thread", {
+      provider: "sendblue", groupId: GROUP, replyTo: "SB_anxious", threadOriginator: "SB_assistant_line",
+    }, metadata), false, "a reply in the assistant's own thread still reaches it");
+  });
+
   it("looks at the pictures held while it was told to stay out once it is named", () => withEnv({
     OPENAI_API_KEY: "sk-test",
     OPENAI_BASE_URL: undefined,
@@ -6912,6 +7068,8 @@ describe("Sendblue provider", () => {
     assert.equal(fillPendingPictures(once, ["[Image: two]"], 2), "it said\n[Picture attached]\nsee\n[Image: one]\n[Image: two]");
     assert.deepEqual(unviewedPictures("[Picture attached]", []), [], "typed words with no attachment are only words");
     assert.deepEqual(mediaUrlsOf({ NumMedia: "2", MediaUrl0: "https://api.twilio.com/m/0", MediaUrl1: "http://insecure/1" }), ["https://api.twilio.com/m/0"]);
+    // A pasted link's preview card is not a picture; the link is in the text.
+    assert.deepEqual(mediaUrlsOf({ media_url: "https://storage.googleapis.com/inbound-file-store/Fz80Hvbi_63C658CD-02CF-4832-AB91-F4823A4DAA9E.pluginPayloadAttachment" }), []);
 
     // The US host is the default; OPENAI_BASE_URL points elsewhere.
     await withEnv({ OPENAI_API_KEY: "sk-proj-test", OPENAI_BASE_URL: "https://api.openai.com/v1/" }, async () => {
@@ -6924,6 +7082,24 @@ describe("Sendblue provider", () => {
       };
       assert.deepEqual(await describeMedia(["https://cdn.example/logo.png"], regional), ["[Image: A logo.]"]);
       assert.equal(asked[1], "https://api.openai.com/v1/chat/completions");
+    });
+  });
+
+  it("converts an iPhone HEIC photo to JPEG before the vision model reads it", async () => {
+    // A 16x16 HEIC as macOS writes one, the same container an iPhone sends.
+    const heic = Buffer.from("AAAAJGZ0eXBoZWljAAAAAG1pZjFNaVBybWlhZk1pSEJoZWljAAABw21ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAHBpY3QAAAAAAAAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAAADnBpdG0AAAAAAAEAAAA4aWluZgAAAAAAAgAAABVpbmZlAgAAAAABAABodmMxAAAAABVpbmZlAgAAAQACAABFeGlmAAAAABppcmVmAAAAAAAAAA5jZHNjAAIAAQABAAAA5mlwcnAAAADFaXBjbwAAABNjb2xybmNseAACAAIABoAAAAAMY2xsaQDLAEAAAAAUaXNwZQAAAAAAAAAQAAAAEAAAAAlpcm90AAAAABBwaXhpAAAAAAMICAgAAABxaHZjQwEDcAAAALAAAAAAAB7wAPz9+PgAAAsDoAABABdAAQwB//8DcAAAAwCwAAADAAADAB5wJKEAAQAjQgEBA3AAAAMAsAAAAwAAAwAeoBQgQcCTDOIe5FlU3AgIGAKiAAEACUQBwGFyyERTZAAAABlpcG1hAAAAAAAAAAEAAQaBAgMFhoQAAAAsaWxvYwAAAABEAAACAAEAAAABAAACRQAAAQ4AAgAAAAEAAAH3AAAATgAAAAFtZGF0AAAAAAAAAWwAAAAGRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAEKADAAQAAAABAAAAEAAAAAAAAAEKKAGvoRLwKpMJel9LrP7qGNfbwkpadwmwNlk+lP4EUuxdQlYB6S6qYVmQ96Z5wrTpq3dY6h6JSbiSvAm/O0ohYmBN8kpRaJNBx1pCj+k/xgHE0PWo8k251s/tjxW0kCJ4nvB/dBVW/mJv/93L9ll09+HT3qjc5dRwCU5qWinpTbpKSTuO6SlPhiwoDckf+RnJ/xf/Gf9W/jxK+ip3p9BDkLW/9kBWa6HOJ//4pIAKHKfRrlKAD69yhQTxsOoOBzEBl5bPH97DasWAJgdj/pk87Pi5q7UwX/7JHO5knByEml//vBMAWNmI+UcTL88qgwfd9EAFZQRH4DDIJB3gCJN/fmyI4KezD9N0/+A=", "base64");
+    await withEnv({ OPENAI_API_KEY: "sk-proj-test" }, async () => {
+      let sent = "";
+      const fetcher: typeof fetch = async (input, init) => {
+        if (String(input).startsWith("https://cdn.example")) {
+          return new Response(new Uint8Array(heic), { headers: { "content-type": "image/heic" } });
+        }
+        sent = String(init?.body);
+        return json({ choices: [{ message: { content: "A painting." } }] });
+      };
+      assert.deepEqual(await describeMedia(["https://cdn.example/IMG_7824.heic"], fetcher), ["[Image: A painting.]"]);
+      const url = (JSON.parse(sent) as { messages: Array<{ content: unknown }> }).messages[1].content as Array<{ image_url: { url: string } }>;
+      assert.match(url[0].image_url.url, /^data:image\/jpeg;base64,\/9j\//, "the model is sent a JPEG");
     });
   });
 
@@ -8023,6 +8199,22 @@ describe("Sendblue provider", () => {
     assert.equal(paged.has_more, true);
     assert.ok(paged.next_from);
 
+    // "The last thing Sarah sent" in a busy range: the latest messages, still in the order they were said.
+    type Latest = { messages: Array<{ speaker: string; content: string }>; has_earlier?: boolean; has_more?: boolean };
+    const latest = await executeAgentTool(db, search, "read_conversation", { from, to, limit: 2, newest_first: true }, context) as Latest;
+    assert.deepEqual(latest.messages.map(message => message.content), ["I'll bring dessert", "Nice."]);
+    assert.equal(latest.has_earlier, true);
+    assert.equal(latest.has_more, undefined, "there is no forward page from the end of the range");
+    const whole = await executeAgentTool(db, search, "read_conversation", { from, to, newest_first: true }, context) as Latest;
+    assert.equal(whole.messages.length, 4);
+    assert.equal(whole.has_earlier, false);
+    const latestSarah = await executeAgentTool(db, search, "read_conversation", { from, to, speaker: "sarah", limit: 1, newest_first: true }, context) as Latest;
+    assert.deepEqual(latestSarah.messages.map(message => message.content), ["dinner at 7 friday?"]);
+    await assert.rejects(
+      executeAgentTool(db, search, "read_conversation", { from: paged.next_from, to, newest_first: true }, context),
+      /pass newest_first null/,
+    );
+
     db.prepare(`
       INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
       VALUES('thread_private',?,'sms',?,'cnv_private',?,?)
@@ -8494,7 +8686,7 @@ describe("Sendblue provider", () => {
       const rounds: ToolCall[][] = [
         [{ tool: "list_group_chats", input: {} }],
         [
-          { tool: "read_conversation", input: { thread_id: "thread_goopers", from, to: null, speaker: null, limit: null } },
+          { tool: "read_conversation", input: { thread_id: "thread_goopers", from, to: null, speaker: null, limit: null, newest_first: true } },
           { tool: "send_to_group", input: { ...post, text: "damn who is that" } },
         ],
       ];
@@ -8572,6 +8764,14 @@ describe("Sendblue provider", () => {
     assert.equal(isReactionText("Laughed at a photo"), true);
     assert.equal(isReactionText('Liked "The Bear"'), false);
     assert.equal(isReactionText("Loved the dinner last night"), false);
+  });
+
+  it("recognises French tapbacks as iOS spaces them, with no-break spaces inside the guillemets", () => {
+    // Exactly as they arrived from Sendblue: U+00A0 after « and before ».
+    assert.equal(isReactionText("A ajouté un «\u00a0J’adore\u00a0» à «\u00a0That’s cool af. You got this sis\u00a0\u00a0»."), true);
+    assert.equal(isReactionText("A ajouté un rire à «\u00a0But actually stop quoting what we say or using weird paraquotes Goop.\u00a0»."), true);
+    assert.equal(isReactionText("A réagi avec ❤️ à «\u00a0I love you all too.\u00a0»"), true);
+    assert.equal(isReactionText("A ajouté un rire à la fin de la soirée"), false);
   });
 });
 

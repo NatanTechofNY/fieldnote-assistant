@@ -284,6 +284,16 @@ function assistantParts(content: string, metadataJson: string): AgentPart[] {
   return [...writes, { type: "text", text: content }];
 }
 
+/**
+ * The message an inline reply sits under. Sendblue's `reply_to` on an inbound
+ * text is the message before it in the chat, which can be a tapback or a line
+ * outside the thread; `thread_originator` is the thread's root and decides
+ * whenever it is present.
+ */
+function threadParentHandle(inbound: { replyTo?: string; threadOriginator?: string } | undefined): string | undefined {
+  return inbound?.threadOriginator || inbound?.replyTo || undefined;
+}
+
 /** How much of a quoted parent is worth carrying before it crowds out the reply. */
 const QUOTE_LENGTH = 200;
 
@@ -298,7 +308,7 @@ const QUOTE_LENGTH = 200;
 function quotedParent(db: Db, threadId: string, metadataJson: string): string | null {
   const handle = ((): string | undefined => {
     try {
-      return (JSON.parse(metadataJson) as { replyTo?: string }).replyTo;
+      return threadParentHandle(JSON.parse(metadataJson) as { replyTo?: string; threadOriginator?: string });
     } catch {
       return undefined;
     }
@@ -627,10 +637,10 @@ export function archivedInboundText(db: Db, address: string, providerMessageId: 
 
 /** Whether the message is an inline reply to one of the assistant's own messages. */
 function repliesToAssistant(db: Db, threadId: string, inbound: InboundContext | undefined): boolean {
-  const parents = [inbound?.replyTo, inbound?.threadOriginator].filter((handle): handle is string => Boolean(handle));
-  return parents.some(handle => Boolean(db.prepare(`
+  const handle = threadParentHandle(inbound);
+  return Boolean(handle && db.prepare(`
     SELECT 1 found FROM channel_messages WHERE thread_id=? AND provider_message_id=? AND role='assistant'
-  `).get(threadId, handle)));
+  `).get(threadId, handle));
 }
 
 /** How long after the evening question the answers to it are still coming in. */

@@ -1283,7 +1283,7 @@
     "type": "function",
     "function": {
       "name": "read_conversation",
-      "description": "Reads this conversation's messages over a date range, oldest first, with who said each. Use for \"what did Halo say yesterday\" or \"what did we plan on Friday\".",
+      "description": "Reads this conversation's messages over a date range with who said each: from the start, or the latest with newest_first. Use for \"what did Halo say yesterday\" or finding a message.",
       "strict": true,
       "parameters": {
         "type": "object",
@@ -1310,9 +1310,13 @@
             "minimum": 1,
             "maximum": 100,
             "description": "Most messages to return; null for 50. When has_more is true, call again with from=next_from and to=next_to"
+          },
+          "newest_first": {
+            "type": ["boolean", "null"],
+            "description": "True for the latest messages in the range, for \"the last picture\" or \"what she just said\"; still listed oldest first, with has_earlier true when older ones were left out. Null reads from the start of the range"
           }
         },
-        "required": ["thread_id", "from", "to", "speaker", "limit"],
+        "required": ["thread_id", "from", "to", "speaker", "limit", "newest_first"],
         "additionalProperties": false
       }
     }

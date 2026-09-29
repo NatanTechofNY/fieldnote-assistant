@@ -416,10 +416,11 @@ const rangeStart = z.string().trim().refine(
   "Use a YYYY-MM-DD date, an RFC 3339 date-time with an offset, or next_from as returned",
 );
 
+// The published schemas send null for "unchanged", so every field here accepts it.
 const memoryToolFields = {
-  kind: memoryKind.optional(),
+  kind: memoryKind.nullable().optional(),
   title: z.string().trim().max(300).nullable().optional(),
-  content: z.string().trim().min(1).max(50_000).optional(),
+  content: z.string().trim().min(1).max(50_000).nullable().optional(),
   mood_label: z.string().trim().min(1).max(100).nullable().optional(),
   mood_score: z.number().int().min(1).max(5).nullable().optional(),
   moods,
@@ -603,6 +604,7 @@ export const toolInput = {
     to: dateOrInstant.nullable().optional(),
     speaker: z.string().trim().min(1).max(60).nullable().optional(),
     limit: z.coerce.number().int().min(1).max(100).nullable().optional(),
+    newest_first: z.boolean().nullable().optional(),
   }).strict(),
   stay_quiet: z.object({ reason: z.string().trim().min(1).max(200) }).strict(),
   list_group_chats: z.object({}).strict(),

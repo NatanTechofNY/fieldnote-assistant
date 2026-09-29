@@ -7,6 +7,7 @@
  * again. Without a key the agent is told a picture came that it cannot see.
  */
 
+import heicConvert from "heic-convert";
 import { publicFetch, readCapped } from "./public-fetch.ts";
 
 /**
@@ -38,11 +39,24 @@ export function imageInputMode(): ImageInputMode {
   return process.env.OPENAI_API_KEY?.trim() ? "describe" : "off";
 }
 
+/**
+ * The rich link preview Messages attaches beside a pasted link (a TikTok, a
+ * YouTube video). It is Apple's own archive of the page's card, not a picture,
+ * and the link it previews is already in the text.
+ */
+function isLinkPreview(url: string): boolean {
+  try {
+    return /\.pluginPayloadAttachment$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** The https media links in a provider payload, whichever field names it uses. */
 export function mediaUrlsOf(payload: Record<string, unknown>): string[] {
   const urls: string[] = [];
   const add = (value: unknown) => {
-    if (typeof value === "string" && /^https:\/\//i.test(value.trim())) urls.push(value.trim());
+    if (typeof value === "string" && /^https:\/\//i.test(value.trim()) && !isLinkPreview(value.trim())) urls.push(value.trim());
   };
   // Sendblue: one `media_url` per message.
   add(payload.media_url);
@@ -68,15 +82,25 @@ async function download(
   return { type, bytes: await readCapped(response, MAX_IMAGE_BYTES) };
 }
 
+/** What an iPhone sends a photo as, and the vision model does not read. */
+const HEIC_TYPE = /^image\/hei[cf](?:-sequence)?$/;
+/** Enough for the low-detail read, and it keeps a 12-megapixel photo's JPEG well under the request limit. */
+const HEIC_JPEG_QUALITY = 0.6;
+
 async function describeOne(url: string, fetcher: typeof fetch): Promise<string> {
   const signal = AbortSignal.timeout(TIMEOUT_MS);
-  const media = await download(url, signal, fetcher);
+  let media = await download(url, signal, fetcher);
   if (!media.bytes) {
     if (media.type.startsWith("video/")) return "[Video attached — you cannot watch it]";
     if (media.type.startsWith("audio/")) return "[Voice or audio message attached — you cannot listen to it]";
     return "[Attachment — not a picture you can see]";
   }
-  // HEIC is what an iPhone sends; the vision model reads JPEG, PNG, GIF, and WebP.
+  if (HEIC_TYPE.test(media.type)) {
+    const jpeg = await heicConvert({ buffer: media.bytes, format: "JPEG", quality: HEIC_JPEG_QUALITY });
+    signal.throwIfAborted();
+    media = { type: "image/jpeg", bytes: Buffer.from(jpeg) };
+  }
+  // The vision model reads JPEG, PNG, GIF, and WebP.
   if (!/^image\/(jpeg|png|gif|webp)$/.test(media.type)) return "[Picture attached in a format you cannot view]";
   const response = await fetcher(openaiUrl(), {
     method: "POST",
