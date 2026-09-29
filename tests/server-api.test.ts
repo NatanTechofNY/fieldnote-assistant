@@ -5279,31 +5279,70 @@ describe("Sendblue provider", () => {
         id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at
       ) VALUES('msg_lost','thread_sb_group','outbound','assistant','Dragonwilds is free on Game Pass','SB_lost','queued',?,?,?)
     `).run(JSON.stringify({ replyTo: "43B1DE23-6F4D-4F1D-93A4-54A54EB41142" }), timestamp, timestamp);
-    const stub = stubSendblue({ "/api/send-group-message": () => accepted("SB_resent") });
-    try {
-      const receipt = {
-        message_handle: "SB_lost", status: "ERROR",
-        error_message: "Invalid reply target: Unable to resolve inline reply thread for selected message part",
-      };
-      await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt).expect(204);
-      for (let tries = 0; tries < 50 && !stub.calls.length; tries += 1) await new Promise(resolve => setTimeout(resolve, 10));
-      await new Promise(resolve => setTimeout(resolve, 20));
-      assert.equal(stub.calls.length, 1);
-      assert.equal(stub.calls[0].body.group_id, "sb_group_lost");
-      assert.equal(stub.calls[0].body.content, "Dragonwilds is free on Game Pass");
-      assert.equal(stub.calls[0].body.reply_to, undefined, "sent on its own this time");
-      const row = db.prepare(`
-        SELECT provider_message_id,status,json_extract(metadata_json,'$.replyTo') reply_to,
-          json_extract(metadata_json,'$.deliveryError') reason,json_extract(metadata_json,'$.resentUnthreaded') resent
-        FROM channel_messages WHERE id='msg_lost'
-      `).get();
-      assert.deepEqual({ ...row as object }, { provider_message_id: "SB_resent", status: "queued", reply_to: null, reason: null, resent: 1 });
+    const receipt = {
+      message_handle: "SB_lost", status: "ERROR",
+      error_message: "Invalid reply target: Unable to resolve inline reply thread for selected message part",
+    };
+    // The receipt only files the resend; the worker sends it.
+    await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt).expect(204);
+    const resend = () => db.prepare(`
+      SELECT provider_message_id,status,json_extract(metadata_json,'$.replyTo') reply_to,
+        json_extract(metadata_json,'$.deliveryError') reason,json_extract(metadata_json,'$.unthreadedResend') resend
+      FROM channel_messages WHERE id='msg_lost'
+    `).get() as { provider_message_id: string; status: string; reply_to: string | null; reason: string | null; resend: string };
+    assert.equal(JSON.parse(resend().resend).state, "pending");
 
-      // A repeated receipt for the old handle finds nothing left to resend.
-      await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt).expect(204);
-      await new Promise(resolve => setTimeout(resolve, 30));
-      assert.equal(stub.calls.length, 1);
-    } finally { stub.restore(); }
+    const sends: Array<{ to: string; body: string; options?: { groupId?: string; replyTo?: string } }> = [];
+    let outage = true;
+    const worker = {
+      sendSms: async (_db: Db, to: string, body: string, options?: { groupId?: string; replyTo?: string }) => {
+        sends.push({ to, body, options });
+        if (outage) throw new TransientFailure("Sendblue is down");
+        return { sid: "SB_resent", status: "queued" };
+      },
+      runSmsAgent: async () => ({ text: "", threadId: "unused" }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    };
+    // An outage on the resend is waited out, not the end of the reply.
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    const waiting = JSON.parse(resend().resend) as { state: string; attempts: number; after: string };
+    assert.deepEqual([waiting.state, waiting.attempts], ["pending", 1]);
+    assert.ok(Date.parse(waiting.after) > Date.now(), "behind a backoff");
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.equal(sends.length, 1, "not before the backoff runs out");
+
+    outage = false;
+    db.prepare("UPDATE channel_messages SET metadata_json=json_set(metadata_json,'$.unthreadedResend.after',?) WHERE id='msg_lost'")
+      .run(new Date(Date.now() - 1000).toISOString());
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.equal(sends.length, 2);
+    assert.deepEqual(sends[1], {
+      to: "group:sb_group_lost", body: "Dragonwilds is free on Game Pass", options: { groupId: "sb_group_lost" },
+    }, "sent on its own this time");
+    const sent = resend();
+    assert.deepEqual(
+      [sent.provider_message_id, sent.status, sent.reply_to, sent.reason, JSON.parse(sent.resend).state],
+      ["SB_resent", "queued", null, null, "sent"],
+    );
+
+    // A repeated receipt for the old handle finds nothing left to resend.
+    await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt).expect(204);
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.equal(sends.length, 2);
+
+    // A resend refused on its own terms is given up rather than retried.
+    db.prepare(`
+      INSERT INTO channel_messages(
+        id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at
+      ) VALUES('msg_lost_2','thread_sb_group','outbound','assistant','second','SB_lost_2','queued',?,?,?)
+    `).run(JSON.stringify({ replyTo: "SOME-PART" }), timestamp, timestamp);
+    await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send({ ...receipt, message_handle: "SB_lost_2" }).expect(204);
+    await runWorkerOnce(db, fakeSearch(db), {
+      ...worker,
+      sendSms: async () => { throw new Error("Sendblue could not send the message: DECLINED"); },
+    });
+    const refused = db.prepare("SELECT json_extract(metadata_json,'$.unthreadedResend') resend FROM channel_messages WHERE id='msg_lost_2'").get() as { resend: string };
+    assert.equal(JSON.parse(refused.resend).state, "gave_up");
   });
 
   it("requires a recipient before the connection test and can disconnect", async () => {

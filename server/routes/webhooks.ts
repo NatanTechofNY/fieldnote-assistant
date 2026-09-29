@@ -1,12 +1,12 @@
-import { now, queueIndexJob } from "../db.ts";
+import { now } from "../db.ts";
 import { enqueueExternalEvent } from "../event-ingestion.ts";
 import { markOwnerLeftGroup } from "../group-members.ts";
-import { groupIdOfAddress } from "../group-thread.ts";
 import { mediaUrlsOf } from "../image-input.ts";
 import { getNotificationPreferences, getSendblueSecret, getTwilioSecret, recordSendblueNotice, setSmsOptOut } from "../integrations.ts";
-import { isInboundSenderAllowed, ownerHasSpokenInGroup, sendSms } from "../messaging.ts";
+import { isInboundSenderAllowed, ownerHasSpokenInGroup } from "../messaging.ts";
 import { normalizeSendblueStatus, readSendblueInbound, SENDBLUE_INBOUND_PATH, SENDBLUE_LINE_ASSIGNED_PATH, SENDBLUE_LINE_BLOCKED_PATH, SENDBLUE_STATUS_PATH, verifySendblueWebhook } from "../sendblue-service.ts";
 import { validateTwilioSignature } from "../twilio-service.ts";
+import { LOST_REPLY_TARGET, queueUnthreadedResend } from "../unthreaded-resend.ts";
 import { requestWorkerWake } from "../worker.ts";
 import type { Db } from "../types.ts";
 import type { RouteContext } from "./context.ts";
@@ -39,46 +39,6 @@ function applyDeliveryStatus(
   db.prepare(`
     UPDATE reminders SET status='failed',last_error=?,updated_at=? WHERE provider_message_id=?
   `).run(error, now(), providerMessageId);
-}
-
-/** Sendblue accepts an inline reply and only later finds the part it names gone. */
-const LOST_REPLY_TARGET = /invalid reply target/i;
-
-/**
- * A threaded reply Sendblue took and then could not place never reached anyone.
- * The words still matter more than the thread, so the message goes out once
- * more on its own and the row takes the new handle; the flag keeps a second
- * receipt for the same row from sending it twice.
- */
-async function resendUnthreaded(db: Db, providerMessageId: string): Promise<void> {
-  const row = db.prepare(`
-    SELECT m.id,m.content,m.metadata_json,t.address FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
-    WHERE m.provider_message_id=? AND m.role='assistant' AND m.status='failed'
-      AND json_extract(m.metadata_json,'$.replyTo') IS NOT NULL
-      AND json_extract(m.metadata_json,'$.resentUnthreaded') IS NULL
-  `).get(providerMessageId) as { id: string; content: string; metadata_json: string | null; address: string } | undefined;
-  if (!row) return;
-  db.prepare(`
-    UPDATE channel_messages SET metadata_json=json_set(COALESCE(NULLIF(metadata_json,''),'{}'),'$.resentUnthreaded',json('true'))
-    WHERE id=?
-  `).run(row.id);
-  const metadata = JSON.parse(row.metadata_json || "{}") as { mediaUrl?: unknown };
-  const mediaUrl = typeof metadata.mediaUrl === "string" ? metadata.mediaUrl : undefined;
-  const groupId = groupIdOfAddress(row.address);
-  try {
-    const sent = await sendSms(db, row.address, mediaUrl && row.content === "(picture)" ? "" : row.content, {
-      ...(groupId ? { groupId } : {}),
-      ...(mediaUrl ? { mediaUrl } : {}),
-    });
-    db.prepare(`
-      UPDATE channel_messages SET provider_message_id=?,status=?,updated_at=?,
-        metadata_json=json_remove(metadata_json,'$.replyTo','$.deliveryError')
-      WHERE id=?
-    `).run(sent.sid, sent.status === "queued" ? "queued" : "sent", now(), row.id);
-    queueIndexJob(db, "channel_message", row.id);
-  } catch (error) {
-    console.warn("Resending an unthreadable reply failed:", error instanceof Error ? error.message : error);
-  }
 }
 
 export function registerWebhookRoutes({ app, db }: RouteContext): void {
@@ -193,7 +153,9 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
     const errorMessage = typeof payload.error_message === "string" ? payload.error_message : "";
     const status = normalizeSendblueStatus(providerStatus);
     applyDeliveryStatus(db, messageHandle, status, errorMessage || providerStatus || "Sendblue delivery failed");
-    if (status === "failed" && LOST_REPLY_TARGET.test(errorMessage)) void resendUnthreaded(db, messageHandle);
+    if (status === "failed" && LOST_REPLY_TARGET.test(errorMessage) && queueUnthreadedResend(db, messageHandle)) {
+      requestWorkerWake();
+    }
     return res.sendStatus(204);
   });
   /*

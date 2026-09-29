@@ -26,6 +26,7 @@ import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks, syncOccurrenceCompletion } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
+import { sendQueuedUnthreadedResends } from "./unthreaded-resend.ts";
 import { speakerNameInGroup } from "./group-members.ts";
 import { groupAddress, groupIdOfAddress, isReactionText } from "./group-thread.ts";
 import { readSendblueInbound, type StopTypingIndicator } from "./sendblue-service.ts";
@@ -1202,6 +1203,11 @@ export async function runWorkerOnce(
         }
       }
     }
+  }
+  try {
+    if (await sendQueuedUnthreadedResends(db, send)) search.flushSoon();
+  } catch (error) {
+    console.error("Resending unthreadable replies failed", error);
   }
   const preferences = getNotificationPreferences(db);
   const local = localParts(new Date(), preferences.timezone);
