@@ -48,6 +48,11 @@ export function addressesAssistant(text: string, nickname?: string | null): bool
   return new RegExp(`(^|[^\\p{L}\\p{N}])(?:${names.join("|")})(?![\\p{L}\\p{N}])`, "iu").test(text);
 }
 
+/** `text` with anything inside curly quotes or guillemets taken out: what is being quoted rather than said. */
+export function withoutQuotedSpans(text: string): string {
+  return text.replace(/“[^”]*”|«[^»]*»/gu, " ");
+}
+
 /*
  * A tapback from a phone that cannot send it as a reaction arrives as plain
  * text quoting the message it was placed on: `Loved “…”` in English, `A réagi
@@ -60,7 +65,8 @@ const REACTION_TEXT = [
   /^(?:Loved|Liked|Disliked|Laughed at|Emphasized|Questioned|Reacted .{1,16} to|Removed (?:a|an) .{1,24} from)\s+“[\s\S]*”\s*\.?\s*$/u,
   // A tapback on a picture or a file has nothing to quote.
   /^(?:Loved|Liked|Disliked|Laughed at|Emphasized|Questioned|Reacted .{1,16} to) (?:an image|a photo|a video|an attachment|a movie|a sticker|an audio message)\s*\.?$/u,
-  /^(?:A réagi avec .{1,16} à|A ajouté (?:un|une) « [^»]{1,32} » à|A aimé|N’aime pas|N'aime pas|A ri à propos de|A mis en évidence|A mis en doute|A retiré .{1,40} de)\s+«[\s\S]*»\s*\.?\s*$/u,
+  // iOS pads French guillemets with a no-break space, which `\s` covers and a typed space does not.
+  /^(?:A réagi avec .{1,16} à|A ajouté (?:un|une)\s(?:«\s*[^»]{1,32}\s*»|[^«»]{1,32}?)\sà|A aimé|N’aime pas|N'aime pas|A ri à propos de|A mis en évidence|A mis en doute|A retiré .{1,40} de)\s+«[\s\S]*»\s*\.?\s*$/u,
 ];
 
 /** Whether `text` is a tapback that arrived as a message rather than as a reaction. */

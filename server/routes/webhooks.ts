@@ -6,6 +6,7 @@ import { getNotificationPreferences, getSendblueSecret, getTwilioSecret, recordS
 import { isInboundSenderAllowed, ownerHasSpokenInGroup } from "../messaging.ts";
 import { normalizeSendblueStatus, readSendblueInbound, SENDBLUE_INBOUND_PATH, SENDBLUE_LINE_ASSIGNED_PATH, SENDBLUE_LINE_BLOCKED_PATH, SENDBLUE_STATUS_PATH, verifySendblueWebhook } from "../sendblue-service.ts";
 import { validateTwilioSignature } from "../twilio-service.ts";
+import { LOST_REPLY_TARGET, queueUnthreadedResend } from "../unthreaded-resend.ts";
 import { requestWorkerWake } from "../worker.ts";
 import type { Db } from "../types.ts";
 import type { RouteContext } from "./context.ts";
@@ -109,7 +110,14 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
     const inbound = readSendblueInbound(payload);
     const { from, messageHandle, groupId, participants } = inbound;
     const body = inbound.body?.trim() ?? "";
-    if (!from || !messageHandle || (!body && !mediaUrlsOf(payload).length)) return res.status(400).json({ received: false });
+    if (!from || !messageHandle) return res.status(400).json({ received: false });
+    // Messages sends a pasted link's preview card as its own message with no
+    // words; it is acknowledged so Sendblue does not deliver it again.
+    if (!body && !mediaUrlsOf(payload).length) {
+      return typeof payload.media_url === "string" && payload.media_url.trim()
+        ? res.json({ received: true, ignored: "link_preview" })
+        : res.status(400).json({ received: false });
+    }
     const preferences = getNotificationPreferences(db);
     const owner = preferences.recipientPhone;
     const ownerPresent = Boolean(groupId && owner && participants.includes(owner));
@@ -143,12 +151,11 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
     if (!messageHandle) return res.sendStatus(204);
     const providerStatus = typeof payload.status === "string" ? payload.status : "";
     const errorMessage = typeof payload.error_message === "string" ? payload.error_message : "";
-    applyDeliveryStatus(
-      db,
-      messageHandle,
-      normalizeSendblueStatus(providerStatus),
-      errorMessage || providerStatus || "Sendblue delivery failed",
-    );
+    const status = normalizeSendblueStatus(providerStatus);
+    applyDeliveryStatus(db, messageHandle, status, errorMessage || providerStatus || "Sendblue delivery failed");
+    if (status === "failed" && LOST_REPLY_TARGET.test(errorMessage) && queueUnthreadedResend(db, messageHandle)) {
+      requestWorkerWake();
+    }
     return res.sendStatus(204);
   });
   /*

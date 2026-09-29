@@ -92,20 +92,29 @@ function messageReactions(message: ChannelMessage): string[] {
     .map(value => REACTION_GLYPHS[value] ?? value);
 }
 
+function metadataHandle(message: ChannelMessage, key: "replyTo" | "threadOriginator"): string | null {
+  const value = message.metadata[key];
+  return typeof value === "string" && value ? value : null;
+}
+
 /**
- * The message a threaded reply was drawn under. The handle is stored on both
- * sides of the thread — inbound from the webhook, outbound from what Sendblue
- * confirmed it delivered — so this reads the same either way.
+ * The message a threaded reply was drawn under, as Messages draws it: the
+ * thread's first message. Sendblue's `reply_to` on an inbound text is only the
+ * message before it in the chat, often a tapback or one never archived, so the
+ * `thread_originator` handle decides. An outbound reply names the inbound text
+ * it answered, and shows that text's own thread root when it has one.
  */
 function replyParent(
   message: ChannelMessage,
   byProviderId: Map<string, ChannelMessage>,
 ): { content: string } | null {
-  const handle = typeof message.metadata.replyTo === "string" ? message.metadata.replyTo : null;
+  const handle = metadataHandle(message, "threadOriginator") ?? metadataHandle(message, "replyTo");
   if (!handle) return null;
+  const parent = byProviderId.get(handle);
+  const root = parent && metadataHandle(parent, "threadOriginator");
   // A reply can point at a message from before this archive existed, and that it
   // was threaded at all is still worth drawing.
-  return byProviderId.get(handle) ?? { content: "an earlier message" };
+  return (root ? byProviderId.get(root) : undefined) ?? parent ?? { content: "an earlier message" };
 }
 
 /**

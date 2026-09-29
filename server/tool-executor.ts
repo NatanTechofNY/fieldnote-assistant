@@ -18,7 +18,7 @@ import { assertSendableImage, giphyConfig, imagesInMarkdown, isRememberedImage, 
 import { refreshRosterMemory, rememberGroupMember } from "./group-members.ts";
 import {
   addressesAssistant, ASSISTANT_NAME, GROUP_ADDRESS_PREFIX, groupIdOfAddress, OWNER_SPEAKER_NAME, redactedNumber,
-  speakerLabel, speakerNameOf,
+  speakerLabel, speakerNameOf, withoutQuotedSpans,
 } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset, zonedToInstant } from "./local-time.ts";
@@ -952,10 +952,14 @@ export async function executeAgentTool(
     // whether a message is for the assistant is the model's call, but a
     // message that says its name is not a close call, and no one in the chat
     // should be able to talk it into ignoring one.
+    // A name inside quotation marks is someone quoting a message, often a tapback
+    // on one, not someone talking to the assistant. A tapback already answers a
+    // message that names it but asks for nothing.
     const nickname = groupVoice(db, scope.lifeAreaId).assistantNickname;
-    if (context.inboundText && addressesAssistant(context.inboundText, nickname)) {
-      const named = addressesAssistant(context.inboundText) ? ASSISTANT_NAME : nickname;
-      throw new Error(`This message names ${named}; it is for you, whoever wrote it`);
+    const ownWords = context.inboundText ? withoutQuotedSpans(context.inboundText) : "";
+    if (!context.reacted && addressesAssistant(ownWords, nickname)) {
+      const named = addressesAssistant(ownWords) ? ASSISTANT_NAME : nickname;
+      throw new Error(`This message names ${named}, so it is for you, whoever wrote it: answer it, and when it asks nothing, a tapback alone is enough`);
     }
     context.stayedQuiet = true;
     // Who was passed over is kept beside why, so a suppressed request from the
@@ -1220,6 +1224,8 @@ export async function executeAgentTool(
     if (to <= from) throw new Error("The end of the range has to come after its start");
     const wanted = typeof input.speaker === "string" ? input.speaker.trim().toLowerCase() : null;
     const limit = Number(input.limit) || 50;
+    const newestFirst = input.newest_first === true;
+    if (newestFirst && cursor) throw new Error("next_from pages forward from the start of the range; pass newest_first null with it");
     // Speakers are matched on their label, which is worked out per row, so a
     // filtered read scans further before it is cut; either way it is bounded.
     const rows = db.prepare(`
@@ -1229,7 +1235,7 @@ export async function executeAgentTool(
         AND NOT (role='user' AND COALESCE(json_extract(metadata_json,'$.internal'),0)=1)
         AND json_extract(metadata_json,'$.copyOf') IS NULL
         AND json_extract(metadata_json,'$.reactionText') IS NULL
-      ORDER BY created_at,rowid LIMIT ?
+      ORDER BY created_at ${newestFirst ? "DESC" : ""},rowid ${newestFirst ? "DESC" : ""} LIMIT ?
     `).all(thread.id, from, from, afterRowid, to, wanted ? SPEAKER_SCAN_LIMIT : limit + 1) as Array<{
       id: string; role: "user" | "assistant"; content: string; created_at: string; metadata_json: string; rowid: number;
     }>;
@@ -1243,25 +1249,30 @@ export async function executeAgentTool(
         || (row.role === "assistant" && ["assistant", ASSISTANT_NAME.toLowerCase()].includes(wanted)))
       : labelled;
     const MAX_CONTENT = 1000;
+    // Read from the end, the page is still listed in the order it was said.
+    const page = newestFirst ? matching.slice(0, limit).reverse() : matching.slice(0, limit);
     return {
       thread_id: thread.id,
       ...(thread.group_name ? { group_name: thread.group_name } : {}),
       timezone,
       from: localIsoWithOffset(new Date(from), timezone),
       to: localIsoWithOffset(new Date(to), timezone),
-      messages: matching.slice(0, limit).map(row => ({
+      messages: page.map(row => ({
         message_id: row.id,
         at: localIsoWithOffset(new Date(row.created_at), timezone),
         speaker: row.speaker,
         content: row.content.length > MAX_CONTENT ? `${row.content.slice(0, MAX_CONTENT)}…` : row.content,
       })),
-      // The next page is the same range from the next message on: pass both back.
-      ...(matching.length > limit
-        ? { has_more: true, next_from: `${matching[limit].created_at}#${matching[limit].rowid}`, next_to: to }
-        // A speaker read that stopped at its scan bound has not seen the rest of the range yet.
-        : wanted && rows.length === SPEAKER_SCAN_LIMIT
-          ? { has_more: true, next_from: `${rows.at(-1)!.created_at}#${rows.at(-1)!.rowid + 1}`, next_to: to }
-          : { has_more: false }),
+      ...(newestFirst
+        // Older messages were left out; a narrower `to` or a read from the start reaches them.
+        ? { has_earlier: matching.length > limit || Boolean(wanted && rows.length === SPEAKER_SCAN_LIMIT) }
+        // The next page is the same range from the next message on: pass both back.
+        : matching.length > limit
+          ? { has_more: true, next_from: `${matching[limit].created_at}#${matching[limit].rowid}`, next_to: to }
+          // A speaker read that stopped at its scan bound has not seen the rest of the range yet.
+          : wanted && rows.length === SPEAKER_SCAN_LIMIT
+            ? { has_more: true, next_from: `${rows.at(-1)!.created_at}#${rows.at(-1)!.rowid + 1}`, next_to: to }
+            : { has_more: false }),
     };
   }
   if (name === "list_todos") {
@@ -1367,9 +1378,9 @@ export async function executeAgentTool(
     const clear = clearedFields(patch);
     const value = (key: string, currentValue: unknown) =>
       clear.has(key) ? (key === "extra_reminders" ? [] : null) : patch[key] ?? currentValue;
+    // Null in a patch means unchanged, so only an area the patch would really move to counts.
     if (!scope && current.life_area_source === "user"
-      && patch.life_area_id !== undefined
-      && patch.life_area_id !== current.life_area_id
+      && value("life_area_id", current.life_area_id) !== current.life_area_id
       && input.override_user_classification !== true) {
       throw new Error("Life area is user-classified; explicit override confirmation is required");
     }
@@ -1508,9 +1519,9 @@ export async function executeAgentTool(
     const clear = clearedFields(patch);
     const value = (key: string, currentValue: unknown) =>
       clear.has(key) ? (key === "tags" ? [] : null) : patch[key] ?? currentValue;
+    // Null in a patch means unchanged, so only an area the patch would really move to counts.
     if (!scope && current.life_area_source === "user"
-      && patch.life_area_id !== undefined
-      && patch.life_area_id !== current.life_area_id
+      && value("life_area_id", current.life_area_id) !== current.life_area_id
       && input.override_user_classification !== true) {
       throw new Error("Life area is user-classified; explicit override confirmation is required");
     }
