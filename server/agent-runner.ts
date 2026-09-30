@@ -1,12 +1,14 @@
 import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./algolia.ts";
 import { ensureGroupLifeArea, groupAreas, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
 import { recordGroupParticipants, rosterLine } from "./group-members.ts";
-import { addressesAssistant, OWNER_SPEAKER_NAME, redactedNumber, speakerLabel } from "./group-thread.ts";
+import { addressesAssistant, OWNER_SPEAKER_NAME, redactedNumber, speakerLabel, withoutQuotedSpans } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
-import { describeMedia, fillPendingPictures, hasImageDescription, imageInputMode, PICTURE_PENDING, unviewedPictures } from "./image-input.ts";
+import {
+  describeMedia, fillPendingPictures, hasImageDescription, imageInputMode, PICTURE_PENDING, unviewedPictures, withoutMediaLines,
+} from "./image-input.ts";
 import { relevantFacts } from "./memory-context.ts";
 import { servableGroupProfile, servableOwnerProfile } from "./profile.ts";
 import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
@@ -216,7 +218,22 @@ const PROGRESS_MARKS = new Set([...Object.values(PROGRESS_REACTIONS), GENERAL_PR
  * day" deserves a reaction, and which one, is the model's call, and the prompt
  * already asks it to react to what the user shares.
  */
-const CLOSING_REACTIONS = { changed: "✅", answered: "like" } as const;
+const CLOSING_REACTIONS = { soul: "👻", memory: "🧠", changed: "✅", answered: "like" } as const;
+
+/**
+ * The writes the room should be able to see happened. A fact kept or a change
+ * in how the assistant talks was invisible behind a generic ✅ or a tapback the
+ * model chose, so these get a mark of their own, on the message and in the reply.
+ */
+const MEMORY_WRITE_TOOLS = new Set(["create_memory", "update_memory", "remember_group_member"]);
+const SOUL_WRITE_TOOLS = new Set(["update_soul"]);
+
+/** The reply with the marks of what the turn kept, each once, soul first. */
+function withWriteMarks(text: string, marks: { soul: boolean; memory: boolean }): string {
+  const tail = [marks.soul ? CLOSING_REACTIONS.soul : "", marks.memory ? CLOSING_REACTIONS.memory : ""]
+    .filter(mark => mark && !text.includes(mark));
+  return tail.length ? `${text} ${tail.join(" ")}` : text;
+}
 /** Every tapback the runtime places, progress or closing: what a retry may find already on the message. */
 const RUNTIME_MARKS = new Set<string>([...PROGRESS_MARKS, ...Object.values(CLOSING_REACTIONS)]);
 
@@ -672,6 +689,8 @@ export function holdUntilNamed(
   const voice = groupVoiceForThread(db, thread.id);
   if (voice?.replyMode !== "named_only") return false;
   if (addressesAssistant(body, voice.assistantNickname) || repliesToAssistant(db, thread.id, inbound)) return false;
+  // A burst's earlier message that named the assistant is answered by this turn.
+  if (burstRows(db, thread.id).some(row => row.forAssistant(db, thread.id, voice.assistantNickname))) return false;
   const since = new Date(Date.now() - EVENING_ANSWER_WINDOW_MS).toISOString();
   const eveningAsked = db.prepare(`
     SELECT 1 found FROM channel_messages
@@ -693,6 +712,62 @@ export function holdUntilNamed(
   return true;
 }
 
+/**
+ * Files a group message the next queued message's turn will answer with it.
+ * People send a thought in two or three bubbles, or two of them ask the same
+ * thing at once, and a turn per bubble answered each: three bubbles in a row
+ * got three versions of the same reply. The thread's handles are
+ * kept so a folded inline reply to the assistant still counts as one.
+ */
+export function foldIntoNextTurn(
+  db: Db,
+  address: string,
+  body: string,
+  providerMessageId: string | undefined,
+  inbound: InboundContext | undefined,
+  metadata: Record<string, unknown>,
+): void {
+  const thread = getOrCreateThread(db, "sms", address);
+  saveInboundMessage(db, thread.id, body, providerMessageId, {
+    ...metadata,
+    ...(inbound?.replyTo ? { replyTo: inbound.replyTo } : {}),
+    ...(inbound?.threadOriginator ? { threadOriginator: inbound.threadOriginator } : {}),
+    foldedIntoNext: true,
+  });
+}
+
+type BurstRow = {
+  id: string;
+  content: string;
+  speaker: string;
+  /** Whether it named the assistant in its own words, or was an inline reply to one of its messages. */
+  forAssistant: (db: Db, threadId: string, nickname: string | null | undefined) => boolean;
+};
+
+/** The folded messages since the assistant last spoke, oldest first: the burst the next turn answers. */
+function burstRows(db: Db, threadId: string, beforeId?: string): BurstRow[] {
+  const rows = db.prepare(`
+    SELECT id,content,metadata_json FROM channel_messages
+    WHERE thread_id=? AND role='user' AND json_extract(metadata_json,'$.foldedIntoNext')=1
+      AND (? IS NULL OR id<>?)
+      AND created_at>COALESCE((
+        SELECT max(created_at) FROM channel_messages WHERE thread_id=? AND role='assistant' AND status<>'failed'
+      ),'')
+    ORDER BY created_at,rowid
+  `).all(threadId, beforeId ?? null, beforeId ?? null, threadId) as Array<{ id: string; content: string; metadata_json: string }>;
+  return rows.map(row => {
+    const metadata = JSON.parse(row.metadata_json || "{}") as { replyTo?: string; threadOriginator?: string };
+    return {
+      id: row.id,
+      content: row.content,
+      speaker: speakerLabel(row.metadata_json) ?? OWNER_SPEAKER_NAME,
+      forAssistant: (database, thread, nickname) =>
+        addressesAssistant(withoutQuotedSpans(withoutMediaLines(row.content)), nickname)
+        || repliesToAssistant(database, thread, { provider: "sendblue", ...metadata }),
+    };
+  });
+}
+
 /** How recently the assistant has to have spoken for a message to read as a reply to it. */
 const FOLLOW_UP_WINDOW_MS = 10 * 60_000;
 
@@ -712,8 +787,10 @@ function aimedAtAssistant(
   inbound: InboundContext | undefined,
   speakerPhone: string | undefined,
 ): boolean {
-  if (addressesAssistant(text, groupVoiceForThread(db, threadId)?.assistantNickname)) return true;
+  const nickname = groupVoiceForThread(db, threadId)?.assistantNickname;
+  if (addressesAssistant(text, nickname)) return true;
   if (repliesToAssistant(db, threadId, inbound)) return true;
+  if (burstRows(db, threadId, inboundId).some(row => row.forAssistant(db, threadId, nickname))) return true;
   if (!speakerPhone) return false;
   // The last few rows before this one, newest first, read off the thread's
   // (thread_id, created_at) index rather than a sort of the whole thread.
@@ -733,6 +810,26 @@ function aimedAtAssistant(
   // A scheduled check-in asked the room something; whoever answers it is talking to the assistant.
   if (answered?.internal) return true;
   return answered?.speaker === speakerPhone;
+}
+
+/** How recently the assistant has to have spoken to still be part of the exchange. */
+const IN_CONVERSATION_MS = 3 * 60_000;
+
+/**
+ * Whether the assistant is in the middle of the exchange: it wrote one of the
+ * last four messages before this one, a few minutes ago at most. A question to
+ * the room then includes it. Without this it answered one question and then
+ * sat out the follow-up asked to the room as banter that asked nothing of it.
+ */
+function assistantInConversation(db: Db, threadId: string, inboundId: string): boolean {
+  const recent = db.prepare(`
+    SELECT role,created_at FROM channel_messages
+    WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
+      AND json_extract(metadata_json,'$.reactionText') IS NULL
+      AND created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?
+    ORDER BY created_at DESC,rowid DESC LIMIT 4
+  `).all(threadId, inboundId, inboundId) as Array<{ role: string; created_at: string }>;
+  return recent.some(row => row.role === "assistant" && Date.now() - Date.parse(row.created_at) < IN_CONVERSATION_MS);
 }
 
 /** A message's words, for telling whether two texts say the same thing. */
@@ -786,7 +883,7 @@ function heldRows(db: Db, threadId: string, inboundId: string, since: string, ma
   return db.prepare(`
     SELECT id,content,json_extract(metadata_json,'$.mediaUrls') urls FROM channel_messages
     WHERE thread_id=? AND role='user' AND direction='inbound' AND id<>?
-      AND json_extract(metadata_json,'$.heldUntilNamed')=1
+      AND (json_extract(metadata_json,'$.heldUntilNamed')=1 OR json_extract(metadata_json,'$.foldedIntoNext')=1)
       AND instr(content,?)>0 AND created_at>?
     ORDER BY created_at DESC,rowid DESC LIMIT ?
   `).all(threadId, inboundId, marker, since, limit) as Array<{ id: string; content: string; urls: unknown }>;
@@ -1175,6 +1272,22 @@ export async function runChannelAgent(
       db, thread.id, { id: inboundId, body, mediaUrls: options.userMessageMetadata?.mediaUrls }, Boolean(group), options.mediaFetch, showMark,
     ));
   }
+  /*
+   * A memory sweep of a group runs on a scratch thread, but what it keeps is
+   * the group's: it carries the group's scope, so every write is filed under
+   * the area and its hosted search is fenced there, and nothing of the owner's
+   * rides along. The area is read from its own row, never taken on trust.
+   */
+  let sweepScope: GroupScope | undefined;
+  if (options.internal && options.userMessageMetadata?.kind === "memory_sweep" && options.userMessageMetadata.lifeAreaId) {
+    const area = db.prepare("SELECT thread_id FROM life_areas WHERE id=? AND user_id=? AND thread_id IS NOT NULL")
+      .get(String(options.userMessageMetadata.lifeAreaId), USER_ID) as { thread_id: string } | undefined;
+    if (!area) throw new Error("A group's memory sweep can only run for a group chat's own area");
+    sweepScope = { lifeAreaId: String(options.userMessageMetadata.lifeAreaId), threadId: area.thread_id };
+  }
+  // Read after the pictures, so a folded picture's description is what the burst carries.
+  const burst = group && !options.internal ? burstRows(db, thread.id, inboundId) : [];
+  const inConversation = group && !options.internal ? assistantInConversation(db, thread.id, inboundId) : false;
   const context: ToolTurnContext = {
     channel,
     address,
@@ -1182,6 +1295,7 @@ export async function runChannelAgent(
     provider: options.inbound?.provider,
     groupId: options.inbound?.groupId,
     ...(group ? { scope: { ...group.scope, lifeAreaIsNew: group.areaIsNew }, speakerIsOwner: speaker?.speakerIsOwner === true } : {}),
+    ...(sweepScope ? { scope: { ...sweepScope, lifeAreaIsNew: false } } : {}),
     ...(group && !options.internal && speaker?.speaker ? { speakerPhone: speaker.speaker } : {}),
     // In a group the speaker is whoever wrote — by name, or by the redacted number the
     // transcript uses for someone the owner never named; on the owner's own line or the
@@ -1193,6 +1307,7 @@ export async function runChannelAgent(
     }),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
     inboundText: options.internal ? undefined : body,
+    ...(burst.length ? { burstTexts: burst.map(row => row.content) } : {}),
     ...(options.internal ? { internal: true } : {}),
     // A picture's description quotes words the sender did not write, like a
     // page does, so the same refusals apply from the start of the turn.
@@ -1210,8 +1325,8 @@ export async function runChannelAgent(
   // Who the owner is travels with their own turns only; a group never reads it,
   // nor does anything written for a group: its check-in wording or its profile.
   const kind = options.userMessageMetadata?.kind;
-  const writingForGroup = kind === "checkin_ask_draft" || kind === "group_profile_refresh";
-  const soul = voice ? voice.soul : kind === "group_profile_refresh" ? null : ownerSoul(db);
+  const writingForGroup = kind === "checkin_ask_draft" || kind === "group_profile_refresh" || Boolean(sweepScope);
+  const soul = voice ? voice.soul : kind === "group_profile_refresh" || sweepScope ? null : ownerSoul(db);
   // A profile written from a fact that has since gone or changed may say what
   // is no longer true, so it is held back until the rewrite catches up.
   const profile = voice || writingForGroup ? null : servableOwnerProfile(db);
@@ -1269,6 +1384,10 @@ export async function runChannelAgent(
           // Stated either way, so "not the owner" is a fact the model was
           // told rather than a field it did not see.
           speakerIsOwner: speaker?.speakerIsOwner === true,
+          ...(burst.length
+            ? { burst: burst.map(row => `[${row.speaker}] ${row.content.replace(/\s+/g, " ").slice(0, 300)}`).join("\n") }
+            : {}),
+          ...(inConversation ? { inConversation: true } : {}),
           ...groupRoomContext(db, thread.id, group.area.id),
         }
         : {}),
@@ -1351,9 +1470,13 @@ export async function runChannelAgent(
   // attempt landed counts: the retry that answers is confirming that write.
   let changedRecord = priorWrites.some(part => RECORD_WRITE_TOOLS.has(String(part.type).slice(5)));
   let changedStatus = priorWrites.some(part => part.type === "tool-set_todo_status");
+  let savedMemory = priorWrites.some(part => MEMORY_WRITE_TOOLS.has(String(part.type).slice(5)));
+  let changedSoul = priorWrites.some(part => SOUL_WRITE_TOOLS.has(String(part.type).slice(5)));
   let checkedStatusClaim = false;
   let lookedUp = false;
   const closingMark = (): string | undefined => {
+    if (changedSoul) return CLOSING_REACTIONS.soul;
+    if (savedMemory) return CLOSING_REACTIONS.memory;
     if (changedRecord) return CLOSING_REACTIONS.changed;
     if (lookedUp) return CLOSING_REACTIONS.answered;
     return undefined;
@@ -1478,11 +1601,16 @@ export async function runChannelAgent(
          * stay_quiet. Without any of those, silence is a model that forgot to
          * answer, and the fallback says so.
          */
-        if (!text && (context.reacted || context.sentText || context.stayedQuiet || context.adjustedVoice)) {
+        // A fact kept on a message that was not for the assistant is answered by
+        // its 🧠 alone; words would interrupt the people talking.
+        if (!text && (context.reacted || context.sentText || context.stayedQuiet || context.adjustedVoice || (savedMemory && markHandle))) {
           search.flushSoon();
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
         }
-        const finalText = text || NO_TEXT_FALLBACK;
+        // An app-composed turn's text is a profile or a draft, not a message to mark.
+        const finalText = text
+          ? options.internal ? text : withWriteMarks(text, { soul: changedSoul, memory: savedMemory })
+          : NO_TEXT_FALLBACK;
         // The reply is marked internal with the instruction on a scratch thread,
         // where the real message is recorded elsewhere once sent; on a real
         // thread the caller keeps it public, since it is the message.
@@ -1524,6 +1652,8 @@ export async function runChannelAgent(
             context.changedRecord = true;
           }
           if (toolName === "set_todo_status") changedStatus = true;
+          if (MEMORY_WRITE_TOOLS.has(toolName)) savedMemory = true;
+          if (SOUL_WRITE_TOOLS.has(toolName)) changedSoul = true;
         } catch (error) {
           part.output = { success: false, error: error instanceof Error ? error.message : "Tool failed" };
         }

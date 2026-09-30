@@ -4,7 +4,7 @@ import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, groupAreas, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
-  archivedInboundText, archiveReactionText, failAgentTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
+  archivedInboundText, archiveReactionText, failAgentTurn, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
   recordOutboundProviderMessage, runSmsAgent,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
@@ -27,6 +27,7 @@ import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messagi
 import { openSubtasks, syncOccurrenceCompletion } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
 import { sendQueuedUnthreadedResends } from "./unthreaded-resend.ts";
+import { composeMemorySweepTurn, sweepCandidates } from "./memory-sweep.ts";
 import { speakerNameInGroup } from "./group-members.ts";
 import { groupAddress, groupIdOfAddress, isReactionText } from "./group-thread.ts";
 import { readSendblueInbound, type StopTypingIndicator } from "./sendblue-service.ts";
@@ -49,7 +50,18 @@ export type WorkerDependencies = {
   startTypingIndicator?: typeof startTypingIndicator;
   /** What pictures are downloaded and described through; tests stand in for the network. */
   fetch?: typeof fetch;
+  /**
+   * How long a group text waits before its turn starts, so the bubbles sent
+   * right behind it can join it. The running worker uses `GROUP_SETTLE_MS`; a
+   * direct `runWorkerOnce` call answers at once.
+   */
+  groupSettleMs?: number;
+  /** Whether a pass sweeps quiet conversations for facts to keep. The running worker does; a direct call does not. */
+  memorySweeps?: boolean;
 };
+
+/** People send a thought in bubbles a few seconds apart; this is long enough to gather them. */
+export const GROUP_SETTLE_MS = 3_000;
 
 /**
  * Inbound texts are queued verbatim in the provider's own vocabulary, so each
@@ -216,13 +228,18 @@ function groupReplyThread(
   return newerTextWaiting(db, source, read, event, address) ? message.messageId : undefined;
 }
 
-/** Whether a text that arrived after `event` in the same thread is still waiting to be answered. */
+/**
+ * Whether a text that arrived after `event` in the same thread is still waiting
+ * to be answered. With `turnsOnly`, a tapback written out as text does not
+ * count: it is filed without a turn, so it cannot answer anything folded into it.
+ */
 function newerTextWaiting(
   db: Db,
   source: SmsProvider,
   read: (payload: Record<string, unknown>) => InboundMessage,
   event: ExternalEventRow,
   address: string,
+  turnsOnly = false,
 ): boolean {
   const later = db.prepare(`
     SELECT id,payload_json FROM external_events
@@ -232,7 +249,9 @@ function newerTextWaiting(
   `).all(USER_ID, source, event.id, event.created_at, event.created_at, event.rowid ?? 0) as Array<{ id: string; payload_json: string }>;
   return later.some(row => {
     try {
-      return inboundAddress(read(JSON.parse(row.payload_json) as Record<string, unknown>)) === address;
+      const next = read(JSON.parse(row.payload_json) as Record<string, unknown>);
+      if (inboundAddress(next) !== address) return false;
+      return !turnsOnly || Boolean(next.mediaUrls?.length) || !isReactionText(next.body ?? "");
     } catch {
       return false;
     }
@@ -630,7 +649,7 @@ async function deliverReminder(
  */
 function claimDispatch(
   db: Db,
-  kind: "daily_digest" | "digest_brief" | "group_checkin" | "evening_checkin" | "follow_up" | "profile_refresh",
+  kind: "daily_digest" | "digest_brief" | "group_checkin" | "evening_checkin" | "follow_up" | "profile_refresh" | "memory_sweep",
   key: string,
   scheduledFor: string,
 ): string | null {
@@ -891,6 +910,42 @@ async function refreshProfileOvernight(
   }
 }
 
+/**
+ * Reads one quiet stretch of conversation for facts to keep. One completion
+ * per pass at most, for the same reason as the profile rewrite: every inbound
+ * reply waits behind it. The turn's text goes nowhere; the memories it wrote
+ * are the result, filed under the group when the conversation was one.
+ */
+export async function sweepQuietConversation(
+  db: Db,
+  search: SearchWriter,
+  runAgent: typeof runSmsAgent,
+): Promise<boolean> {
+  for (const candidate of sweepCandidates(db)) {
+    if (dispatchSettled(db, candidate.key)) continue;
+    // Composed before the claim, whose row is what marks the stretch as read.
+    const instruction = composeMemorySweepTurn(db, candidate);
+    const dispatchId = claimDispatch(db, "memory_sweep", candidate.key, candidate.newestAt);
+    if (!dispatchId) continue;
+    try {
+      await runAgent(db, search, `sweep:${candidate.threadId}`, instruction, undefined, {
+        internal: true,
+        userMessageMetadata: {
+          kind: "memory_sweep",
+          threadId: candidate.threadId,
+          ...(candidate.lifeAreaId ? { lifeAreaId: candidate.lifeAreaId } : {}),
+        },
+      });
+      db.prepare("UPDATE scheduled_dispatches SET status='sent',updated_at=? WHERE id=?").run(now(), dispatchId);
+      search.flushSoon();
+    } catch (error) {
+      recordDispatchFailure(db, dispatchId, error, "Memory sweep failed");
+    }
+    return true;
+  }
+  return false;
+}
+
 /** Marks tonight's check for this profile done without a rewrite. */
 function settleProfileCheck(db: Db, key: string, reason: string): void {
   const dispatchId = claimDispatch(db, "profile_refresh", key, now());
@@ -1143,6 +1198,11 @@ export async function runWorkerOnce(
           completeExternalEvent(db, event.id, "processed");
           continue;
         }
+        const settleUntil = Date.parse(event.created_at) + (dependencies.groupSettleMs ?? 0);
+        if (group && settleUntil > Date.now()) {
+          deferExternalEvent(db, event.id, new Date(settleUntil).toISOString());
+          continue;
+        }
         const inbound = {
           provider: source,
           replyTo: message.replyTo,
@@ -1153,6 +1213,14 @@ export async function runWorkerOnce(
         // answer, and no completion is spent, on a message that does not name it.
         const heldText = withMediaLines(message.body, media.map(() => PICTURE_PENDING));
         if (group && holdUntilNamed(db, address, heldText, message.messageId, inbound, { ...group.metadata, ...(media.length ? { mediaUrls: media } : {}) })) {
+          completeExternalEvent(db, event.id, "processed");
+          continue;
+        }
+        // Another message from the group is already queued: that turn answers
+        // this one with it. A retry has its row already and keeps its own turn.
+        if (group && newerTextWaiting(db, source, read, event, address, true)
+          && archivedInboundText(db, address, message.messageId) === undefined) {
+          foldIntoNextTurn(db, address, heldText, message.messageId, inbound, { ...group.metadata, ...(media.length ? { mediaUrls: media } : {}) });
           completeExternalEvent(db, event.id, "processed");
           continue;
         }
@@ -1208,6 +1276,13 @@ export async function runWorkerOnce(
     if (await sendQueuedUnthreadedResends(db, send)) search.flushSoon();
   } catch (error) {
     console.error("Resending unthreadable replies failed", error);
+  }
+  if (dependencies.memorySweeps) {
+    try {
+      await sweepQuietConversation(db, search, runAgent);
+    } catch (error) {
+      console.error("Sweeping a conversation for memories failed", error);
+    }
   }
   const preferences = getNotificationPreferences(db);
   const local = localParts(new Date(), preferences.timezone);
@@ -1339,7 +1414,7 @@ export function startWorker(
       // waiting out the interval it just missed.
       do {
         woken = false;
-        await runWorkerOnce(db, search, dependencies);
+        await runWorkerOnce(db, search, { groupSettleMs: GROUP_SETTLE_MS, memorySweeps: true, ...dependencies });
       } while (woken);
     } catch (error) {
       console.error("Background worker failed", error);

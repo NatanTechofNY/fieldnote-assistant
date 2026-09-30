@@ -311,6 +311,8 @@ export type ToolTurnContext = {
   changedRecord?: boolean;
   /** The text being answered, for the one judgment the server makes itself: a message that names the assistant is for it. */
   inboundText?: string;
+  /** The burst's earlier messages this turn answers too; one that names the assistant makes the turn named. */
+  burstTexts?: string[];
   /**
    * Set once a tapback has landed on the inbound message. A turn that reacted
    * and then had nothing to add has answered, so the caller sends no text
@@ -390,7 +392,14 @@ const NO_TOOL_APP_TURNS = new Set([
  * chat — the reverse of a group turn's fence. The owner asking on their own
  * line is not fenced: "did we clean the kitchen?" is theirs to ask.
  */
-const OWN_RECORDS_APP_TURNS = new Set(["daily_digest", "digest_brief", "follow_up", "profile_refresh"]);
+const OWN_RECORDS_APP_TURNS = new Set(["daily_digest", "digest_brief", "follow_up", "profile_refresh", "memory_sweep"]);
+
+/**
+ * The only tools a memory sweep may call. It reads a conversation someone else
+ * wrote and its reply goes nowhere, so it keeps facts and does nothing else:
+ * no sends, no deletes, no settings, whatever the quoted messages ask.
+ */
+const MEMORY_SWEEP_TOOLS = new Set(["get_memory", "create_memory", "update_memory"]);
 
 export function ownRecordsOnly(context: ToolTurnContext | undefined): boolean {
   return !context?.scope && Boolean(context?.appTurn && OWN_RECORDS_APP_TURNS.has(context.appTurn));
@@ -722,6 +731,9 @@ export async function executeAgentTool(
       + (name === "stay_quiet" ? " — there is no message to stay quiet on" : ", so write the text instead"),
     );
   }
+  if (context?.appTurn === "memory_sweep" && !MEMORY_SWEEP_TOOLS.has(name)) {
+    throw new Error("This turn is the app keeping what a conversation established; it saves and updates memories and uses no other tool");
+  }
   const scope = context?.scope;
   if (scope && OWNER_ONLY_TOOLS.has(name)) throw new Error(`${name} is not available in a group chat`);
   if (context?.readWeb && DELETE_TOOLS.has(name)) {
@@ -806,10 +818,15 @@ export async function executeAgentTool(
   }
   if (name === "update_group_settings") {
     if (!context?.groupId || !scope) throw new Error("This conversation is not a group chat");
-    assertOwnWords(context, "group settings");
     const replyMode = (input.reply_mode as ReplyMode | null | undefined) ?? undefined;
     // "" clears the nickname; null leaves it as it is.
     const nickname = input.assistant_nickname === "" ? null : (input.assistant_nickname as string | null | undefined) ?? undefined;
+    // The owner turning the assistant on or off is their own words even when
+    // the turn has looked at the room's pictures on the way; a picture's words
+    // could at worst flip a mode everyone can see. A page read still counts.
+    const ownerReplyModeOnly = context.speakerIsOwner === true && nickname === undefined && !context.readPages;
+    if (ownerReplyModeOnly) assertOwnWords({ ...context, readWeb: false, readUntrusted: false }, "group settings");
+    else assertOwnWords(context, "group settings");
     if (replyMode === undefined && nickname === undefined) throw new Error("Pass reply_mode, assistant_nickname, or both");
     const voice = setGroupSettings(db, scope.lifeAreaId, { replyMode, assistantNickname: nickname });
     context.adjustedVoice = true;
@@ -956,7 +973,8 @@ export async function executeAgentTool(
     // on one, not someone talking to the assistant. A tapback already answers a
     // message that names it but asks for nothing.
     const nickname = groupVoice(db, scope.lifeAreaId).assistantNickname;
-    const ownWords = context.inboundText ? withoutQuotedSpans(context.inboundText) : "";
+    const ownWords = [context.inboundText ?? "", ...context.burstTexts ?? []]
+      .map(text => withoutQuotedSpans(withoutMediaLines(text))).join("\n");
     if (!context.reacted && addressesAssistant(ownWords, nickname)) {
       const named = addressesAssistant(ownWords) ? ASSISTANT_NAME : nickname;
       throw new Error(`This message names ${named}, so it is for you, whoever wrote it: answer it, and when it asks nothing, a tapback alone is enough`);
