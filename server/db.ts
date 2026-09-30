@@ -310,7 +310,7 @@ CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS scheduled_dispatches (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin','evening_checkin','follow_up','profile_refresh')),
+  kind TEXT NOT NULL CHECK(kind IN ('daily_digest','reminder','digest_brief','group_checkin','evening_checkin','follow_up','profile_refresh','memory_sweep')),
   idempotency_key TEXT NOT NULL UNIQUE,
   scheduled_for TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending'
@@ -901,6 +901,18 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
       ]);
     }
     db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(17,?)").run(now());
+  }
+  const memorySweepDispatchApplied = db.prepare(
+    "SELECT 1 found FROM schema_migrations WHERE version=18",
+  ).get();
+  if (!memorySweepDispatchApplied) {
+    // A quiet conversation's memory sweep claims one dispatch per stretch of talk.
+    if (!dispatchKindAllows(db, "memory_sweep")) {
+      rebuildScheduledDispatches(db, "v18", [
+        "daily_digest", "reminder", "digest_brief", "group_checkin", "evening_checkin", "follow_up", "profile_refresh", "memory_sweep",
+      ]);
+    }
+    db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(18,?)").run(now());
   }
   // Set once a todo has been followed up on, so a dropped thread is raised once, not every morning.
   if (!columns(db, "todos").has("followed_up_at")) db.exec("ALTER TABLE todos ADD COLUMN followed_up_at TEXT");
