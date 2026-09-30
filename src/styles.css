@@ -636,6 +636,11 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 .data-table .title-row { display:flex; align-items:center; gap:8px; min-width:0; }
 .data-table .title-row > button { flex:1; width:auto; }
 .data-table .title-row .mood-pill { flex:none; max-width:45%; }
+/* Several people's moods share the space one pill had: one line, cut short, never the title's width. */
+.data-table .title-row .mood-pills { flex:0 1 auto; max-width:45%; min-width:0; flex-wrap:nowrap; overflow:hidden; }
+.data-table .title-row .mood-pills .mood-pill { flex:0 1 auto; min-width:0; max-width:none; }
+.data-table .title-row > button { min-width:4em; }
+.data-table tr.row-open { cursor:pointer; }
 /* A row used to say "2/3" and stop there, which named work it would not show.
    The chevron and the count are the same control, so either one opens the
    steps as their own rows under the task they belong to. */

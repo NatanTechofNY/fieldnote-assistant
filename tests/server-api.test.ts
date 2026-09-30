@@ -7633,6 +7633,55 @@ describe("Sendblue provider", () => {
     assert.equal(sends.length, 2, "the released morning note earlier, and now the evening question");
   });
 
+  /*
+   * The agent found "the day's entry" by search, and the next evening that was
+   * the one before: Tuesday's answers were appended to Monday's entry, and a
+   * Tuesday mood replaced the Monday one. The server now names tonight's entry.
+   */
+  it("keeps each evening's answers in that evening's entry, never the one before", async () => {
+    const { db, api, area } = checkinFixture();
+    agentStudioEnv();
+    const address = `group:${GROUP}`;
+    await runSmsAgent(db, fakeSearch(db), address, "hello", "SB_eve_hello", groupTurnOptions(answering("Hi!"), RECIPIENT, "the owner"));
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    const lastNight = (await api.post("/api/memories").send({
+      kind: "journal", title: "Last night", content: "Sarah: tired, 2", life_area_id: area.id,
+      occurred_at: `${yesterday}T00:00:00.000Z`, tags: ["end-of-day", "group"], moods: [{ name: "Sarah", label: "tired", score: 2 }],
+    }).expect(201)).body.data as { id: string };
+    recordOutboundChannelMessage(db, "sms", address, "How did today go?", "SB_evening_q", "sent", { kind: "group_evening", date: today });
+
+    // Tonight's first answer: the context says there is no entry yet, and an update to last night's is refused.
+    const first = agentCallingMany([
+      { tool: "update_memory", input: { id: lastNight.id, patch: { content: "Sarah: tired, 2\nthe owner: productive, 5", moods: [{ name: "the owner", label: "productive", score: 5 }] } } },
+      { tool: "create_memory", input: { kind: "journal", title: "Tonight", content: "the owner: productive, 5", moods: [{ name: null, label: "productive", score: 5 }], occurred_at: `${yesterday}T12:00:00.000Z`, tags: ["end-of-day", "group"] } },
+    ], "Logged.");
+    await runSmsAgent(db, fakeSearch(db), address, "productive, 5", "SB_eve_owner", groupTurnOptions(first.fetcher, RECIPIENT, "the owner"));
+    const firstContext = ((first.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+    assert.equal(firstContext.eveningDate, today);
+    assert.match(String(firstContext.eveningEntry), /^none yet/);
+    assert.match(toolOutputs(db, address).update_memory.error ?? "", new RegExp(`That entry is ${yesterday}'s`));
+    const untouched = db.prepare("SELECT content,moods_json FROM memories WHERE id=?").get(lastNight.id) as { content: string; moods_json: string };
+    assert.equal(untouched.content, "Sarah: tired, 2", "last night's entry keeps last night's answers");
+    const tonight = db.prepare("SELECT id,occurred_at FROM memories WHERE title='Tonight'").get() as { id: string; occurred_at: string };
+    assert.ok(tonight.occurred_at.startsWith(today), "dated tonight, whatever day the agent gave it");
+
+    // The next answer is pointed at tonight's entry, and a second create is refused.
+    const second = agentCallingMany([
+      { tool: "create_memory", input: { kind: "journal", title: "Tonight again", content: "Sarah: fine, 3", tags: ["end-of-day", "group"] } },
+    ], "Logged.");
+    await runSmsAgent(db, fakeSearch(db), address, "fine, 3", "SB_eve_sarah", groupTurnOptions(second.fetcher));
+    const secondContext = ((second.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+    assert.match(String(secondContext.eveningEntry), new RegExp(`^${tonight.id}: tonight's shared entry`));
+    assert.match(toolOutputs(db, address).create_memory.error ?? "", /Tonight's shared entry already exists/);
+
+    // A mood label is a word or two, not the sentence someone wrote.
+    await assert.rejects(
+      executeAgentTool(db, fakeSearch(db), "update_memory", { id: tonight.id, patch: { moods: [{ name: "Sarah", label: "Feel good about my husband and grateful for everything", score: 5 }] } }),
+      /a word or two, at most 32 characters/,
+    );
+  });
+
   it("asks a group how the day went in the evening, and keeps one shared entry for the answers", async () => {
     const { db, api, area } = checkinFixture();
     const address = `group:${GROUP}`;

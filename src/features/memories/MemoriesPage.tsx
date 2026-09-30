@@ -83,7 +83,10 @@ export function MemoriesPage() {
             </tr>
           </thead>
           <tbody>
-            {memories.map(memory => <tr key={memory.id}>
+            {/* The whole row opens the entry: an untitled one, or one whose moods fill the cell, left no title to hit. */}
+            {memories.map(memory => <tr key={memory.id} className="row-open" onClick={event => {
+              if (!(event.target as HTMLElement).closest("button, a, input, select")) setEditor(memory);
+            }}>
               <td><span className="memory-kind"><MemoryIcon kind={memory.kind}/>{memory.kind}{memory.mood_score ? ` · ${moodEmoji(memory.mood_score)}` : ""}{memory.review_worthy ? " · review" : ""}</span></td>
               <td className="cell-title"><div className="title-row"><button type="button" onClick={() => setEditor(memory)}>{memory.title || "Untitled"}</button><MoodPill label={memory.mood_label} moods={memory.moods}/></div></td>
               <td className="cell-optional"><LifeAreaPill name={memory.life_area_name} slug={memory.life_area_slug}/></td>

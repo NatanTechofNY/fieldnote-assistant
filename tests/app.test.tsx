@@ -2870,6 +2870,15 @@ it("switches memory views and searches by meaning", async () => {
   expect(await screen.findByText("No memories match this view.")).toBeInTheDocument();
 });
 
+it("opens a memory from anywhere on its row, not only its title", async () => {
+  renderAt("/memories");
+  const title = await screen.findByRole("button", { name: "Venue wifi" });
+  const row = title.closest("tr") as HTMLElement;
+  // An untitled entry, or one whose moods fill the title cell, leaves little title to hit.
+  await userEvent.click(row.querySelectorAll("td")[4]);
+  expect(await screen.findByRole("dialog")).toHaveTextContent("Edit memory");
+});
+
 it("previews markdown while editing a memory", async () => {
   renderAt("/memories?open=memory_1");
   const editor = await screen.findByRole("dialog");

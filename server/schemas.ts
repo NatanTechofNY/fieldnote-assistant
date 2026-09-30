@@ -133,7 +133,9 @@ export const todoPatch = z.object({
 const personMood = z.object({
   // Blank reads as "the speaker", the same as null, so the hosted schema and this one agree.
   name: z.string().trim().max(60).nullable().optional(),
-  label: z.string().trim().min(1).max(60),
+  // A word or two: the sentence they said belongs in the entry's content, and a
+  // label that holds it crowds every other mood out of the pill.
+  label: z.string().trim().min(1).max(32, "A mood label is a word or two, at most 32 characters; put the rest in content"),
   score: z.number().int().min(1).max(5),
 }).strict();
 const moods = z.array(personMood).max(20).nullable().optional();

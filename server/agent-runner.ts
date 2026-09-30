@@ -1,6 +1,7 @@
 import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./algolia.ts";
 import { ensureGroupLifeArea, groupAreas, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
 import { recordGroupParticipants, rosterLine } from "./group-members.ts";
+import { EVENING_ANSWER_WINDOW_MS, eveningBeingAnswered, eveningEntryFor, eveningOccurredAt } from "./group-journal.ts";
 import { addressesAssistant, OWNER_SPEAKER_NAME, redactedNumber, speakerLabel, withoutQuotedSpans } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset } from "./local-time.ts";
@@ -660,8 +661,6 @@ function repliesToAssistant(db: Db, threadId: string, inbound: InboundContext | 
   `).get(threadId, handle));
 }
 
-/** How long after the evening question the answers to it are still coming in. */
-const EVENING_ANSWER_WINDOW_MS = 6 * 60 * 60_000;
 /** How long a reminder or morning note in the chat can still be answered with a bare "done". */
 const PROMPTED_ANSWER_WINDOW_MS = 2 * 60 * 60_000;
 
@@ -1330,6 +1329,10 @@ export async function runChannelAgent(
   // Read after the pictures, so a folded picture's description is what the burst carries.
   const burst = group && !options.internal ? burstRows(db, thread.id, providerMessageId) : [];
   const inConversation = group && !options.internal ? assistantInConversation(db, thread.id, inboundId) : false;
+  // The evening question still being answered, and the entry its answers go in.
+  const eveningDate = group && !options.internal ? eveningBeingAnswered(db, thread.id) : undefined;
+  const eveningTimezone = getNotificationPreferences(db).timezone;
+  const eveningEntry = eveningDate && group ? eveningEntryFor(db, group.area.id, eveningDate, eveningTimezone) : undefined;
   /*
    * A burst can hold more than one person's words, and the owner's standing
    * belongs to the owner's words alone: a turn that also answers someone
@@ -1356,6 +1359,7 @@ export async function runChannelAgent(
     ...(sweepScope ? { scope: { ...sweepScope, lifeAreaIsNew: false } } : {}),
     ...(group && !options.internal && speaker?.speaker && !mixedBurst ? { speakerPhone: speaker.speaker } : {}),
     ...(burstSpeakerNames ? { burstSpeakerNames } : {}),
+    ...(eveningDate ? { eveningDate } : {}),
     // In a group the speaker is whoever wrote — by name, or by the redacted number the
     // transcript uses for someone the owner never named; on the owner's own line or the
     // web it is the owner. An app-composed turn has no speaker.
@@ -1445,6 +1449,12 @@ export async function runChannelAgent(
             : {}),
           ...(burstSpeakerNames ? { burstSpeakers: burstSpeakerNames.join(", ") } : {}),
           ...(inConversation ? { inConversation: true } : {}),
+          ...(eveningDate ? {
+            eveningDate,
+            eveningEntry: eveningEntry
+              ? `${eveningEntry.id}: tonight's shared entry; add this answer to it with update_memory`
+              : `none yet: create tonight's entry with occurred_at ${eveningOccurredAt(eveningDate, eveningTimezone)}`,
+          } : {}),
           ...groupRoomContext(db, thread.id, group.area.id),
         }
         : {}),

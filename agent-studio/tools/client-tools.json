@@ -544,8 +544,8 @@
                 "label": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 60,
-                  "description": "Their mood in their own word or two"
+                  "maxLength": 32,
+                  "description": "Their mood in a word or two (\"tired\", \"grateful\"), never their sentence"
                 },
                 "score": {
                   "type": "integer",
@@ -649,8 +649,8 @@
                     "label": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 60,
-                      "description": "Their mood in their own word or two"
+                      "maxLength": 32,
+                      "description": "Their mood in a word or two (\"tired\", \"grateful\"), never their sentence"
                     },
                     "score": {
                       "type": "integer",

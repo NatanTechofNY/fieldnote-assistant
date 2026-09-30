@@ -16,6 +16,7 @@ import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
 import { withoutMediaLines } from "./image-input.ts";
 import { assertSendableImage, giphyConfig, imagesInMarkdown, isRememberedImage, rememberImages, searchGifs } from "./image-output.ts";
 import { refreshRosterMemory, rememberGroupMember } from "./group-members.ts";
+import { entryDay, eveningEntryFor, eveningOccurredAt, isEveningEntry } from "./group-journal.ts";
 import {
   addressesAssistant, ASSISTANT_NAME, GROUP_ADDRESS_PREFIX, groupIdOfAddress, OWNER_SPEAKER_NAME, redactedNumber,
   speakerLabel, speakerNameOf, withoutQuotedSpans,
@@ -315,6 +316,8 @@ export type ToolTurnContext = {
   burstTexts?: string[];
   /** Who wrote in a burst of more than one voice: the only names its moods may be filed under. */
   burstSpeakerNames?: string[];
+  /** The day of the group's evening question still being answered: its answers go in that day's entry only. */
+  eveningDate?: string;
   /**
    * Set once a tapback has landed on the inbound message. A turn that reacted
    * and then had nothing to add has answered, so the caller sends no text
@@ -1526,6 +1529,17 @@ export async function executeAgentTool(
     const memoryId = id("memory");
     const area = classificationForWrite(scope, input);
     assertOwnArea(db, ownOnly, area.life_area_id);
+    // An answer to the group's evening question starts that evening's entry,
+    // dated that evening, and there is only ever one.
+    if (scope && context?.eveningDate
+      && isEveningEntry({ kind: String(input.kind ?? "note"), tags_json: JSON.stringify(input.tags ?? []) })) {
+      const timezone = userTimezone(db);
+      const started = eveningEntryFor(db, scope.lifeAreaId, context.eveningDate, timezone);
+      if (started) throw new Error(`Tonight's shared entry already exists (${started.id}); add this answer to it with update_memory`);
+      if (entryDay((input.occurred_at as string | null | undefined) ?? null, timezone) !== context.eveningDate) {
+        input = { ...input, occurred_at: eveningOccurredAt(context.eveningDate, timezone) };
+      }
+    }
     const mood = resolveMoodFields({
       existingJson: null,
       incoming: input.moods as IncomingMood[] | null | undefined,
@@ -1555,6 +1569,17 @@ export async function executeAgentTool(
     const memoryId = input.id as string;
     const current = scopedMemory(db, memoryId, scope, ownOnly);
     if (!current) throw new Error("Memory not found");
+    // While the group answers an evening question, an earlier evening's entry
+    // is that evening's record: tonight's answers never land in it.
+    if (scope && context?.eveningDate && isEveningEntry(current)) {
+      const timezone = userTimezone(db);
+      const day = entryDay(current.occurred_at, timezone);
+      if (day !== context.eveningDate) {
+        const tonight = eveningEntryFor(db, scope.lifeAreaId, context.eveningDate, timezone);
+        throw new Error(`That entry is ${day ?? "another day"}'s; tonight's answers go in tonight's entry for ${context.eveningDate}${
+          tonight ? ` (${tonight.id})` : ": create it with create_memory"}`);
+      }
+    }
     const patch = (input.patch || {}) as Input;
     const clear = clearedFields(patch);
     const value = (key: string, currentValue: unknown) =>
