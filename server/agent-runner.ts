@@ -690,7 +690,8 @@ export function holdUntilNamed(
   if (voice?.replyMode !== "named_only") return false;
   if (addressesAssistant(body, voice.assistantNickname) || repliesToAssistant(db, thread.id, inbound)) return false;
   // A burst's earlier message that named the assistant is answered by this turn.
-  if (burstRows(db, thread.id).some(row => row.forAssistant(db, thread.id, voice.assistantNickname))) return false;
+  const burst = burstRows(db, thread.id, providerMessageId);
+  if (burst.some(row => row.forAssistant(db, thread.id, voice.assistantNickname))) return false;
   const since = new Date(Date.now() - EVENING_ANSWER_WINDOW_MS).toISOString();
   const eveningAsked = db.prepare(`
     SELECT 1 found FROM channel_messages
@@ -709,6 +710,14 @@ export function holdUntilNamed(
     return false;
   }
   saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, heldUntilNamed: true });
+  // What was folded into this message is held with it, for the turn that is next named.
+  if (providerMessageId) {
+    db.prepare(`
+      UPDATE channel_messages
+      SET metadata_json=json_set(json_remove(metadata_json,'$.foldedInto'),'$.heldUntilNamed',json('true'))
+      WHERE thread_id=? AND role='user' AND json_extract(metadata_json,'$.foldedInto')=?
+    `).run(thread.id, providerMessageId);
+  }
   return true;
 }
 
@@ -716,54 +725,78 @@ export function holdUntilNamed(
  * Files a group message the next queued message's turn will answer with it.
  * People send a thought in two or three bubbles, or two of them ask the same
  * thing at once, and a turn per bubble answered each: three bubbles in a row
- * got three versions of the same reply. The thread's handles are
- * kept so a folded inline reply to the assistant still counts as one.
+ * got three versions of the same reply. The row names the message whose turn
+ * answers it (`foldedInto`), so the burst belongs to exactly that turn — not
+ * to whatever turn runs next — and anything already folded into this message
+ * moves along with it. The thread's handles are kept so a folded inline reply
+ * to the assistant still counts as one.
  */
 export function foldIntoNextTurn(
   db: Db,
   address: string,
   body: string,
-  providerMessageId: string | undefined,
+  providerMessageId: string,
   inbound: InboundContext | undefined,
   metadata: Record<string, unknown>,
+  foldedInto: string,
 ): void {
   const thread = getOrCreateThread(db, "sms", address);
-  saveInboundMessage(db, thread.id, body, providerMessageId, {
-    ...metadata,
-    ...(inbound?.replyTo ? { replyTo: inbound.replyTo } : {}),
-    ...(inbound?.threadOriginator ? { threadOriginator: inbound.threadOriginator } : {}),
-    foldedIntoNext: true,
-  });
+  db.transaction(() => {
+    saveInboundMessage(db, thread.id, body, providerMessageId, {
+      ...metadata,
+      ...(inbound?.replyTo ? { replyTo: inbound.replyTo } : {}),
+      ...(inbound?.threadOriginator ? { threadOriginator: inbound.threadOriginator } : {}),
+      foldedInto,
+    });
+    db.prepare(`
+      UPDATE channel_messages SET metadata_json=json_set(metadata_json,'$.foldedInto',?)
+      WHERE thread_id=? AND role='user' AND json_extract(metadata_json,'$.foldedInto')=?
+    `).run(foldedInto, thread.id, providerMessageId);
+  })();
+}
+
+/** When the oldest message a burst has been gathering since arrived: the burst stops growing past a bound. */
+export function burstStartedAt(db: Db, address: string, providerMessageId: string): string | undefined {
+  const row = db.prepare(`
+    SELECT min(m.created_at) started FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+    WHERE t.user_id=? AND t.channel='sms' AND t.address=? AND m.role='user'
+      AND json_extract(m.metadata_json,'$.foldedInto')=?
+  `).get(USER_ID, address, providerMessageId) as { started: string | null };
+  return row.started ?? undefined;
 }
 
 type BurstRow = {
   id: string;
   content: string;
   speaker: string;
+  /** The speaker's number, as filed; never shown to the model. */
+  phone?: string;
+  isOwner: boolean;
   /** Whether it named the assistant in its own words, or was an inline reply to one of its messages. */
   forAssistant: (db: Db, threadId: string, nickname: string | null | undefined) => boolean;
 };
 
-/** The folded messages since the assistant last spoke, oldest first: the burst the next turn answers. */
-function burstRows(db: Db, threadId: string, beforeId?: string): BurstRow[] {
+/** The messages folded into `handle`, oldest first: the burst that message's turn answers. */
+function burstRows(db: Db, threadId: string, handle: string | undefined): BurstRow[] {
+  if (!handle) return [];
   const rows = db.prepare(`
     SELECT id,content,metadata_json FROM channel_messages
-    WHERE thread_id=? AND role='user' AND json_extract(metadata_json,'$.foldedIntoNext')=1
-      AND (? IS NULL OR id<>?)
-      AND created_at>COALESCE((
-        SELECT max(created_at) FROM channel_messages WHERE thread_id=? AND role='assistant' AND status<>'failed'
-      ),'')
+    WHERE thread_id=? AND role='user' AND json_extract(metadata_json,'$.foldedInto')=?
     ORDER BY created_at,rowid
-  `).all(threadId, beforeId ?? null, beforeId ?? null, threadId) as Array<{ id: string; content: string; metadata_json: string }>;
+  `).all(threadId, handle) as Array<{ id: string; content: string; metadata_json: string }>;
   return rows.map(row => {
-    const metadata = JSON.parse(row.metadata_json || "{}") as { replyTo?: string; threadOriginator?: string };
+    const metadata = JSON.parse(row.metadata_json || "{}") as {
+      replyTo?: string; threadOriginator?: string; speaker?: string; speakerIsOwner?: boolean;
+    };
     return {
       id: row.id,
       content: row.content,
       speaker: speakerLabel(row.metadata_json) ?? OWNER_SPEAKER_NAME,
+      phone: metadata.speaker,
+      isOwner: metadata.speakerIsOwner === true,
       forAssistant: (database, thread, nickname) =>
         addressesAssistant(withoutQuotedSpans(withoutMediaLines(row.content)), nickname)
-        || repliesToAssistant(database, thread, { provider: "sendblue", ...metadata }),
+        || repliesToAssistant(database, thread, { provider: "sendblue", replyTo: metadata.replyTo, threadOriginator: metadata.threadOriginator }),
     };
   });
 }
@@ -786,11 +819,12 @@ function aimedAtAssistant(
   text: string,
   inbound: InboundContext | undefined,
   speakerPhone: string | undefined,
+  handle: string | undefined,
 ): boolean {
   const nickname = groupVoiceForThread(db, threadId)?.assistantNickname;
   if (addressesAssistant(text, nickname)) return true;
   if (repliesToAssistant(db, threadId, inbound)) return true;
-  if (burstRows(db, threadId, inboundId).some(row => row.forAssistant(db, threadId, nickname))) return true;
+  if (burstRows(db, threadId, handle).some(row => row.forAssistant(db, threadId, nickname))) return true;
   if (!speakerPhone) return false;
   // The last few rows before this one, newest first, read off the thread's
   // (thread_id, created_at) index rather than a sort of the whole thread.
@@ -878,15 +912,19 @@ function heldPicturesSince(db: Db, threadId: string): string {
   return lastSaid && lastSaid.created_at > since ? lastSaid.created_at : since;
 }
 
-/** The group's messages held since `since`, newest first, whose text carries `marker`. */
-function heldRows(db: Db, threadId: string, inboundId: string, since: string, marker: string, limit: number) {
+/**
+ * The group's messages this turn reads with its own, newest first, whose text
+ * carries `marker`: those held since `since`, and those folded into this very
+ * message, whenever they came.
+ */
+function heldRows(db: Db, threadId: string, inbound: { id: string; handle?: string }, since: string, marker: string, limit: number) {
   return db.prepare(`
     SELECT id,content,json_extract(metadata_json,'$.mediaUrls') urls FROM channel_messages
-    WHERE thread_id=? AND role='user' AND direction='inbound' AND id<>?
-      AND (json_extract(metadata_json,'$.heldUntilNamed')=1 OR json_extract(metadata_json,'$.foldedIntoNext')=1)
-      AND instr(content,?)>0 AND created_at>?
+    WHERE thread_id=? AND role='user' AND direction='inbound' AND id<>? AND instr(content,?)>0
+      AND ((json_extract(metadata_json,'$.heldUntilNamed')=1 AND created_at>?)
+        OR (? IS NOT NULL AND json_extract(metadata_json,'$.foldedInto')=?))
     ORDER BY created_at DESC,rowid DESC LIMIT ?
-  `).all(threadId, inboundId, marker, since, limit) as Array<{ id: string; content: string; urls: unknown }>;
+  `).all(threadId, inbound.id, marker, since, inbound.handle ?? null, inbound.handle ?? null, limit) as Array<{ id: string; content: string; urls: unknown }>;
 }
 
 /**
@@ -894,10 +932,10 @@ function heldRows(db: Db, threadId: string, inboundId: string, since: string, ma
  * the assistant last spoke there and within the hour. They were filed
  * unviewed, and being named right after one is usually being asked about it.
  */
-function heldPictures(db: Db, threadId: string, inboundId: string, since: string, limit: number): UnviewedPictures[] {
+function heldPictures(db: Db, threadId: string, inbound: { id: string; handle?: string }, since: string, limit: number): UnviewedPictures[] {
   if (limit <= 0) return [];
   let budget = limit;
-  return heldRows(db, threadId, inboundId, since, PICTURE_PENDING, limit).flatMap(row => {
+  return heldRows(db, threadId, inbound, since, PICTURE_PENDING, limit).flatMap(row => {
     const found = unviewedOn(row.id, row.content, row.urls, budget);
     budget -= found[0]?.urls.length ?? 0;
     return found;
@@ -918,7 +956,7 @@ function heldPictures(db: Db, threadId: string, inboundId: string, since: string
 async function viewUnviewedPictures(
   db: Db,
   threadId: string,
-  inbound: { id: string; body: string; mediaUrls: unknown },
+  inbound: { id: string; handle?: string; body: string; mediaUrls: unknown },
   group: boolean,
   fetcher: typeof fetch | undefined,
   showMark: (() => Promise<void>) | undefined,
@@ -926,7 +964,7 @@ async function viewUnviewedPictures(
   const looking = imageInputMode() === "describe";
   const since = group ? heldPicturesSince(db, threadId) : "";
   const own = unviewedOn(inbound.id, inbound.body, inbound.mediaUrls, PICTURES_PER_TURN);
-  const held = group && looking ? heldPictures(db, threadId, inbound.id, since, PICTURES_PER_TURN - (own[0]?.urls.length ?? 0)) : [];
+  const held = group && looking ? heldPictures(db, threadId, inbound, since, PICTURES_PER_TURN - (own[0]?.urls.length ?? 0)) : [];
   const pending = [...own, ...held];
   let body = inbound.body;
   const seen: string[] = [];
@@ -945,7 +983,7 @@ async function viewUnviewedPictures(
   }
   await marking;
   const describedEarlier = group
-    && heldRows(db, threadId, inbound.id, since, "[Image: ", 1).some(row => hasImageDescription(row.content));
+    && heldRows(db, threadId, inbound, since, "[Image: ", 1).some(row => hasImageDescription(row.content));
   if (pending.length && looking) {
     saveChannelMessage(db, threadId, "outbound", "tool", "view_image", undefined, {
       input: { pictures: seen.length },
@@ -1230,6 +1268,9 @@ export async function runChannelAgent(
     replyInternal?: boolean;
     /** What fetches the pictures and asks the vision model about them; the worker passes its own. */
     mediaFetch?: typeof fetch;
+    /** A tighter round cap and time budget for background work, so a live reply never waits long behind it. */
+    maxRounds?: number;
+    turnBudgetMs?: number;
   } = {},
 ): Promise<AgentTurnResult> {
   const thread = getOrCreateThread(db, channel, address);
@@ -1260,7 +1301,7 @@ export async function runChannelAgent(
     const handle = options.inbound?.provider === "sendblue" ? providerMessageId : undefined;
     const showMark = handle ? async () => {
       if (reactionsOn(db, thread.id, handle).all.length) return;
-      if (group && !aimedAtAssistant(db, thread.id, inboundId, body, options.inbound, speaker?.speaker)) return;
+      if (group && !aimedAtAssistant(db, thread.id, inboundId, body, options.inbound, speaker?.speaker, providerMessageId)) return;
       try {
         await sendSendblueReaction(db, handle, VIEWING_MARK);
         recordMessageReaction(db, thread.id, handle, VIEWING_MARK, "runtime");
@@ -1269,7 +1310,8 @@ export async function runChannelAgent(
       }
     } : undefined;
     ({ body, describedEarlier } = await viewUnviewedPictures(
-      db, thread.id, { id: inboundId, body, mediaUrls: options.userMessageMetadata?.mediaUrls }, Boolean(group), options.mediaFetch, showMark,
+      db, thread.id, { id: inboundId, handle: providerMessageId, body, mediaUrls: options.userMessageMetadata?.mediaUrls },
+      Boolean(group), options.mediaFetch, showMark,
     ));
   }
   /*
@@ -1286,25 +1328,38 @@ export async function runChannelAgent(
     sweepScope = { lifeAreaId: String(options.userMessageMetadata.lifeAreaId), threadId: area.thread_id };
   }
   // Read after the pictures, so a folded picture's description is what the burst carries.
-  const burst = group && !options.internal ? burstRows(db, thread.id, inboundId) : [];
+  const burst = group && !options.internal ? burstRows(db, thread.id, providerMessageId) : [];
   const inConversation = group && !options.internal ? assistantInConversation(db, thread.id, inboundId) : false;
+  /*
+   * A burst can hold more than one person's words, and the owner's standing
+   * belongs to the owner's words alone: a turn that also answers someone
+   * else's folded request has none, or that person's "rename the chat" would
+   * go through on the owner's "lol". With more than one voice there is no
+   * single speaker for "who: speaker" to name, and moods are kept per person.
+   */
+  const ownerStanding = speaker?.speakerIsOwner === true && burst.every(row => row.isOwner);
+  const burstVoices = new Set([...burst.map(row => row.phone ?? row.speaker), speaker?.speaker ?? ""]);
+  const mixedBurst = burst.length > 0 && burstVoices.size > 1;
+  const turnSpeakerName = group
+    ? speaker?.speakerName ?? (speaker?.speaker ? redactedNumber(speaker.speaker) : undefined)
+    : OWNER_SPEAKER_NAME;
+  const burstSpeakerNames = mixedBurst
+    ? [...new Set([...burst.map(row => row.speaker), turnSpeakerName].filter((name): name is string => Boolean(name)))]
+    : undefined;
   const context: ToolTurnContext = {
     channel,
     address,
     threadId: thread.id,
     provider: options.inbound?.provider,
     groupId: options.inbound?.groupId,
-    ...(group ? { scope: { ...group.scope, lifeAreaIsNew: group.areaIsNew }, speakerIsOwner: speaker?.speakerIsOwner === true } : {}),
+    ...(group ? { scope: { ...group.scope, lifeAreaIsNew: group.areaIsNew }, speakerIsOwner: ownerStanding } : {}),
     ...(sweepScope ? { scope: { ...sweepScope, lifeAreaIsNew: false } } : {}),
-    ...(group && !options.internal && speaker?.speaker ? { speakerPhone: speaker.speaker } : {}),
+    ...(group && !options.internal && speaker?.speaker && !mixedBurst ? { speakerPhone: speaker.speaker } : {}),
+    ...(burstSpeakerNames ? { burstSpeakerNames } : {}),
     // In a group the speaker is whoever wrote — by name, or by the redacted number the
     // transcript uses for someone the owner never named; on the owner's own line or the
     // web it is the owner. An app-composed turn has no speaker.
-    ...(options.internal ? {} : {
-      speakerName: group
-        ? speaker?.speakerName ?? (speaker?.speaker ? redactedNumber(speaker.speaker) : undefined)
-        : OWNER_SPEAKER_NAME,
-    }),
+    ...(options.internal ? {} : { speakerName: turnSpeakerName }),
     inboundMessageHandle: options.internal ? undefined : providerMessageId,
     inboundText: options.internal ? undefined : body,
     ...(burst.length ? { burstTexts: burst.map(row => row.content) } : {}),
@@ -1383,10 +1438,12 @@ export async function runChannelAgent(
           ...(speaker?.speakerName ? { speakerName: speaker.speakerName } : {}),
           // Stated either way, so "not the owner" is a fact the model was
           // told rather than a field it did not see.
-          speakerIsOwner: speaker?.speakerIsOwner === true,
+          // Across the burst: the owner's standing only when every message in it is the owner's.
+          speakerIsOwner: ownerStanding,
           ...(burst.length
             ? { burst: burst.map(row => `[${row.speaker}] ${row.content.replace(/\s+/g, " ").slice(0, 300)}`).join("\n") }
             : {}),
+          ...(burstSpeakerNames ? { burstSpeakers: burstSpeakerNames.join(", ") } : {}),
           ...(inConversation ? { inConversation: true } : {}),
           ...groupRoomContext(db, thread.id, group.area.id),
         }
@@ -1503,8 +1560,11 @@ export async function runChannelAgent(
       : ownRecordsOnly(context) ? ownSearchParameters(db) : undefined;
   // A retry that already shows a mark keeps it; the working mark never
   // replaces a more specific one.
-  if (group && !options.internal && !markShown && markHandle
-    && aimedAtAssistant(db, thread.id, inboundId, body, options.inbound, speaker?.speaker)) {
+  // Whether this message was for the assistant: a group message that was not
+  // may be answered by a kept fact's 🧠 alone; one that was needs words.
+  const forAssistant = !group || Boolean(options.internal)
+    || aimedAtAssistant(db, thread.id, inboundId, body, options.inbound, speaker?.speaker, providerMessageId);
+  if (group && !options.internal && !markShown && markHandle && forAssistant) {
     void setMark(WORKING_MARK);
   }
   /*
@@ -1528,11 +1588,12 @@ export async function runChannelAgent(
     if (toolName === "list_group_chats") return;
     turn.groupThreadsRead = new Set([...turn.groupThreadsRead ?? [], ...threads]);
   };
-  const deadline = Date.now() + TURN_BUDGET_MS;
+  const budgetMs = options.turnBudgetMs ?? TURN_BUDGET_MS;
+  const deadline = Date.now() + budgetMs;
   try {
-    for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
+    for (let iteration = 0; iteration < (options.maxRounds ?? MAX_TOOL_ITERATIONS); iteration += 1) {
       if (Date.now() >= deadline) {
-        throw new Error(`Agent exceeded its time budget of ${TURN_BUDGET_MS / 60_000} minutes`);
+        throw new Error(`Agent exceeded its time budget of ${budgetMs / 60_000} minutes`);
       }
       const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch, searchParameters);
       response.id ||= `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -1587,8 +1648,9 @@ export async function runChannelAgent(
         // comes down when there is nothing to confirm; the agent's own reaction,
         // if it made one, is left exactly where it is. A turn that decided the
         // message was not for it leaves no receipt at all, whatever it read on
-        // the way to deciding.
-        const quiet = context.stayedQuiet && !text;
+        // the way to deciding — unless it wrote something after all, which the
+        // mark is then the only word of.
+        const quiet = context.stayedQuiet && !text && !changedRecord;
         await setMark(quiet ? undefined : closingMark());
         /*
          * A tapback with nothing after it is a complete answer to "thanks" or
@@ -1603,7 +1665,8 @@ export async function runChannelAgent(
          */
         // A fact kept on a message that was not for the assistant is answered by
         // its 🧠 alone; words would interrupt the people talking.
-        if (!text && (context.reacted || context.sentText || context.stayedQuiet || context.adjustedVoice || (savedMemory && markHandle))) {
+        const keptFactQuietly = savedMemory && group && !forAssistant && Boolean(markHandle);
+        if (!text && (context.reacted || context.sentText || context.stayedQuiet || context.adjustedVoice || keptFactQuietly)) {
           search.flushSoon();
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
         }
@@ -1721,6 +1784,8 @@ export async function runSmsAgent(
     assistantMetadata?: Record<string, unknown>;
     replyInternal?: boolean;
     mediaFetch?: typeof fetch;
+    maxRounds?: number;
+    turnBudgetMs?: number;
   } = {},
 ): Promise<AgentTurnResult> {
   return runChannelAgent(db, search, "sms", fromPhone, body, providerMessageId, options);

@@ -107,6 +107,12 @@ export function resolveMoodFields(input: {
   speakerName: string | null | undefined;
   /** The speaker may record only their own mood: a group participant who is not the owner. */
   ownMoodOnly?: boolean;
+  /**
+   * The people a burst of several voices came from. Their answers arrive in one
+   * turn, so each mood is filed under the name it was given, and only under
+   * one of theirs, rather than all of them under whoever wrote last.
+   */
+  allowedNames?: string[];
 }): { moods_json: string | null; mood_label: string | null; mood_score: number | null } {
   if (input.clear) return { moods_json: null, ...input.plain };
   const existing = parseMoods(input.existingJson);
@@ -115,8 +121,13 @@ export function resolveMoodFields(input: {
     return { moods_json: input.existingJson ?? null, ...combineMoods(existing) };
   }
   const speaker = input.speakerName?.trim() || null;
+  const allowed = input.allowedNames?.length ? input.allowedNames : undefined;
   const named = input.incoming.map(mood => {
-    const name = input.ownMoodOnly ? speaker : (mood.name?.trim() || speaker);
+    const asked = mood.name?.trim();
+    const name = allowed
+      ? allowed.find(candidate => candidate.toLowerCase() === asked?.toLowerCase())
+      : input.ownMoodOnly ? speaker : (asked || speaker);
+    if (!name && allowed) throw new Error(`Name each mood after the person who gave it: ${allowed.join(", ")}`);
     if (!name) throw new Error("A mood needs a name: say whose it is");
     return { name, label: mood.label, score: mood.score };
   });

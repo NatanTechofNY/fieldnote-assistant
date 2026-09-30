@@ -39,25 +39,43 @@ export type SweepCandidate = {
 
 type Row = { id: string; role: string; content: string; created_at: string; metadata_json: string };
 
+/** The sweep keys for one thread, as a range the unique index on the key can serve (":" + 1 is ";"). */
+function keyRange(threadId: string): [string, string] {
+  return [`memory_sweep:${threadId}:`, `memory_sweep:${threadId};`];
+}
+
 /** Where the thread's last sweep stopped, or the lookback for a thread never swept. */
 function sweptThrough(db: Db, threadId: string): string {
   const row = db.prepare(`
     SELECT max(scheduled_for) through FROM scheduled_dispatches
-    WHERE user_id=? AND kind='memory_sweep' AND idempotency_key LIKE ? AND status IN ('sent','failed','processing')
-  `).get(USER_ID, `memory_sweep:${threadId}:%`) as { through: string | null };
+    WHERE idempotency_key>=? AND idempotency_key<? AND status IN ('sent','failed','processing')
+  `).get(...keyRange(threadId)) as { through: string | null };
   const lookback = new Date(Date.now() - SWEEP_LOOKBACK_MS).toISOString();
   return row.through && row.through > lookback ? row.through : lookback;
 }
 
-/** The person-written messages since `since`, oldest first: nothing the app wrote, no tapbacks. */
-function spokenSince(db: Db, threadId: string, since: string): Row[] {
-  return db.prepare(`
-    SELECT id,role,content,created_at,metadata_json FROM channel_messages
-    WHERE thread_id=? AND role='user' AND direction='inbound' AND created_at>?
-      AND COALESCE(json_extract(metadata_json,'$.internal'),0)=0
-      AND json_extract(metadata_json,'$.reactionText') IS NULL
-    ORDER BY created_at,rowid
-  `).all(threadId, since) as Row[];
+/*
+ * The person-written messages a sweep reads: nothing the app wrote, no
+ * tapbacks, and nothing a group held while it asked the assistant to stay out
+ * until named. People who said "don't answer until we say your name" did not
+ * mean "but keep what we say".
+ */
+const SPOKEN = `
+  role='user' AND direction='inbound'
+  AND COALESCE(json_extract(metadata_json,'$.internal'),0)=0
+  AND json_extract(metadata_json,'$.reactionText') IS NULL
+  AND json_extract(metadata_json,'$.heldUntilNamed') IS NULL`;
+
+/** How many such messages came after `since`, and the newest of them. */
+function spokenSince(db: Db, threadId: string, since: string): { count: number; newest?: { id: string; created_at: string } } {
+  const { count } = db.prepare(`SELECT count(*) count FROM channel_messages WHERE thread_id=? AND created_at>? AND ${SPOKEN}`)
+    .get(threadId, since) as { count: number };
+  if (count < SWEEP_MIN_MESSAGES) return { count };
+  const newest = db.prepare(`
+    SELECT id,created_at FROM channel_messages WHERE thread_id=? AND created_at>? AND ${SPOKEN}
+    ORDER BY created_at DESC,rowid DESC LIMIT 1
+  `).get(threadId, since) as { id: string; created_at: string };
+  return { count, newest };
 }
 
 /**
@@ -73,10 +91,15 @@ export function sweepCandidates(db: Db): SweepCandidate[] {
     WHERE t.user_id=? AND t.channel='sms' AND (la.id IS NOT NULL OR t.address=?)
   `).all(USER_ID, owner ?? "") as Array<{ id: string; address: string; area_id: string | null; area_name: string | null }>;
   const quietSince = new Date(Date.now() - SWEEP_IDLE_MS).toISOString();
+  const latest = db.prepare(`
+    SELECT max(created_at) at FROM channel_messages WHERE thread_id=? AND role='user' AND direction='inbound'
+  `);
   return threads.flatMap(thread => {
-    const rows = spokenSince(db, thread.id, sweptThrough(db, thread.id));
-    const newest = rows.at(-1);
-    if (!newest || rows.length < SWEEP_MIN_MESSAGES || newest.created_at > quietSince) return [];
+    // Still talking, or never talked: one indexed lookup settles most threads.
+    const last = (latest.get(thread.id) as { at: string | null }).at;
+    if (!last || last > quietSince) return [];
+    const { newest } = spokenSince(db, thread.id, sweptThrough(db, thread.id));
+    if (!newest) return [];
     return [{
       threadId: thread.id,
       lifeAreaId: thread.area_id,
@@ -100,6 +123,7 @@ export function composeMemorySweepTurn(db: Db, candidate: SweepCandidate): strin
     WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed' AND created_at>? AND created_at<=?
       AND COALESCE(json_extract(metadata_json,'$.internal'),0)=0
       AND json_extract(metadata_json,'$.reactionText') IS NULL
+      AND json_extract(metadata_json,'$.heldUntilNamed') IS NULL
     ORDER BY created_at DESC,rowid DESC LIMIT ?
   `).all(candidate.threadId, since, candidate.newestAt, SWEEP_TRANSCRIPT_LIMIT) as Row[];
   const lines = rows.reverse().map(row => {

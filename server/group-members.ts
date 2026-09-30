@@ -167,7 +167,7 @@ function resolveMember(db: Db, threadId: string, who: string, speakerPhone: stri
   const wanted = who.trim().toLowerCase();
   let matches: GroupMemberRow[];
   if (wanted === "speaker" || wanted === "me") {
-    if (!speakerPhone) throw new Error("This turn has no speaker to name");
+    if (!speakerPhone) throw new Error("This turn has no single speaker to name; ask the person to say it again in a message of their own");
     matches = members.filter(member => member.phone === speakerPhone);
   } else if (wanted === OWNER_SPEAKER_NAME || wanted === "owner") {
     matches = members.filter(member => member.is_owner);

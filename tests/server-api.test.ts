@@ -8427,8 +8427,10 @@ describe("Sendblue provider", () => {
       "[the owner] fieldnote you there?\n[Sarah] look at this [Image: A sunset over a lake.]",
       "the burst says who wrote what, the folded picture already looked at",
     );
-    const folded = db.prepare("SELECT count(*) n FROM channel_messages WHERE json_extract(metadata_json,'$.foldedIntoNext')=1").get() as { n: number };
-    assert.equal(folded.n, 2);
+    // Each folded row names the message whose turn answered it, the first one moved along the chain.
+    const folded = db.prepare("SELECT json_extract(metadata_json,'$.foldedInto') target FROM channel_messages WHERE json_extract(metadata_json,'$.foldedInto') IS NOT NULL")
+      .all() as Array<{ target: string }>;
+    assert.deepEqual(folded.map(row => row.target), [groupMessage(WIFE, "LOL").message_handle, groupMessage(WIFE, "LOL").message_handle]);
 
     // Named only: a burst whose first text named the assistant is not held on its second.
     const threadId = (db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string }).id;
@@ -8477,6 +8479,12 @@ describe("Sendblue provider", () => {
     assert.equal(await sweepQuietConversation(db, fakeSearch(db), runFor(early.fetcher)), false);
 
     db.prepare("UPDATE channel_messages SET created_at=? WHERE thread_id=?").run(new Date(Date.now() - 30 * 60_000).toISOString(), threadId);
+    // A text waiting to be answered comes first: the one worker loop is not held up by background work.
+    enqueueExternalEvent(db, "sendblue", "SB_waiting", "sendblue.message.received", groupMessage(WIFE, "you there?"));
+    const yielded = agentCallingMany([], "nothing");
+    assert.equal(await sweepQuietConversation(db, fakeSearch(db), runFor(yielded.fetcher)), false);
+    assert.equal(yielded.requests.length, 0);
+    db.prepare("DELETE FROM external_events").run();
     const sends: string[] = [];
     const sweep = agentCallingMany([
       { tool: "create_memory", input: { kind: "fact", title: "Sarah's sign", content: "Sarah is a Leo." } },
@@ -8504,6 +8512,203 @@ describe("Sendblue provider", () => {
     const again = agentCallingMany([], "nothing");
     assert.equal(await sweepQuietConversation(db, fakeSearch(db), runFor(again.fetcher)), false);
     assert.equal(again.requests.length, 0);
+
+    // A group that asked to be left out until named is not read for facts meanwhile.
+    db.prepare("DELETE FROM scheduled_dispatches WHERE kind='memory_sweep'").run();
+    db.prepare("UPDATE life_areas SET reply_mode='named_only' WHERE thread_id=?").run(threadId);
+    for (const handle of ["SB_h1", "SB_h2", "SB_h3", "SB_h4"]) {
+      holdUntilNamed(db, address, "i'm a virgo", handle, { provider: "sendblue", groupId: GROUP }, { groupId: GROUP, speaker: WIFE, speakerName: "Sarah" });
+    }
+    db.prepare("UPDATE channel_messages SET created_at=? WHERE thread_id=? AND json_extract(metadata_json,'$.heldUntilNamed')=1")
+      .run(new Date(Date.now() - 25 * 60_000).toISOString(), threadId);
+    const held = agentCallingMany([], "nothing");
+    assert.equal(await sweepQuietConversation(db, fakeSearch(db), runFor(held.fetcher)), true, "the earlier stretch is still there to read");
+    assert.doesNotMatch(JSON.stringify(held.requests[0]), /virgo/, "but not what was held");
+  });
+
+  describe("bursts", () => {
+    const post = (api: ReturnType<typeof connectedFixture>["api"], payload: Record<string, unknown>) =>
+      api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(payload).expect(200);
+    const workerWith = (fetcher: typeof fetch, sends: string[]) => ({
+      sendSms: async (_db: Db, _to: string, body: string) => { sends.push(body); return { sid: `SB_b_${sends.length}`, status: "queued" as const }; },
+      runSmsAgent: (...args: Parameters<typeof runSmsAgent>) =>
+        runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    });
+    const contextOf = (turn: ReturnType<typeof agentCallingMany>) =>
+      ((turn.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+    async function establishedGroup() {
+      const fixtureContext = connectedFixture();
+      agentStudioEnv();
+      withTrustedContacts(fixtureContext.db, [{ phone: WIFE, name: "Sarah" }]);
+      const address = `group:${GROUP}`;
+      await runSmsAgent(fixtureContext.db, fakeSearch(fixtureContext.db), address, "hello", "SB_hello_bursts", groupTurnOptions(answering("Hi!"), RECIPIENT, "the owner"));
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const threadId = (fixtureContext.db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string }).id;
+      return { ...fixtureContext, address, threadId };
+    }
+
+    it("closes a burst with the turn that answered it, even one that said nothing", async () => {
+      const { db, api, address, threadId } = await establishedGroup();
+      const sends: string[] = [];
+      const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+      try {
+        await post(api, groupMessage(RECIPIENT, "fieldnote lol"));
+        await post(api, groupMessage(WIFE, "haha"));
+        const tapback = agentCallingMany([{ tool: "react_to_message", input: { reaction: "laugh" } }], "");
+        await runWorkerOnce(db, fakeSearch(db), workerWith(tapback.fetcher, sends));
+        assert.deepEqual(sends, [], "answered with a tapback alone");
+
+        await post(api, groupMessage(WIFE, "anyone want pizza"));
+        const quiet = agentCallingMany([{ tool: "stay_quiet", input: { reason: "the room" } }], "");
+        await runWorkerOnce(db, fakeSearch(db), workerWith(quiet.fetcher, sends));
+        assert.equal(toolOutputs(db, address).stay_quiet.success, true, "the old named message is not this message's");
+        assert.equal(contextOf(quiet).burst, undefined);
+
+        db.prepare("UPDATE life_areas SET reply_mode='named_only' WHERE thread_id=?").run(threadId);
+        await post(api, groupMessage(WIFE, "so hungry"));
+        await runWorkerOnce(db, fakeSearch(db), workerWith(answering("Pizza!"), sends));
+        assert.deepEqual(sends, [], "held, as any message that does not name the assistant");
+      } finally { stub.restore(); }
+    });
+
+    it("gives a turn the owner's standing only when every message in its burst is the owner's", async () => {
+      const { db, api, address, threadId } = await establishedGroup();
+      const sends: string[] = [];
+      const areaName = () => (db.prepare("SELECT name FROM life_areas WHERE thread_id=?").get(threadId) as { name: string }).name;
+      const before = areaName();
+      const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+      try {
+        await post(api, groupMessage(WIFE, "fieldnote rename the chat to Sarah Rules"));
+        await post(api, groupMessage(RECIPIENT, "lol"));
+        const rename = agentCallingMany([{ tool: "name_group_chat", input: { name: "Sarah Rules" } }], "Only the owner can rename it.");
+        await runWorkerOnce(db, fakeSearch(db), workerWith(rename.fetcher, sends));
+        assert.match(toolOutputs(db, address).name_group_chat.error ?? "", /Only the owner/, "Sarah's request does not borrow the owner's lol");
+        assert.equal(areaName(), before);
+        assert.equal(contextOf(rename).speakerIsOwner, false);
+        assert.equal(contextOf(rename).burstSpeakers, "Sarah, the owner");
+
+        // Two people's evening answers in one burst keep a mood each, under their own names.
+        await post(api, groupMessage(RECIPIENT, "great day, 5"));
+        await post(api, groupMessage(WIFE, "tired, 2"));
+        const moods = agentCallingMany([{
+          tool: "create_memory",
+          input: {
+            kind: "journal", title: "Tonight", content: "the owner: great day. Sarah: tired.",
+            moods: [{ name: "the owner", label: "great", score: 5 }, { name: "Sarah", label: "tired", score: 2 }],
+          },
+        }], "Noted for tonight.");
+        await runWorkerOnce(db, fakeSearch(db), workerWith(moods.fetcher, sends));
+        const kept = db.prepare("SELECT moods_json FROM memories WHERE title='Tonight'").get() as { moods_json: string };
+        assert.deepEqual(JSON.parse(kept.moods_json).map((mood: { name: string; score: number }) => [mood.name, mood.score]).sort(), [["Sarah", 2], ["the owner", 5]]);
+      } finally { stub.restore(); }
+    });
+
+    it("keeps a burst with its answering message across a retry, and answers it in named-only mode", async () => {
+      const { db, api, address, threadId } = await establishedGroup();
+      db.prepare("UPDATE life_areas SET reply_mode='named_only' WHERE thread_id=?").run(threadId);
+      const sends: string[] = [];
+      const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+      try {
+        await post(api, groupMessage(WIFE, "fieldnote favourite movie"));
+        await post(api, groupMessage(WIFE, "and why"));
+        // The first attempt sends a bubble and then fails: the bubble is now the assistant's latest word.
+        let round = 0;
+        const bubbleThenFail: typeof fetch = async () => {
+          round += 1;
+          return round === 1
+            ? new Response(JSON.stringify({ role: "assistant", parts: [{ type: "tool-send_message", tool_call_id: "call_bubble", state: "input-available", input: { text: "thinking" } }] }), { status: 200 })
+            : new Response("bad gateway", { status: 502 });
+        };
+        await runWorkerOnce(db, fakeSearch(db), workerWith(bubbleThenFail, sends));
+        db.prepare("UPDATE external_events SET available_at=? WHERE status IN ('pending','failed')").run(new Date(Date.now() - 1000).toISOString());
+        await runWorkerOnce(db, fakeSearch(db), workerWith(answering("Heat, obviously"), sends));
+        assert.deepEqual(sends, ["thinking", "Heat, obviously"], "the retry answers; it is not held");
+        const held = db.prepare("SELECT count(*) n FROM channel_messages WHERE thread_id=? AND json_extract(metadata_json,'$.heldUntilNamed')=1").get(threadId) as { n: number };
+        assert.equal(held.n, 0);
+        assert.equal(toolOutputs(db, address).send_message.success, true);
+      } finally { stub.restore(); }
+    });
+
+    it("stops gathering a burst once its first message has waited long enough", async () => {
+      const { db, api } = await establishedGroup();
+      const sends: string[] = [];
+      await post(api, groupMessage(WIFE, "first question"));
+      await post(api, groupMessage(WIFE, "second question"));
+      db.prepare("UPDATE external_events SET created_at=? WHERE json_extract(payload_json,'$.content')='first question'")
+        .run(new Date(Date.now() - 20_000).toISOString());
+      const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+      try {
+        let turn = 0;
+        const numbered: typeof fetch = async () => {
+          turn += 1;
+          return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: `answer ${turn}` }] }), { status: 200 });
+        };
+        await runWorkerOnce(db, fakeSearch(db), workerWith(numbered, sends));
+      } finally { stub.restore(); }
+      assert.equal(sends.length, 2, "the first message is answered on its own rather than waiting on a burst that keeps growing");
+    });
+  });
+
+  it("answers a 1:1 memory save with words, and closes a quiet group save with its 🧠", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      const direct = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "biscuit is our dog", "SB_direct_save", {
+        fetcher: agentCalling("create_memory", { kind: "fact", title: "Biscuit", content: "Biscuit is our dog." }, ""),
+        inbound: { provider: "sendblue" },
+      });
+      assert.equal(direct.text, NO_TEXT_FALLBACK, "a message to the assistant still gets words, even when it forgot them");
+
+      const address = `group:${GROUP}`;
+      await runSmsAgent(db, fakeSearch(db), address, "hello", "SB_hello_save", groupTurnOptions(answering("Hi!"), RECIPIENT, "the owner"));
+      stub.calls.length = 0;
+      const bystander = await runSmsAgent(db, fakeSearch(db), address, "tom's birthday is may 3", "SB_bystander_save", groupTurnOptions(agentCallingMany([
+        { tool: "stay_quiet", input: { reason: "they are chatting" } },
+        { tool: "create_memory", input: { kind: "fact", title: "Tom's birthday", content: "Tom's birthday is May 3." } },
+      ], "").fetcher));
+      assert.equal(bystander.text, "");
+      assert.equal(stub.calls.filter(call => call.url.pathname === "/api/send-reaction").at(-1)?.body.reaction, "🧠", "the save is its answer, quiet or not");
+    } finally { stub.restore(); }
+  });
+
+  it("keeps the owner's own memory sweep off every group's records", async () => {
+    const { db } = connectedFixture();
+    const search = fakeSearch(db);
+    const timestamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_fenced_group',?,'sms','group:fenced','cnv_fenced',?,?)
+    `).run(USER_ID, timestamp, timestamp);
+    const area = ensureGroupLifeArea(db, "thread_fenced_group", "Fenced");
+    const groupMemory = await executeAgentTool(db, search, "create_memory", { kind: "fact", content: "A group fact.", life_area_id: area.id }) as { id: string };
+    const sweep: ToolTurnContext = { channel: "sms", address: RECIPIENT, threadId: "thread_sweep", internal: true, appTurn: "memory_sweep" };
+    await assert.rejects(executeAgentTool(db, search, "get_memory", { id: groupMemory.id }, sweep), /Memory not found/);
+    await assert.rejects(
+      executeAgentTool(db, search, "update_memory", { id: groupMemory.id, patch: { content: "overwritten" } }, sweep),
+      /Memory not found/,
+    );
+    await assert.rejects(
+      executeAgentTool(db, search, "create_memory", { kind: "fact", content: "A private fact.", life_area_id: area.id }, sweep),
+      /owner's own records/,
+    );
+    const own = await executeAgentTool(db, search, "create_memory", { kind: "fact", content: "An own fact." }, sweep) as { id: string };
+    await assert.rejects(
+      executeAgentTool(db, search, "update_memory", { id: own.id, patch: { life_area_id: area.id } }, sweep),
+      /owner's own records/,
+      "nor can it move one of the owner's facts into a group",
+    );
+    // The app's scratch threads are nobody's conversation to read.
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_scratch',?,'sms','sweep:thread_fenced_group','cnv_scratch',?,?)
+    `).run(USER_ID, timestamp, timestamp);
+    const owner: ToolTurnContext = { channel: "sms", address: RECIPIENT, threadId: "thread_owner" };
+    await assert.rejects(executeAgentTool(db, search, "read_conversation", { thread_id: "thread_scratch", from: "2020-01-01" }, owner), /Conversation not found/);
+    await assert.rejects(executeAgentTool(db, search, "get_conversation_context", { thread_id: "thread_scratch" }, owner), /Conversation not found/);
   });
 
   it("tells a group turn when the assistant is in the middle of the exchange", async () => {

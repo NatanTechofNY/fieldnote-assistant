@@ -4,7 +4,7 @@ import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, groupAreas, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
-  archivedInboundText, archiveReactionText, failAgentTurn, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
+  archivedInboundText, archiveReactionText, burstStartedAt, failAgentTurn, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
   recordOutboundProviderMessage, runSmsAgent,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
@@ -62,6 +62,8 @@ export type WorkerDependencies = {
 
 /** People send a thought in bubbles a few seconds apart; this is long enough to gather them. */
 export const GROUP_SETTLE_MS = 3_000;
+/** The longest a burst keeps gathering: in nonstop chatter its first message is still answered. */
+const MAX_BURST_MS = 15_000;
 
 /**
  * Inbound texts are queued verbatim in the provider's own vocabulary, so each
@@ -228,34 +230,49 @@ function groupReplyThread(
   return newerTextWaiting(db, source, read, event, address) ? message.messageId : undefined;
 }
 
+/** How many later events one look scans; after an outage the queue can be long, and each is parsed. */
+const LATER_TEXT_SCAN_LIMIT = 100;
+
 /**
- * Whether a text that arrived after `event` in the same thread is still waiting
- * to be answered. With `turnsOnly`, a tapback written out as text does not
- * count: it is filed without a turn, so it cannot answer anything folded into it.
+ * The first text that arrived after `event` in the same thread and is still
+ * waiting to be answered. With `turnsOnly`, a tapback written out as text does
+ * not count: it is filed without a turn, so it cannot answer anything folded
+ * into it.
  */
-function newerTextWaiting(
+function nextTextWaiting(
   db: Db,
   source: SmsProvider,
   read: (payload: Record<string, unknown>) => InboundMessage,
   event: ExternalEventRow,
   address: string,
   turnsOnly = false,
-): boolean {
+): InboundMessage | undefined {
   const later = db.prepare(`
     SELECT id,payload_json FROM external_events
     WHERE user_id=? AND source=? AND id<>? AND status IN ('pending','failed','processing')
       AND (created_at>? OR (created_at=? AND rowid>?))
-    ORDER BY created_at,rowid
-  `).all(USER_ID, source, event.id, event.created_at, event.created_at, event.rowid ?? 0) as Array<{ id: string; payload_json: string }>;
-  return later.some(row => {
+    ORDER BY created_at,rowid LIMIT ?
+  `).all(USER_ID, source, event.id, event.created_at, event.created_at, event.rowid ?? 0, LATER_TEXT_SCAN_LIMIT) as Array<{ id: string; payload_json: string }>;
+  for (const row of later) {
     try {
       const next = read(JSON.parse(row.payload_json) as Record<string, unknown>);
-      if (inboundAddress(next) !== address) return false;
-      return !turnsOnly || Boolean(next.mediaUrls?.length) || !isReactionText(next.body ?? "");
+      if (inboundAddress(next) !== address) continue;
+      if (!turnsOnly || next.mediaUrls?.length || !isReactionText(next.body ?? "")) return next;
     } catch {
-      return false;
+      continue;
     }
-  });
+  }
+  return undefined;
+}
+
+function newerTextWaiting(
+  db: Db,
+  source: SmsProvider,
+  read: (payload: Record<string, unknown>) => InboundMessage,
+  event: ExternalEventRow,
+  address: string,
+): boolean {
+  return Boolean(nextTextWaiting(db, source, read, event, address));
 }
 
 /** What the thread hears when a text has been tried `MAX_EVENT_ATTEMPTS` times and is being let go. */
@@ -910,6 +927,36 @@ async function refreshProfileOvernight(
   }
 }
 
+/** A sweep is background work: it never starts with a reply due soon, and never runs long. */
+const SWEEP_YIELD_MS = 30_000;
+const SWEEP_RECENT_INBOUND_MS = 2 * 60_000;
+const SWEEP_SPACING_MS = 5 * 60_000;
+const SWEEP_MAX_ROUNDS = 6;
+const SWEEP_BUDGET_MS = 60_000;
+
+/**
+ * Whether a sweep should wait: a text is queued or due within half a minute,
+ * someone wrote anywhere in the last two minutes, or a sweep ran in the last
+ * five. The worker is one loop, and every reply waits behind a running sweep.
+ */
+function sweepMustYield(db: Db): boolean {
+  const next = nextExternalEventAvailableAt(db, INBOUND_SOURCES.map(entry => entry.source));
+  if (next && Date.parse(next) - Date.now() < SWEEP_YIELD_MS) return true;
+  const processing = db.prepare(`
+    SELECT 1 found FROM external_events WHERE user_id=? AND status='processing' LIMIT 1
+  `).get(USER_ID);
+  if (processing) return true;
+  const recent = db.prepare(`
+    SELECT 1 found FROM channel_messages WHERE direction='inbound' AND role='user' AND created_at>?
+      AND COALESCE(json_extract(metadata_json,'$.internal'),0)=0 LIMIT 1
+  `).get(new Date(Date.now() - SWEEP_RECENT_INBOUND_MS).toISOString());
+  if (recent) return true;
+  const last = db.prepare(`
+    SELECT max(updated_at) at FROM scheduled_dispatches WHERE user_id=? AND kind='memory_sweep'
+  `).get(USER_ID) as { at: string | null };
+  return Boolean(last.at && Date.now() - Date.parse(last.at) < SWEEP_SPACING_MS);
+}
+
 /**
  * Reads one quiet stretch of conversation for facts to keep. One completion
  * per pass at most, for the same reason as the profile rewrite: every inbound
@@ -921,8 +968,13 @@ export async function sweepQuietConversation(
   search: SearchWriter,
   runAgent: typeof runSmsAgent,
 ): Promise<boolean> {
+  if (sweepMustYield(db)) return false;
+  const waiting = db.prepare("SELECT status,available_at FROM scheduled_dispatches WHERE idempotency_key=?");
   for (const candidate of sweepCandidates(db)) {
     if (dispatchSettled(db, candidate.key)) continue;
+    // A stretch waiting out its retry is not re-read on every pass meanwhile.
+    const retry = waiting.get(candidate.key) as { status: string; available_at: string | null } | undefined;
+    if (retry?.status === "pending" && retry.available_at && retry.available_at > now()) continue;
     // Composed before the claim, whose row is what marks the stretch as read.
     const instruction = composeMemorySweepTurn(db, candidate);
     const dispatchId = claimDispatch(db, "memory_sweep", candidate.key, candidate.newestAt);
@@ -930,6 +982,8 @@ export async function sweepQuietConversation(
     try {
       await runAgent(db, search, `sweep:${candidate.threadId}`, instruction, undefined, {
         internal: true,
+        maxRounds: SWEEP_MAX_ROUNDS,
+        turnBudgetMs: SWEEP_BUDGET_MS,
         userMessageMetadata: {
           kind: "memory_sweep",
           threadId: candidate.threadId,
@@ -1212,15 +1266,22 @@ export async function runWorkerOnce(
         // A group that asked the assistant to stay out until named gets no
         // answer, and no completion is spent, on a message that does not name it.
         const heldText = withMediaLines(message.body, media.map(() => PICTURE_PENDING));
-        if (group && holdUntilNamed(db, address, heldText, message.messageId, inbound, { ...group.metadata, ...(media.length ? { mediaUrls: media } : {}) })) {
+        const groupMetadata = { ...group?.metadata, ...(media.length ? { mediaUrls: media } : {}) };
+        // A retry has its row already: whether it was for the assistant was
+        // decided on its first attempt, and its own earlier bubble must not now
+        // read as the assistant having spoken since.
+        const retrying = archivedInboundText(db, address, message.messageId) !== undefined;
+        if (group && !retrying && holdUntilNamed(db, address, heldText, message.messageId, inbound, groupMetadata)) {
           completeExternalEvent(db, event.id, "processed");
           continue;
         }
         // Another message from the group is already queued: that turn answers
-        // this one with it. A retry has its row already and keeps its own turn.
-        if (group && newerTextWaiting(db, source, read, event, address, true)
-          && archivedInboundText(db, address, message.messageId) === undefined) {
-          foldIntoNextTurn(db, address, heldText, message.messageId, inbound, { ...group.metadata, ...(media.length ? { mediaUrls: media } : {}) });
+        // this one with it — unless the burst has been gathering long enough
+        // that its first message is owed an answer now.
+        const next = group && !retrying && message.messageId ? nextTextWaiting(db, source, read, event, address, true) : undefined;
+        const started = next && message.messageId ? burstStartedAt(db, address, message.messageId) ?? event.created_at : undefined;
+        if (next?.messageId && message.messageId && started && Date.now() - Date.parse(started) < MAX_BURST_MS) {
+          foldIntoNextTurn(db, address, heldText, message.messageId, inbound, groupMetadata, next.messageId);
           completeExternalEvent(db, event.id, "processed");
           continue;
         }

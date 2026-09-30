@@ -313,6 +313,8 @@ export type ToolTurnContext = {
   inboundText?: string;
   /** The burst's earlier messages this turn answers too; one that names the assistant makes the turn named. */
   burstTexts?: string[];
+  /** Who wrote in a burst of more than one voice: the only names its moods may be filed under. */
+  burstSpeakerNames?: string[];
   /**
    * Set once a tapback has landed on the inbound message. A turn that reacted
    * and then had nothing to add has answered, so the caller sends no text
@@ -508,10 +510,26 @@ function scopedTodo(db: Db, todoId: string, scope: GroupScope | undefined): Todo
   return row;
 }
 
-function scopedMemory(db: Db, memoryId: string, scope: GroupScope | undefined): MemoryRow | undefined {
+function scopedMemory(db: Db, memoryId: string, scope: GroupScope | undefined, ownOnly = false): MemoryRow | undefined {
   const row = getMemory(db, memoryId);
   if (row && scope && row.life_area_id !== scope.lifeAreaId) return undefined;
+  // A turn fenced to the owner's own records does not find a group's, even by id.
+  if (row && ownOnly && isGroupArea(db, row.life_area_id)) return undefined;
   return row;
+}
+
+/** The threads the app composes its own turns on: a digest, a profile rewrite, a memory sweep. */
+function isScratchAddress(address: string): boolean {
+  return /^(?:digest|profile|sweep):/.test(address);
+}
+
+function isGroupArea(db: Db, areaId: string | null | undefined): boolean {
+  return Boolean(areaId && db.prepare("SELECT 1 found FROM life_areas WHERE id=? AND thread_id IS NOT NULL").get(areaId));
+}
+
+/** A turn fenced to the owner's own records cannot file anything under a group chat. */
+function assertOwnArea(db: Db, ownOnly: boolean, areaId: string | null | undefined): void {
+  if (ownOnly && isGroupArea(db, areaId)) throw new Error("This turn keeps only the owner's own records; a group chat's area is not one of them");
 }
 
 /**
@@ -1164,8 +1182,9 @@ export async function executeAgentTool(
       WHERE t.id=? AND t.user_id=?
     `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; address: string; group_name: string | null } | undefined;
     // From inside a group, the owner's other conversations do not exist; from
-    // a turn about the owner's own day, the groups' do not.
-    if (!thread || (scope && thread.id !== scope.threadId) || (ownOnly && groupIdOfAddress(thread.address))) {
+    // a turn about the owner's own day, the groups' do not. The app's scratch
+    // threads are nobody's conversation, and a sweep's holds a group's words.
+    if (!thread || (scope && thread.id !== scope.threadId) || (ownOnly && groupIdOfAddress(thread.address)) || isScratchAddress(thread.address)) {
       throw new Error("Conversation not found");
     }
     const limit = Math.min(Math.max(Number(input.limit) || 20, 1), 40);
@@ -1216,8 +1235,9 @@ export async function executeAgentTool(
       LEFT JOIN life_areas la ON la.thread_id=t.id
       WHERE t.id=? AND t.user_id=?
     `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; address: string; group_name: string | null } | undefined;
-    // A turn that reports on the owner's own day does not read a group's chat.
-    if (!thread || (ownOnly && groupIdOfAddress(thread.address))) throw new Error("Conversation not found");
+    // A turn that reports on the owner's own day does not read a group's chat,
+    // and nobody reads the app's scratch threads.
+    if (!thread || (ownOnly && groupIdOfAddress(thread.address)) || isScratchAddress(thread.address)) throw new Error("Conversation not found");
     const timezone = userTimezone(db);
     const dateOnly = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
     // A day the user named runs midnight to midnight on their own clock.
@@ -1497,7 +1517,7 @@ export async function executeAgentTool(
     return { id: todoId };
   }
   if (name === "get_memory") {
-    const memory = scopedMemory(db, input.id as string, scope);
+    const memory = scopedMemory(db, input.id as string, scope, ownOnly);
     if (!memory) throw new Error("Memory not found");
     return memoryJson(memory);
   }
@@ -1505,6 +1525,7 @@ export async function executeAgentTool(
     const timestamp = now();
     const memoryId = id("memory");
     const area = classificationForWrite(scope, input);
+    assertOwnArea(db, ownOnly, area.life_area_id);
     const mood = resolveMoodFields({
       existingJson: null,
       incoming: input.moods as IncomingMood[] | null | undefined,
@@ -1512,6 +1533,7 @@ export async function executeAgentTool(
       plain: { mood_label: (input.mood_label as string | null | undefined) ?? null, mood_score: (input.mood_score as number | null | undefined) ?? null },
       speakerName: context?.speakerName,
       ownMoodOnly: ownMoodOnly(context),
+      allowedNames: context?.burstSpeakerNames,
     });
     db.prepare(`
       INSERT INTO memories(
@@ -1531,12 +1553,13 @@ export async function executeAgentTool(
   }
   if (name === "update_memory") {
     const memoryId = input.id as string;
-    const current = scopedMemory(db, memoryId, scope);
+    const current = scopedMemory(db, memoryId, scope, ownOnly);
     if (!current) throw new Error("Memory not found");
     const patch = (input.patch || {}) as Input;
     const clear = clearedFields(patch);
     const value = (key: string, currentValue: unknown) =>
       clear.has(key) ? (key === "tags" ? [] : null) : patch[key] ?? currentValue;
+    assertOwnArea(db, ownOnly, value("life_area_id", current.life_area_id) as string | null);
     // Null in a patch means unchanged, so only an area the patch would really move to counts.
     if (!scope && current.life_area_source === "user"
       && value("life_area_id", current.life_area_id) !== current.life_area_id
@@ -1557,6 +1580,7 @@ export async function executeAgentTool(
       },
       speakerName: context?.speakerName,
       ownMoodOnly: ownMoodOnly(context),
+      allowedNames: context?.burstSpeakerNames,
     });
     db.transaction(() => {
       db.prepare(`
