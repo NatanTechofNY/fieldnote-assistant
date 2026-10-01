@@ -24,7 +24,7 @@ import {
 } from "./profile.ts";
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
-import { openSubtasks, syncOccurrenceCompletion } from "./todo-status.ts";
+import { openSubtasks, reopenStepsForNextOccurrence, syncOccurrenceCompletion } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
 import { sendQueuedUnthreadedResends } from "./unthreaded-resend.ts";
 import { composeMemorySweepTurn, sweepCandidates } from "./memory-sweep.ts";
@@ -323,7 +323,7 @@ function inQuietHours(time: string, start: string | null, end: string | null): b
 
 /**
  * Moves each repeating todo on to its next occurrence once the local day of the
- * one it holds is over. Completing the row marks it done for the rest of that
+ * one it holds is over, and opens its checklist again with it. Completing the row marks it done for the rest of that
  * day, which is what the list should show; a miss simply rolls forward at
  * midnight rather than sitting overdue for ever. The worker is the only writer
  * that does this, so the row cannot be rolled twice, and it happens whether or
@@ -357,6 +357,7 @@ export function rollRecurringTodos(db: Db, search: SearchWriter, timezone: strin
           UPDATE todos SET due_at=?,reminder_at=?,extra_reminders_json='[]',status=?,
             started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND user_id=?
         `).run(next.due_at, next.reminder_at, status, now(), row.id, USER_ID);
+        reopenStepsForNextOccurrence(db, row.id);
         const updated = getTodo(db, row.id);
         if (updated) syncTodoReminders(db, updated);
         queueIndexJob(db, "todo", row.id);

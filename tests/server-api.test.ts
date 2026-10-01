@@ -66,7 +66,7 @@ import { combineMoods, mergeMoods } from "../server/moods.ts";
 import { TransientFailure } from "../server/transient.ts";
 import { sendTwilioSms } from "../server/twilio-service.ts";
 import { GAVE_UP_TEXT, rollRecurringTodos, runWorkerOnce, startWorker, sweepQuietConversation } from "../server/worker.ts";
-import type { Db } from "../server/types.ts";
+import type { Db, TodoRow } from "../server/types.ts";
 
 process.env.SETTINGS_ENCRYPTION_KEY = "test-only-encryption-key";
 process.env.TWILIO_SKIP_SIGNATURE_VALIDATION = "true";
@@ -11415,30 +11415,106 @@ describe("repeating todos", () => {
     assert.equal(getTodo(db, created.id)?.due_at, created.due_at);
   });
 
-  it("keeps a repeating todo and a checklist apart in both directions", async () => {
+  it("lets a repeating todo carry a checklist whose steps have no schedule of their own", async () => {
     const { api, db } = fixture();
-    const withSteps = await api.post("/api/todos").send({
-      title: "Weekly review", recurrence: rule, subtasks: [{ title: "Inbox" }],
+    const future = new Date(Date.now() + 40 * 86_400_000).toISOString();
+    const stepsOf = (parentId: string) =>
+      db.prepare("SELECT * FROM todos WHERE parent_id=? ORDER BY created_at").all(parentId) as TodoRow[];
+    const pendingReminders = (todoId: string) =>
+      db.prepare("SELECT count(*) total FROM reminders WHERE todo_id=? AND status='pending'").get(todoId) as { total: number };
+
+    const repeating = (await api.post("/api/todos").send({
+      title: "Weekly laundry", recurrence: rule, subtasks: [{ title: "Wash clothes" }, { title: "Dry clothes" }],
+    }).expect(201)).body.data;
+    assert.deepEqual(stepsOf(repeating.id).map(step => step.title), ["Wash clothes", "Dry clothes"]);
+    const datedStep = await api.post("/api/todos").send({
+      title: "Weekly review", recurrence: rule, subtasks: [{ title: "Inbox", due_at: future }],
     }).expect(400);
-    assert.match(withSteps.body.error, /cannot have subtasks/);
+    assert.match(datedStep.body.error, /steps have no due time/);
 
-    const repeating = (await api.post("/api/todos").send({ title: "Weekly review", recurrence: rule }).expect(201)).body.data;
-    const filed = await api.post("/api/todos").send({ title: "Inbox", parent_id: repeating.id }).expect(400);
-    assert.match(filed.body.error, /cannot have subtasks/);
-    const loose = (await api.post("/api/todos").send({ title: "Inbox" }).expect(201)).body.data;
-    await api.patch(`/api/todos/${loose.id}`).send({ parent_id: repeating.id }).expect(400);
+    await api.post("/api/todos").send({ title: "Put away clothes", parent_id: repeating.id }).expect(201);
+    await api.post("/api/todos").send({ title: "Fold", parent_id: repeating.id, due_at: future }).expect(400);
+    const filed = await api.post("/api/todos").send({ title: "Nested series", parent_id: repeating.id, recurrence: rule }).expect(400);
+    assert.match(filed.body.error, /cannot be filed under another task/);
 
-    const project = (await api.post("/api/todos").send({ title: "Launch", subtasks: [{ title: "Deck" }] }).expect(201)).body.data;
-    const turned = await api.patch(`/api/todos/${project.id}`).send({ recurrence: rule }).expect(400);
-    assert.match(turned.body.error, /cannot repeat/);
-    assert.equal(getTodo(db, project.id)?.recurrence_json, null);
+    // A dated task moved under a repeating one gives up its date.
+    const loose = (await api.post("/api/todos").send({ title: "Iron", due_at: future, reminder_at: future }).expect(201)).body.data;
+    const moved = (await api.patch(`/api/todos/${loose.id}`).send({ parent_id: repeating.id }).expect(200)).body.data;
+    assert.equal(moved.due_at, null);
+    assert.equal(moved.reminder_at, null);
+    assert.equal(pendingReminders(loose.id).total, 0);
+    await api.patch(`/api/todos/${loose.id}`).send({ due_at: future }).expect(400);
+
+    // A project with dated steps can be made to repeat; the steps' dates go.
+    const project = (await api.post("/api/todos").send({
+      title: "Launch", subtasks: [{ title: "Deck", due_at: future }],
+    }).expect(201)).body.data;
+    await api.patch(`/api/todos/${project.id}`).send({ recurrence: rule }).expect(200);
+    assert.notEqual(getTodo(db, project.id)?.recurrence_json, null);
+    const [deck] = stepsOf(project.id);
+    assert.equal(deck.due_at, null);
+    assert.equal(pendingReminders(deck.id).total, 0);
 
     const call = async (name: string, input: object = {}, expected = 200) =>
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
-    await call("create_todo", { title: "Review", recurrence: rule, subtasks: [{ title: "Inbox" }] }, 400);
-    await call("create_todo", { title: "Inbox", parent_id: repeating.id }, 400);
-    await call("update_todo", { id: loose.id, patch: { parent_id: repeating.id } }, 400);
-    await call("update_todo", { id: project.id, patch: { recurrence: rule } }, 400);
+    const viaTool = (await call("create_todo", {
+      title: "Bedsheets", life_area_id: "area_personal", recurrence: rule,
+      subtasks: [{ title: "Wash bedsheets" }, { title: "Dry bedsheets" }],
+    })).data;
+    assert.equal(viaTool.subtasks.length, 2);
+    const refused = await call("create_todo", {
+      title: "Towels", life_area_id: "area_personal", recurrence: rule, subtasks: [{ title: "Wash towels", due_at: future }],
+    }, 400);
+    assert.match(refused.error, /steps have no due time/);
+    await call("create_todo", { title: "Shoes", life_area_id: "area_personal", parent_id: viaTool.id, due_at: future }, 400);
+    await call("create_todo", { title: "Series", life_area_id: "area_personal", parent_id: viaTool.id, recurrence: rule }, 400);
+    await call("update_todo", { id: viaTool.subtasks[0].id, patch: { due_at: future } }, 400);
+    const toolProject = (await call("create_todo", {
+      title: "Garden", life_area_id: "area_personal", subtasks: [{ title: "Weed", due_at: future }],
+    })).data;
+    await call("update_todo", { id: toolProject.id, patch: { recurrence: rule } });
+    assert.equal(getTodo(db, toolProject.subtasks[0].id)?.due_at, null);
+  });
+
+  it("opens a repeating todo's checklist again when it rolls to the next occurrence", async () => {
+    const { api, db } = fixture();
+    const search = fakeSearch(db);
+    await api.put("/api/integrations/tasks").send({ autoCompleteParent: true }).expect(200);
+    const laundry = (await api.post("/api/todos").send({
+      title: "Weekly laundry", recurrence: rule,
+      subtasks: [{ title: "Wash" }, { title: "Dry" }, { title: "Iron" }, { title: "Mend" }],
+    }).expect(201)).body.data;
+    const steps = db.prepare("SELECT id,title FROM todos WHERE parent_id=? ORDER BY created_at").all(laundry.id) as Array<{ id: string; title: string }>;
+    const [wash, dry, iron, mend] = steps;
+    await api.patch(`/api/todos/${iron.id}/status`).send({ status: "cancelled" }).expect(200);
+    await api.patch(`/api/todos/${mend.id}/status`).send({ status: "blocked" }).expect(200);
+    await api.patch(`/api/todos/${wash.id}/status`).send({ status: "done" }).expect(200);
+    await api.patch(`/api/todos/${mend.id}/status`).send({ status: "done" }).expect(200);
+    await api.patch(`/api/todos/${dry.id}/status`).send({ status: "in_progress" }).expect(200);
+    await api.patch(`/api/todos/${dry.id}/status`).send({ status: "done" }).expect(200);
+    assert.equal(getTodo(db, laundry.id)?.status, "done", "ticking the last step closes the occurrence");
+    const logged = db.prepare("SELECT count(*) total FROM todo_completions WHERE todo_id=?").get(laundry.id) as { total: number };
+    assert.equal(logged.total, 1, "and logs it");
+    // Mend is reopened as blocked so the roll has one of each to sort.
+    await api.patch(`/api/todos/${mend.id}/status`).send({ status: "blocked" }).expect(200);
+
+    const yesterday = new Date(new Date(laundry.due_at).getTime() - 86_400_000).toISOString();
+    db.prepare("UPDATE todos SET due_at=? WHERE id=?").run(yesterday, laundry.id);
+    assert.equal(rollRecurringTodos(db, search, "UTC", new Date(laundry.due_at)), 1);
+
+    assert.equal(getTodo(db, laundry.id)?.status, "pending");
+    for (const step of [wash, dry]) {
+      const row = getTodo(db, step.id);
+      assert.equal(row?.status, "pending", `${step.title} opens again`);
+      assert.equal(row?.completed_at, null);
+      assert.equal(row?.started_at, null);
+    }
+    assert.equal(getTodo(db, iron.id)?.status, "cancelled", "a cancelled step stays off the checklist");
+    assert.equal(getTodo(db, mend.id)?.status, "blocked", "a blocked step stays blocked");
+    assert.equal(
+      (db.prepare("SELECT count(*) total FROM todo_completions WHERE todo_id=?").get(laundry.id) as { total: number }).total,
+      1, "the finished occurrence stays in the log",
+    );
   });
 
   it("exposes the rule through the agent tools", async () => {

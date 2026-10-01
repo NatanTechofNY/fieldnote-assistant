@@ -9,7 +9,7 @@ import {
   OWN_AREA_CLAUSE, queueIndexJob, recordMessageReaction, renameLifeArea, syncTodoReminders, USER_ID, userTimezone,
 } from "./db.ts";
 import {
-  DERIVED_REMINDER, DERIVED_SCHEDULE, REPEATING_PARENT, REPEATING_SUBTASK,
+  DERIVED_REMINDER, DERIVED_SCHEDULE, REPEATING_SUBTASK, STEP_SCHEDULE,
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
@@ -29,7 +29,9 @@ import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type Refle
 import { toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import { groupVoice, type ReplyMode, setGroupSettings, setGroupSoul, setOwnerSoul } from "./soul.ts";
-import { completeParentIfSettled, completionStats, hasSubtasks, startParentIfPending, syncOccurrenceCompletion } from "./todo-status.ts";
+import {
+  clearStepSchedules, completeParentIfSettled, completionStats, startParentIfPending, syncOccurrenceCompletion,
+} from "./todo-status.ts";
 import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 import {
   assertPublicUrl, linksIn, readWebPage, rememberResults, searchWeb, takeWebCall, wasReturned, webConfig, WebServiceError,
@@ -1345,13 +1347,13 @@ export async function executeAgentTool(
     const extras = Array.isArray(input.extra_reminders) ? input.extra_reminders : [];
     if (repeat.recurrence_json) {
       if (input.parent_id) throw new Error(REPEATING_SUBTASK);
-      if (subtasks.length) throw new Error(REPEATING_PARENT);
       if (input.due_at || input.reminder_at || extras.length) throw new Error(DERIVED_SCHEDULE);
+      if (subtasks.some(raw => (raw as Input).due_at)) throw new Error(STEP_SCHEDULE);
     }
     if (input.parent_id) {
       const parent = scopedTodo(db, input.parent_id as string, scope);
       if (!parent) throw new Error("Parent todo not found");
-      if (parent.recurrence_json) throw new Error(REPEATING_PARENT);
+      if (parent.recurrence_json && (input.due_at || input.reminder_at || extras.length)) throw new Error(STEP_SCHEDULE);
     }
     const area = classificationForWrite(scope, input);
     const existing = openTodoTitled(db, input.title as string, area.life_area_id, (input.parent_id as string | null | undefined) ?? null);
@@ -1437,22 +1439,24 @@ export async function executeAgentTool(
       : (patch.recurrence as RecurrenceRule | null | undefined) ?? undefined;
     const repeat = planRecurrenceWrite(incomingRule, current, userTimezone(db));
     const parentId = value("parent_id", current.parent_id) as string | null;
+    const extras = Array.isArray(patch.extra_reminders) ? patch.extra_reminders : [];
+    const schedulePatched = Boolean(patch.due_at || patch.reminder_at || extras.length);
     if (repeat.recurrence_json) {
       if (parentId) throw new Error(REPEATING_SUBTASK);
-      const extras = Array.isArray(patch.extra_reminders) ? patch.extra_reminders : [];
-      if (patch.due_at || patch.reminder_at || extras.length) throw new Error(DERIVED_SCHEDULE);
-      if (!current.recurrence_json && hasSubtasks(db, current.id)) throw new Error(REPEATING_PARENT);
+      if (schedulePatched) throw new Error(DERIVED_SCHEDULE);
     }
-    if (parentId && parentId !== current.parent_id) {
-      const parent = scopedTodo(db, parentId, scope);
-      if (!parent) throw new Error("Parent todo not found");
-      if (parent.recurrence_json) throw new Error(REPEATING_PARENT);
+    let stepOfRepeating = false;
+    if (parentId) {
+      const parent = parentId === current.parent_id ? getTodo(db, parentId) : scopedTodo(db, parentId, scope);
+      if (!parent && parentId !== current.parent_id) throw new Error("Parent todo not found");
+      stepOfRepeating = Boolean(parent?.recurrence_json);
+      if (stepOfRepeating && schedulePatched) throw new Error(STEP_SCHEDULE);
     }
-    const schedule = repeat.derived ?? {
+    const schedule = repeat.derived ?? (stepOfRepeating ? { due_at: null, reminder_at: null, extra_reminders_json: "[]" } : {
       due_at: value("due_at", current.due_at) as string | null,
       reminder_at: value("reminder_at", current.reminder_at) as string | null,
       extra_reminders_json: JSON.stringify(value("extra_reminders", JSON.parse(current.extra_reminders_json))),
-    };
+    });
     // A rule change opens a new occurrence: the finished one is in the log
     // already, and a done status is not carried on to a day that has not come.
     const reopen = repeat.occurrenceMoved && (current.status === "done" || current.status === "in_progress");
@@ -1472,6 +1476,7 @@ export async function executeAgentTool(
         repeat.occurrenceMoved ? null : current.completed_at,
         now(), current.id, USER_ID,
       );
+      if (repeat.recurrence_json) clearStepSchedules(db, todoId);
       const row = getTodo(db, todoId) as TodoRow;
       syncTodoReminders(db, row);
       syncOccurrenceCompletion(db, row);

@@ -118,17 +118,51 @@ export function startParentIfPending(db: Db, child: TodoRow, lifeAreaId?: string
 }
 
 /**
+ * Takes the schedule off every step of a todo that now repeats. A step comes
+ * round with its parent, so a fixed date of its own would be overdue from the
+ * second occurrence on and keep texting about it.
+ */
+export function clearStepSchedules(db: Db, parentId: string): void {
+  const steps = db.prepare(`
+    SELECT id FROM todos WHERE user_id=? AND parent_id=?
+      AND (due_at IS NOT NULL OR reminder_at IS NOT NULL OR extra_reminders_json<>'[]')
+  `).all(USER_ID, parentId) as Array<{ id: string }>;
+  const timestamp = now();
+  for (const step of steps) {
+    db.prepare(`
+      UPDATE todos SET due_at=NULL,reminder_at=NULL,extra_reminders_json='[]',updated_at=? WHERE id=? AND user_id=?
+    `).run(timestamp, step.id, USER_ID);
+    const updated = getTodo(db, step.id);
+    if (updated) syncTodoReminders(db, updated);
+    queueIndexJob(db, "todo", step.id);
+  }
+}
+
+/**
+ * Opens a repeating todo's checklist again for its next occurrence. A step
+ * that was finished or started belongs to the occurrence that is over; a
+ * blocked step stays blocked, as the parent does, and a cancelled one has been
+ * taken off the checklist.
+ */
+export function reopenStepsForNextOccurrence(db: Db, parentId: string): number {
+  const steps = db.prepare(`
+    SELECT id FROM todos WHERE user_id=? AND parent_id=? AND status IN ('done','in_progress')
+  `).all(USER_ID, parentId) as Array<{ id: string }>;
+  const timestamp = now();
+  for (const step of steps) {
+    db.prepare(`
+      UPDATE todos SET status='pending',started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND user_id=?
+    `).run(timestamp, step.id, USER_ID);
+    queueIndexJob(db, "todo", step.id);
+  }
+  return steps.length;
+}
+
+/**
  * The steps still standing between a task and being finished. A parent closed
  * while these are open leaves them alive but unreachable, so both the REST layer
  * and the UI ask about them first.
  */
-/** Whether any step, open or closed, is filed under the todo. */
-export function hasSubtasks(db: Db, todoId: string): boolean {
-  return Boolean(db.prepare(
-    "SELECT 1 found FROM todos WHERE user_id=? AND parent_id=? LIMIT 1",
-  ).get(USER_ID, todoId));
-}
-
 export function openSubtasks(db: Db, todoId: string, lifeAreaId?: string): TodoRow[] {
   // With an area given, only the steps filed in it: a reminder texted into a
   // group must not list a subtask the owner keeps to themselves.

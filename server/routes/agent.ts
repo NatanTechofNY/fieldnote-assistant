@@ -39,8 +39,8 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       if (/^Bright Data /.test(message)) return failure(res, 502, message);
       if (/ not found(?:$|\. )/i.test(message)) return failure(res, 404, message);
       if (/^Unsupported tool: /.test(message)) return failure(res, 400, message);
-      // A repeating todo's refusals — filed under a task, given subtasks, or
-      // its derived times written directly — mean the request has to change,
+      // A repeating todo's refusals — filed under a task, a step given its own
+      // schedule, or its derived times written directly — mean the request has to change,
       // not retry. A rule with no reachable occurrence is the same shape.
       if (/^A repeating todo|^Recurrence rule /.test(message)) return failure(res, 400, message);
       // The reaction and threading tools act on the message that started the
