@@ -117,21 +117,25 @@ export function startParentIfPending(db: Db, child: TodoRow, lifeAreaId?: string
   return started;
 }
 
-/**
- * Takes the schedule off every step of a todo that now repeats. A step comes
- * round with its parent, so a fixed date of its own would be overdue from the
- * second occurrence on and keep texting about it.
+/*
+ * The series only reaches the steps filed in the repeating todo's own life
+ * area. A step the owner filed elsewhere under a group's todo is theirs alone,
+ * and a group making its todo repeat must not move it.
  */
-export function clearStepSchedules(db: Db, parentId: string): void {
+
+/**
+ * Takes the schedule off the steps of a todo that has just started repeating.
+ * A step comes round with its parent, so a fixed date of its own would be
+ * overdue from the second occurrence on and keep texting about it.
+ */
+export function clearStepSchedules(db: Db, parent: Pick<TodoRow, "id" | "life_area_id">): void {
   const steps = db.prepare(`
-    SELECT id FROM todos WHERE user_id=? AND parent_id=?
+    UPDATE todos SET due_at=NULL,reminder_at=NULL,extra_reminders_json='[]',updated_at=?
+    WHERE user_id=? AND parent_id=? AND life_area_id IS ?
       AND (due_at IS NOT NULL OR reminder_at IS NOT NULL OR extra_reminders_json<>'[]')
-  `).all(USER_ID, parentId) as Array<{ id: string }>;
-  const timestamp = now();
+    RETURNING id
+  `).all(now(), USER_ID, parent.id, parent.life_area_id) as Array<{ id: string }>;
   for (const step of steps) {
-    db.prepare(`
-      UPDATE todos SET due_at=NULL,reminder_at=NULL,extra_reminders_json='[]',updated_at=? WHERE id=? AND user_id=?
-    `).run(timestamp, step.id, USER_ID);
     const updated = getTodo(db, step.id);
     if (updated) syncTodoReminders(db, updated);
     queueIndexJob(db, "todo", step.id);
@@ -144,18 +148,27 @@ export function clearStepSchedules(db: Db, parentId: string): void {
  * blocked step stays blocked, as the parent does, and a cancelled one has been
  * taken off the checklist.
  */
-export function reopenStepsForNextOccurrence(db: Db, parentId: string): number {
+export function reopenStepsForNextOccurrence(db: Db, parent: Pick<TodoRow, "id" | "life_area_id">): number {
   const steps = db.prepare(`
-    SELECT id FROM todos WHERE user_id=? AND parent_id=? AND status IN ('done','in_progress')
-  `).all(USER_ID, parentId) as Array<{ id: string }>;
-  const timestamp = now();
-  for (const step of steps) {
-    db.prepare(`
-      UPDATE todos SET status='pending',started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND user_id=?
-    `).run(timestamp, step.id, USER_ID);
-    queueIndexJob(db, "todo", step.id);
-  }
+    UPDATE todos SET status='pending',started_at=NULL,completed_at=NULL,updated_at=?
+    WHERE user_id=? AND parent_id=? AND life_area_id IS ? AND status IN ('done','in_progress')
+    RETURNING id
+  `).all(now(), USER_ID, parent.id, parent.life_area_id) as Array<{ id: string }>;
+  for (const step of steps) queueIndexJob(db, "todo", step.id);
   return steps.length;
+}
+
+/**
+ * Whether the todo is a step of a repeating one, and so has no schedule of its
+ * own. `readParent` is how the caller may see the parent: a group turn passes
+ * its scoped read, so a parent outside the group reads as not repeating
+ * rather than answering a question about the owner's private task.
+ */
+export function isStepOfRepeating(
+  parentId: string | null | undefined,
+  readParent: (id: string) => Pick<TodoRow, "recurrence_json"> | null | undefined,
+): boolean {
+  return Boolean(parentId && readParent(parentId)?.recurrence_json);
 }
 
 /**

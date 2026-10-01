@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { USER_ID, getReminders, getTodo, instant, now, queueIndexJob, syncTodoReminders } from "../db.ts";
 import { failure, success } from "../http.ts";
-import { DERIVED_REMINDER, isDerivedReminder } from "../recurrence.ts";
+import { DERIVED_REMINDER, STEP_SCHEDULE, isDerivedReminder } from "../recurrence.ts";
 import { iso, reminderCreate } from "../schemas.ts";
 import { reminderJson, todoJson } from "../serializers.ts";
+import { isStepOfRepeating } from "../todo-status.ts";
 import { type ReminderRow, type TodoRow } from "../types.ts";
 import type { RouteContext } from "./context.ts";
 
@@ -29,6 +30,7 @@ export function registerReminderRoutes({ app, db, search }: RouteContext): void 
     if (isDerivedReminder(current, body.slot === "primary" ? "pre" : "escalation")) {
       return failure(res, 400, DERIVED_REMINDER);
     }
+    if (isStepOfRepeating(current.parent_id, key => getTodo(db, key))) return failure(res, 400, STEP_SCHEDULE);
     db.transaction(() => {
       const extras = JSON.parse(current.extra_reminders_json) as string[];
       if (body.slot === "primary") {
@@ -60,6 +62,7 @@ export function registerReminderRoutes({ app, db, search }: RouteContext): void 
     const todo = getTodo(db, reminder.todo_id);
     if (!todo) return failure(res, 404, "Todo not found");
     if (isDerivedReminder(todo, reminder.kind)) return failure(res, 400, DERIVED_REMINDER);
+    if (isStepOfRepeating(todo.parent_id, key => getTodo(db, key))) return failure(res, 400, STEP_SCHEDULE);
     db.transaction(() => {
       if (reminder.kind === "due") {
         db.prepare("UPDATE todos SET due_at=?,updated_at=? WHERE id=? AND user_id=?")

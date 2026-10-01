@@ -357,7 +357,7 @@ export function rollRecurringTodos(db: Db, search: SearchWriter, timezone: strin
           UPDATE todos SET due_at=?,reminder_at=?,extra_reminders_json='[]',status=?,
             started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND user_id=?
         `).run(next.due_at, next.reminder_at, status, now(), row.id, USER_ID);
-        reopenStepsForNextOccurrence(db, row.id);
+        reopenStepsForNextOccurrence(db, row);
         const updated = getTodo(db, row.id);
         if (updated) syncTodoReminders(db, updated);
         queueIndexJob(db, "todo", row.id);

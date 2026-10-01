@@ -30,7 +30,8 @@ import { toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import { groupVoice, type ReplyMode, setGroupSettings, setGroupSoul, setOwnerSoul } from "./soul.ts";
 import {
-  clearStepSchedules, completeParentIfSettled, completionStats, startParentIfPending, syncOccurrenceCompletion,
+  clearStepSchedules, completeParentIfSettled, completionStats, isStepOfRepeating, reopenStepsForNextOccurrence,
+  startParentIfPending, syncOccurrenceCompletion,
 } from "./todo-status.ts";
 import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 import {
@@ -1445,13 +1446,11 @@ export async function executeAgentTool(
       if (parentId) throw new Error(REPEATING_SUBTASK);
       if (schedulePatched) throw new Error(DERIVED_SCHEDULE);
     }
-    let stepOfRepeating = false;
-    if (parentId) {
-      const parent = parentId === current.parent_id ? getTodo(db, parentId) : scopedTodo(db, parentId, scope);
-      if (!parent && parentId !== current.parent_id) throw new Error("Parent todo not found");
-      stepOfRepeating = Boolean(parent?.recurrence_json);
-      if (stepOfRepeating && schedulePatched) throw new Error(STEP_SCHEDULE);
+    if (parentId && parentId !== current.parent_id && !scopedTodo(db, parentId, scope)) {
+      throw new Error("Parent todo not found");
     }
+    const stepOfRepeating = isStepOfRepeating(parentId, key => scopedTodo(db, key, scope));
+    if (stepOfRepeating && schedulePatched) throw new Error(STEP_SCHEDULE);
     const schedule = repeat.derived ?? (stepOfRepeating ? { due_at: null, reminder_at: null, extra_reminders_json: "[]" } : {
       due_at: value("due_at", current.due_at) as string | null,
       reminder_at: value("reminder_at", current.reminder_at) as string | null,
@@ -1476,8 +1475,9 @@ export async function executeAgentTool(
         repeat.occurrenceMoved ? null : current.completed_at,
         now(), current.id, USER_ID,
       );
-      if (repeat.recurrence_json) clearStepSchedules(db, todoId);
       const row = getTodo(db, todoId) as TodoRow;
+      if (repeat.recurrence_json && !current.recurrence_json) clearStepSchedules(db, row);
+      if (repeat.occurrenceMoved) reopenStepsForNextOccurrence(db, row);
       syncTodoReminders(db, row);
       syncOccurrenceCompletion(db, row);
       queueIndexJob(db, "todo", todoId);
@@ -1685,6 +1685,7 @@ export async function executeAgentTool(
     const reminderAt = input.reminder_at as string;
     const extras = JSON.parse(todo.extra_reminders_json) as string[];
     if (isDerivedReminder(todo, input.slot === "extra" ? "escalation" : "pre")) throw new Error(DERIVED_REMINDER);
+    if (isStepOfRepeating(todo.parent_id, key => scopedTodo(db, key, scope))) throw new Error(STEP_SCHEDULE);
     db.transaction(() => {
       if (input.slot === "extra") {
         db.prepare("UPDATE todos SET extra_reminders_json=?,updated_at=? WHERE id=? AND user_id=?")
@@ -1714,6 +1715,7 @@ export async function executeAgentTool(
     const todo = scopedTodo(db, reminder.todo_id, scope);
     if (!todo) throw new Error("Reminder not found");
     if (isDerivedReminder(todo, reminder.kind)) throw new Error(DERIVED_REMINDER);
+    if (isStepOfRepeating(todo.parent_id, key => scopedTodo(db, key, scope))) throw new Error(STEP_SCHEDULE);
     db.transaction(() => {
       if (reminder.kind === "due") {
         db.prepare("UPDATE todos SET due_at=?,updated_at=? WHERE id=? AND user_id=?")

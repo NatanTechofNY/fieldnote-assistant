@@ -1,5 +1,5 @@
 import { type FormEvent, useMemo, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, LoaderCircle, Plus, Repeat, Square, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "../../api";
 import type {
@@ -72,7 +72,14 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
   // write a middle node, and its steps still have to be reachable.
   const nested = Boolean(parentId) && subtasks.length === 0;
   // A step of a repeating task comes round with it, so it has no date of its own.
-  const parentRepeats = Boolean(parentId && allTodos.find(t => t.id === parentId)?.recurrence);
+  // The board's filters can hide the parent, so it is fetched when not listed.
+  const listedParent = parentId ? allTodos.find(t => t.id === parentId) : undefined;
+  const { data: fetchedParent } = useQuery({
+    queryKey: ["todos", "detail", parentId],
+    queryFn: () => api.todo(parentId),
+    enabled: Boolean(parentId) && !listedParent,
+  });
+  const parentRepeats = Boolean((listedParent ?? fetchedParent?.todo)?.recurrence);
   const save = useMutation({
     mutationFn: () => {
       // The server derives a repeating task's times from its rule, so the

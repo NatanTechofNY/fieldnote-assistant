@@ -11517,6 +11517,88 @@ describe("repeating todos", () => {
     );
   });
 
+  it("opens the checklist again when a rule change opens a new occurrence, through REST and the tools", async () => {
+    const { api, db } = fixture();
+    const call = async (name: string, input: object = {}, expected = 200) =>
+      (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
+    const weekly = { freq: "weekly", interval: 1, weekdays: [5], time: "18:00", lead_minutes: 0 };
+    for (const via of ["rest", "tool"] as const) {
+      const created = (await api.post("/api/todos").send({
+        title: `Laundry via ${via}`, recurrence: weekly, subtasks: [{ title: `Wash via ${via}` }],
+      }).expect(201)).body.data;
+      const [step] = db.prepare("SELECT id FROM todos WHERE parent_id=?").all(created.id) as Array<{ id: string }>;
+      await api.patch(`/api/todos/${step.id}/status`).send({ status: "done" }).expect(200);
+      await api.patch(`/api/todos/${created.id}/status`).send({ status: "done" }).expect(200);
+      const moved = { ...weekly, weekdays: [6] };
+      if (via === "rest") await api.patch(`/api/todos/${created.id}`).send({ recurrence: moved }).expect(200);
+      else await call("update_todo", { id: created.id, patch: { recurrence: moved } });
+      assert.equal(getTodo(db, created.id)?.status, "pending");
+      assert.equal(getTodo(db, step.id)?.status, "pending", `the step opens with the new occurrence (${via})`);
+      assert.equal(getTodo(db, step.id)?.completed_at, null);
+    }
+  });
+
+  it("refuses a reminder on a step of a repeating todo, through REST and the tools", async () => {
+    const { api, db } = fixture();
+    const later = new Date(Date.now() + 40 * 86_400_000).toISOString();
+    const parent = (await api.post("/api/todos").send({
+      title: "Weekly laundry", recurrence: rule, subtasks: [{ title: "Wash" }],
+    }).expect(201)).body.data;
+    const [step] = db.prepare("SELECT id FROM todos WHERE parent_id=?").all(parent.id) as Array<{ id: string }>;
+    for (const slot of ["primary", "extra"]) {
+      const refused = await api.post("/api/reminders").send({ todo_id: step.id, reminder_at: later, slot }).expect(400);
+      assert.match(refused.body.error, /steps have no due time/);
+      const viaTool = (await api.post("/api/agent/tools/create_reminder")
+        .send({ todo_id: step.id, reminder_at: later, slot }).expect(400)).body;
+      assert.match(viaTool.error, /steps have no due time/);
+    }
+    assert.equal(getTodo(db, step.id)?.reminder_at, null);
+    assert.equal(getTodo(db, step.id)?.extra_reminders_json, "[]");
+  });
+
+  it("keeps the series to steps in the todo's own area, so a group cannot move the owner's private steps", async () => {
+    const { api, db } = fixture();
+    const later = new Date(Date.now() + 40 * 86_400_000).toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_chores',?,'sms','group:group_chores','alg_cnv_chores',?,?)
+    `).run(USER_ID, new Date().toISOString(), new Date().toISOString());
+    const area = ensureGroupLifeArea(db, "thread_chores", "Chores");
+    const group: ToolTurnContext = {
+      channel: "sms", address: "group", threadId: "thread_chores", provider: "sendblue",
+      groupId: "group_chores", scope: { lifeAreaId: area.id, threadId: "thread_chores" },
+    };
+    const run = (name: Parameters<typeof executeAgentTool>[2], input: Record<string, unknown>) =>
+      executeAgentTool(db, { flushSoon() {} }, name, input, group);
+    const chores = (await api.post("/api/todos").send({ title: "House chores", life_area_id: area.id }).expect(201)).body.data;
+    const shared = (await api.post("/api/todos").send({ title: "Mop", parent_id: chores.id, life_area_id: area.id }).expect(201)).body.data;
+    // The owner files a private, dated step under the group's todo.
+    const own = (await api.post("/api/todos").send({
+      title: "Pay the cleaner", parent_id: chores.id, life_area_id: "area_personal", due_at: later, reminder_at: later,
+    }).expect(201)).body.data;
+
+    await run("update_todo", { id: chores.id, patch: { recurrence: rule } });
+    assert.notEqual(getTodo(db, chores.id)?.recurrence_json, null);
+    assert.equal(getTodo(db, own.id)?.due_at, later, "the owner's private step keeps its date");
+    assert.equal(getTodo(db, own.id)?.reminder_at, later);
+
+    await api.patch(`/api/todos/${shared.id}/status`).send({ status: "done" }).expect(200);
+    await api.patch(`/api/todos/${own.id}/status`).send({ status: "done" }).expect(200);
+    const row = getTodo(db, chores.id) as TodoRow;
+    const yesterday = new Date(new Date(row.due_at as string).getTime() - 86_400_000).toISOString();
+    db.prepare("UPDATE todos SET due_at=? WHERE id=?").run(yesterday, chores.id);
+    rollRecurringTodos(db, fakeSearch(db), "UTC", new Date(row.due_at as string));
+    assert.equal(getTodo(db, shared.id)?.status, "pending", "the group's own step opens again");
+    assert.equal(getTodo(db, own.id)?.status, "done", "the owner's private step is left alone");
+
+    // A group step under the owner's private repeating todo: the parent is out
+    // of the group's sight, so it reads as not repeating rather than answering.
+    const privateSeries = (await api.post("/api/todos").send({ title: "Private routine", recurrence: rule, life_area_id: "area_personal" }).expect(201)).body.data;
+    const filed = (await api.post("/api/todos").send({ title: "Group step", parent_id: privateSeries.id, life_area_id: area.id }).expect(201)).body.data;
+    const patched = await run("update_todo", { id: filed.id, patch: { due_at: later } }) as { due_at: string | null };
+    assert.equal(patched.due_at, later);
+  });
+
   it("exposes the rule through the agent tools", async () => {
     const { api, db } = fixture();
     const call = async (name: string, input: object = {}, expected = 200) =>

@@ -7,7 +7,8 @@ import {
 import { iso, status, todoCreate, todoPatch } from "../schemas.ts";
 import { applyStatusTimes, completionJson, reminderJson, todoJson } from "../serializers.ts";
 import {
-  clearStepSchedules, completeParentIfSettled, completionStats, startParentIfPending, syncOccurrenceCompletion,
+  clearStepSchedules, completeParentIfSettled, completionStats, isStepOfRepeating, reopenStepsForNextOccurrence,
+  startParentIfPending, syncOccurrenceCompletion,
 } from "../todo-status.ts";
 import { type TodoRow } from "../types.ts";
 import type { RouteContext } from "./context.ts";
@@ -94,7 +95,7 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
       if (body.due_at || body.reminder_at || body.extra_reminders.length) return failure(res, 400, DERIVED_SCHEDULE);
       if (body.subtasks?.some(subtask => subtask.due_at)) return failure(res, 400, STEP_SCHEDULE);
     }
-    if (body.parent_id && getTodo(db, body.parent_id)?.recurrence_json
+    if (isStepOfRepeating(body.parent_id, parentId => getTodo(db, parentId))
       && (body.due_at || body.reminder_at || body.extra_reminders.length)) {
       return failure(res, 400, STEP_SCHEDULE);
     }
@@ -150,7 +151,7 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
       if (parentId) return failure(res, 400, REPEATING_SUBTASK);
       if (body.due_at || body.reminder_at || body.extra_reminders?.length) return failure(res, 400, DERIVED_SCHEDULE);
     }
-    const stepOfRepeating = Boolean(parentId && getTodo(db, parentId)?.recurrence_json);
+    const stepOfRepeating = isStepOfRepeating(parentId, key => getTodo(db, key));
     if (stepOfRepeating && (body.due_at || body.reminder_at || body.extra_reminders?.length)) {
       return failure(res, 400, STEP_SCHEDULE);
     }
@@ -183,9 +184,10 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
         parentId, schedule.due_at, schedule.reminder_at, schedule.extra_reminders_json,
         body.priority === undefined ? current.priority : body.priority, nextStatus,
         times.startedAt, times.completedAt, repeat.recurrence_json, assistantSays, now(), current.id, USER_ID);
-      if (repeat.recurrence_json) clearStepSchedules(db, current.id);
       const todo = getTodo(db, current.id);
       if (todo) {
+        if (repeat.recurrence_json && !current.recurrence_json) clearStepSchedules(db, todo);
+        if (repeat.occurrenceMoved) reopenStepsForNextOccurrence(db, todo);
         syncTodoReminders(db, todo);
         syncOccurrenceCompletion(db, todo);
         completeParentIfSettled(db, todo);
