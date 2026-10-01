@@ -31,7 +31,7 @@ export interface RecurrenceRule {
  * not retry.
  */
 export const REPEATING_SUBTASK = "A repeating todo cannot be filed under another task";
-export const REPEATING_PARENT = "A repeating todo cannot have subtasks, and a task with subtasks cannot repeat";
+export const STEP_SCHEDULE = "A repeating todo's steps have no due time or reminder of their own; they come round with the todo";
 export const DERIVED_SCHEDULE = "A repeating todo's due_at and reminder_at come from its rule; change recurrence to move them";
 export const DERIVED_REMINDER = "A repeating todo's due time and reminder come from its rule; change recurrence to move or remove them";
 

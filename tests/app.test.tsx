@@ -2796,7 +2796,7 @@ it("describes a repeating task by its rule and sends the rule instead of dates",
   expect(write.body).not.toHaveProperty("reminder_at");
 });
 
-it("keeps a daily task's text within the day and offers no checklist for it", async () => {
+it("keeps a daily task's text within the day and offers a checklist that comes round with it", async () => {
   renderAt("/todos");
   await userEvent.click(await screen.findByRole("button", { name: "Review RFC for Alex" }));
   const dialog = await screen.findByRole("dialog");
@@ -2807,9 +2807,8 @@ it("keeps a daily task's text within the day and offers no checklist for it", as
   // late when it was scheduled; an hour ahead is fine.
   expect(within(dialog).queryByRole("option", { name: "1 day before" })).not.toBeInTheDocument();
   expect(within(dialog).getByRole("option", { name: "1 hour before" })).toBeInTheDocument();
-  // Its steps would stay ticked while the task came round again, so it has none.
-  expect(within(dialog).getByText(/A repeating task carries no checklist/)).toBeInTheDocument();
-  expect(within(dialog).queryByLabelText("New subtask")).not.toBeInTheDocument();
+  expect(within(dialog).getByText(/its subtasks open again/)).toBeInTheDocument();
+  expect(within(dialog).getByLabelText("New subtask")).toBeInTheDocument();
 });
 
 it("opens a task from the keyboard and traps focus in the editor", async () => {

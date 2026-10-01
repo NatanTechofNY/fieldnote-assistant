@@ -253,7 +253,7 @@
             },
             "required": ["freq", "interval", "weekdays", "time", "lead_minutes"],
             "additionalProperties": false,
-            "description": "Repeat rule for a recurring todo, or null. When set, due_at, reminder_at, and extra_reminders are derived from it and must be null, and subtasks must be null or empty."
+            "description": "Repeat rule for a recurring todo, or null. When set, due_at, reminder_at, and extra_reminders are derived from it and must be null. Subtasks are allowed: they open again each time the todo comes round, and each subtask's due_at must be null."
           },
           "subtasks": {
             "type": ["array", "null"],
@@ -801,7 +801,7 @@
     "type": "function",
     "function": {
       "name": "create_reminder",
-      "description": "Creates a primary or additional reminder for an exact todo. Resolve the date-time first. A repeating todo's primary reminder is its rule's lead_minutes and is refused here.",
+      "description": "Creates a primary or additional reminder for an exact todo; resolve the date-time first. Refused for a repeating todo's primary reminder (its lead_minutes) and for its subtasks.",
       "strict": true,
       "parameters": {
         "type": "object",
@@ -859,7 +859,7 @@
     "type": "function",
     "function": {
       "name": "update_reminder",
-      "description": "Moves one exact reminder to a new time after resolving which one the user means. A repeating todo's due and primary reminders come from its rule and are refused; use update_todo.",
+      "description": "Moves one exact reminder the user means to a new time. Refused for a repeating todo's due and primary reminders (use update_todo) and for its subtasks.",
       "strict": true,
       "parameters": {
         "type": "object",

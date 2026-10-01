@@ -2,12 +2,13 @@ import { z } from "zod";
 import { OWN_AREA_CLAUSE, USER_ID, getReminders, getTodo, id, now, queueIndexJob, syncTodoReminders, userTimezone } from "../db.ts";
 import { failure, success } from "../http.ts";
 import {
-  DERIVED_SCHEDULE, REPEATING_PARENT, REPEATING_SUBTASK, planRecurrenceWrite,
+  DERIVED_SCHEDULE, REPEATING_SUBTASK, STEP_SCHEDULE, planRecurrenceWrite,
 } from "../recurrence.ts";
 import { iso, status, todoCreate, todoPatch } from "../schemas.ts";
 import { applyStatusTimes, completionJson, reminderJson, todoJson } from "../serializers.ts";
 import {
-  completeParentIfSettled, completionStats, hasSubtasks, startParentIfPending, syncOccurrenceCompletion,
+  clearStepSchedules, completeParentIfSettled, completionStats, isStepOfRepeating, reopenStepsForNextOccurrence,
+  startParentIfPending, syncOccurrenceCompletion,
 } from "../todo-status.ts";
 import { type TodoRow } from "../types.ts";
 import type { RouteContext } from "./context.ts";
@@ -91,10 +92,13 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
     const repeat = planRecurrenceWrite(body.recurrence, undefined, userTimezone(db));
     if (repeat.recurrence_json) {
       if (body.parent_id) return failure(res, 400, REPEATING_SUBTASK);
-      if (body.subtasks?.length) return failure(res, 400, REPEATING_PARENT);
       if (body.due_at || body.reminder_at || body.extra_reminders.length) return failure(res, 400, DERIVED_SCHEDULE);
+      if (body.subtasks?.some(subtask => subtask.due_at)) return failure(res, 400, STEP_SCHEDULE);
     }
-    if (body.parent_id && getTodo(db, body.parent_id)?.recurrence_json) return failure(res, 400, REPEATING_PARENT);
+    if (isStepOfRepeating(body.parent_id, parentId => getTodo(db, parentId))
+      && (body.due_at || body.reminder_at || body.extra_reminders.length)) {
+      return failure(res, 400, STEP_SCHEDULE);
+    }
     const schedule = repeat.derived ?? {
       due_at: body.due_at ?? null,
       reminder_at: body.reminder_at ?? null,
@@ -146,10 +150,10 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
     if (repeat.recurrence_json) {
       if (parentId) return failure(res, 400, REPEATING_SUBTASK);
       if (body.due_at || body.reminder_at || body.extra_reminders?.length) return failure(res, 400, DERIVED_SCHEDULE);
-      if (!current.recurrence_json && hasSubtasks(db, current.id)) return failure(res, 400, REPEATING_PARENT);
     }
-    if (parentId && parentId !== current.parent_id && getTodo(db, parentId)?.recurrence_json) {
-      return failure(res, 400, REPEATING_PARENT);
+    const stepOfRepeating = isStepOfRepeating(parentId, key => getTodo(db, key));
+    if (stepOfRepeating && (body.due_at || body.reminder_at || body.extra_reminders?.length)) {
+      return failure(res, 400, STEP_SCHEDULE);
     }
     // A rule change opens a new occurrence. The one just finished is already in
     // the log, so a done status is not carried on to a day that has not come.
@@ -160,13 +164,13 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
     const times = repeat.occurrenceMoved
       ? { startedAt: null, completedAt: null }
       : applyStatusTimes(nextStatus, current, body);
-    const schedule = repeat.derived ?? {
+    const schedule = repeat.derived ?? (stepOfRepeating ? { due_at: null, reminder_at: null, extra_reminders_json: "[]" } : {
       due_at: body.due_at === undefined ? current.due_at : body.due_at,
       reminder_at: body.reminder_at === undefined ? current.reminder_at : body.reminder_at,
       extra_reminders_json: body.extra_reminders === undefined
         ? current.extra_reminders_json
         : JSON.stringify(body.extra_reminders),
-    };
+    });
     const assistantSays = parentId ? 0 : body.assistant_says === undefined ? current.assistant_says : Number(body.assistant_says);
     db.transaction(() => {
       db.prepare(`
@@ -182,6 +186,8 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
         times.startedAt, times.completedAt, repeat.recurrence_json, assistantSays, now(), current.id, USER_ID);
       const todo = getTodo(db, current.id);
       if (todo) {
+        if (repeat.recurrence_json && !current.recurrence_json) clearStepSchedules(db, todo);
+        if (repeat.occurrenceMoved) reopenStepsForNextOccurrence(db, todo);
         syncTodoReminders(db, todo);
         syncOccurrenceCompletion(db, todo);
         completeParentIfSettled(db, todo);
