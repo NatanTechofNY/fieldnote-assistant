@@ -1596,7 +1596,6 @@
         "properties": {
           "soul": {
             "type": "string",
-            "maxLength": 1200,
             "description": "The whole Soul, rewritten: the current rules kept, the new feedback merged in, as short plain bullets such as \"- One line. No follow-up questions.\""
           }
         },

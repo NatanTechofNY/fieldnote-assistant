@@ -16,7 +16,10 @@ export function SoulEditor({
   title = "Soul", setLabel = "Shaped", emptyLabel = "Default voice", saveLabel = "Save Soul",
   hint = "Blank uses the assistant's default voice. It also updates itself when you give it feedback in chat.",
   action,
+  limit = SOUL_MAX,
 }: {
+  /** The longest the text may be; a group's Soul and profile pass null for none. */
+  limit?: number | null;
   /** One more button beside Save, held off while there is an unsaved draft it would overwrite. */
   action?: { label: string; icon: ReactNode; pending: boolean; onClick: () => void };
   /** Names the field for assistive tech and tests, e.g. `Soul for Home`. */
@@ -38,7 +41,7 @@ export function SoulEditor({
   const setText = (next: string) => setState({ base: value, draft: next });
   const custom = text.trim().length > 0;
   const dirty = (text.trim() || null) !== (value?.trim() || null);
-  const over = text.trim().length > SOUL_MAX;
+  const over = limit !== null && text.trim().length > limit;
   return <div className={`ask-editor ${custom ? "custom" : ""}`}>
     <div className="ask-editor-head">
       <strong>{title}</strong>
@@ -54,7 +57,7 @@ export function SoulEditor({
     />
     <div className="ask-editor-foot">
       <small className={over ? "over" : ""}>
-        {custom ? `${text.trim().length} / ${SOUL_MAX}` : hint}
+        {custom ? (limit === null ? `${text.trim().length}` : `${text.trim().length} / ${limit}`) : hint}
       </small>
       <span className="ask-editor-actions">
         {action && (

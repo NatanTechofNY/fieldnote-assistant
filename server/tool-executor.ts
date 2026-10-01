@@ -26,7 +26,7 @@ import { localIsoWithOffset, zonedToInstant } from "./local-time.ts";
 import { sendSms, type SmsSender } from "./messaging.ts";
 import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
-import { toolInput, type ToolName } from "./schemas.ts";
+import { SOUL_MAX, toolInput, type ToolName } from "./schemas.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import { groupVoice, type ReplyMode, setGroupSettings, setGroupSoul, setOwnerSoul } from "./soul.ts";
 import {
@@ -834,6 +834,7 @@ export async function executeAgentTool(
   if (name === "update_soul") {
     assertOwnWords(context, "the Soul");
     const soul = input.soul as string;
+    if (!scope && soul.length > SOUL_MAX) throw new Error(`Keep the Soul under ${SOUL_MAX} characters`);
     const saved = scope
       ? { soul: setGroupSoul(db, scope.lifeAreaId, soul), applies_to: "this group chat" }
       : { soul: setOwnerSoul(db, soul), applies_to: "your own chats with the owner" };

@@ -1,11 +1,12 @@
 import { z } from "zod";
 import { USER_ID, id, lifeAreaSlug, now, queueIndexJob, renameLifeArea } from "../db.ts";
+import { dedupeLines } from "../dedupe.ts";
 import { refreshRosterMemory } from "../group-members.ts";
 import { failure, success } from "../http.ts";
 import { categoryCreate, lifeAreaCreate, lifeAreaPatch } from "../schemas.ts";
 import { assertUsableNickname } from "../soul.ts";
 import { NO_TEXT_FALLBACK } from "../agent-runner.ts";
-import { composeGroupProfileTurn, groupProfile, groupProfileState, PROFILE_MAX, setGroupProfile } from "../profile.ts";
+import { composeGroupProfileTurn, groupProfile, groupProfileState, setGroupProfile } from "../profile.ts";
 import type { RouteContext } from "./context.ts";
 
 /**
@@ -79,7 +80,7 @@ export function registerTaxonomyRoutes({ app, db, search, draftWithAgent }: Rout
   const groupArea = (areaId: string) => db.prepare("SELECT id,thread_id FROM life_areas WHERE id=? AND user_id=?")
     .get(areaId, USER_ID) as { id: string; thread_id: string | null } | undefined;
   app.put("/api/life-areas/:id/profile", (req, res) => {
-    const { profile } = z.object({ profile: z.string().max(PROFILE_MAX).nullable() }).strict().parse(req.body);
+    const { profile } = z.object({ profile: z.string().nullable() }).strict().parse(req.body);
     const area = groupArea(req.params.id);
     if (!area?.thread_id) return failure(res, 404, "Group chat not found");
     setGroupProfile(db, area.id, profile);
@@ -146,6 +147,8 @@ export function registerTaxonomyRoutes({ app, db, search, draftWithAgent }: Rout
       db.prepare("UPDATE life_areas SET color=?,updated_at=? WHERE id=? AND user_id=?")
         .run(body.color, now(), current.id, USER_ID);
     }
+    // A rule the Soul already holds is not kept twice.
+    if (typeof body.soul === "string") body.soul = dedupeLines(body.soul);
     // Each field keeps its value unless the patch names it; the copy switch is
     // stored as 0/1, and an emptied Soul is no Soul.
     const settings = Object.fromEntries(GROUP_FIELDS.map(field => {

@@ -167,6 +167,7 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
             value={group.soul ?? null}
             placeholder={"- One short line at most.\n- No follow-up questions.\n- Jokes are fine; no bits."}
             saving={checkin.isPending}
+            limit={null}
             onSave={soul => checkin.mutate({ id: group.id, soul })}
           />
           <SoulEditor
@@ -177,6 +178,7 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
             saveLabel="Save profile"
             hint="What the assistant knows about the people here. It rewrites this overnight from the group's memories and who's in it; edit it to correct anything."
             value={group.profile ?? null}
+            limit={null}
             placeholder={"People: Sam — the owner's sister; Alex — Sam's partner, birthday Mar 3…\nShared: …\nPreferences: …"}
             saving={(profile.isPending && profile.variables?.id === group.id) || (rewrite.isPending && rewrite.variables === group.id)}
             onSave={text => profile.mutate({ id: group.id, profile: text })}

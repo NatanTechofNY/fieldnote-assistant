@@ -174,9 +174,10 @@ export const lifeAreaCreate = z.object({
 const checkinPrompt = z.string().trim().min(1, "Write the ask, or clear it to use the default")
   .max(CHECKIN_PROMPT_MAX, `Keep the ask under ${CHECKIN_PROMPT_MAX} characters`);
 
-/** A Soul rides on every turn's context, so it stays a short list of rules rather than an essay. */
+/** The owner's Soul rides on every turn's context, so it stays a short list of rules rather than an essay. A group's has no cap. */
 export const SOUL_MAX = 1200;
 const soulText = z.string().trim().max(SOUL_MAX, `Keep the Soul under ${SOUL_MAX} characters`);
+const groupSoulText = z.string().trim();
 const assistantNickname = z.string().trim().min(2, "A nickname needs at least two letters").max(40)
   .regex(/^[\p{L}\p{N}][\p{L}\p{N} .'-]*$/u, "A nickname is letters, numbers, and spaces");
 
@@ -209,7 +210,7 @@ export const lifeAreaPatch = lifeAreaCreate.partial().extend({
   morning_checkin_prompt: checkinPrompt.nullable().optional(),
   evening_checkin_prompt: checkinPrompt.nullable().optional(),
   /** How the assistant talks in this group; null clears it. */
-  soul: soulText.nullable().optional(),
+  soul: groupSoulText.nullable().optional(),
   /** What the group calls the assistant, which it answers to like its own name. */
   assistant_nickname: assistantNickname.nullable().optional(),
   reply_mode: z.enum(["normal", "named_only"]).optional(),
@@ -645,7 +646,8 @@ export const toolInput = {
     url: z.string().trim().url().max(2000),
     caption: z.string().trim().max(300).nullable().optional(),
   }),
-  update_soul: z.object({ soul: soulText }),
+  // Whether a cap applies depends on whose Soul it is, which the executor knows and this schema does not.
+  update_soul: z.object({ soul: groupSoulText }),
   update_group_settings: z.object({
     reply_mode: z.enum(["normal", "named_only"]).nullable().optional(),
     // "" clears the nickname; null leaves it alone.

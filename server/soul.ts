@@ -9,6 +9,7 @@
  */
 
 import { now, USER_ID } from "./db.ts";
+import { dedupeLines } from "./dedupe.ts";
 import type { Db } from "./types.ts";
 
 export type ReplyMode = "normal" | "named_only";
@@ -48,8 +49,9 @@ export function groupVoiceForThread(db: Db, threadId: string): (GroupVoice & { a
   return area ? { ...groupVoice(db, area.id), areaId: area.id } : null;
 }
 
+/** A group's Soul has no length cap, and a rule it already holds is never added twice. */
 export function setGroupSoul(db: Db, areaId: string, soul: string | null): string | null {
-  const next = cleaned(soul);
+  const next = cleaned(soul) ? cleaned(dedupeLines(soul as string)) : null;
   db.prepare("UPDATE life_areas SET soul=?,updated_at=? WHERE id=? AND user_id=?").run(next, now(), areaId, USER_ID);
   return next;
 }

@@ -10362,6 +10362,14 @@ describe("worker scheduling", () => {
     setGroupProfile(db, area.id, "People: Natella; door code 1234; wedding 2012-07-12\nPreferences: call 5550188", { written: true });
     assert.equal(groupProfile(db, area.id).profile, "People: Natella; wedding 2012-07-12");
 
+    // A group's profile has no length cap, and a phrase it already says is kept once.
+    const long = Array.from({ length: 200 }, (_, index) => `fact ${index}`).join("; ");
+    assert.ok(long.length > 1200);
+    const unlimited = (await api.put(`/api/life-areas/${area.id}/profile`).send({ profile: `People: ${long}; Fact 3.; fact 4` }).expect(200)).body.data.profile as string;
+    assert.equal(unlimited, `People: ${long}`);
+    setGroupProfile(db, area.id, "People: Natella; natella\nShared: Natella; trip in May\nPeople: Natella; Sam\nPeople: sam", { written: true });
+    assert.equal(groupProfile(db, area.id).profile, "People: Natella\nShared: Natella; trip in May\nPeople: Sam");
+
     // Not a group, or nothing at all to write from.
     const work = (await api.get("/api/life-areas").expect(200)).body.data.find((row: { slug: string }) => row.slug === "work");
     await api.put(`/api/life-areas/${work.id}/profile`).send({ profile: "x" }).expect(404);
@@ -11834,6 +11842,17 @@ describe("the Soul and group settings", () => {
     assert.equal(integrations.soul, "- Dry humour is fine.", "the group's feedback never reaches the owner's Soul");
     const areas = (await api.get("/api/life-areas").expect(200)).body.data as Array<{ id: string; soul: string | null }>;
     assert.equal(areas.find(row => row.id === area.id)?.soul, "- One line.\n- No follow-up questions.");
+
+    // A group's Soul has no cap and keeps a rule once; the owner's is still held to 1,200 characters.
+    const manyRules = Array.from({ length: 150 }, (_, index) => `- Rule number ${index}.`).join("\n");
+    assert.ok(manyRules.length > 1200);
+    await run("update_soul", { soul: `${manyRules}\n- rule number 7\n- One line.` }, context);
+    const grown = db.prepare("SELECT soul FROM life_areas WHERE id=?").get(area.id) as { soul: string };
+    assert.equal(grown.soul, `${manyRules}\n- One line.`);
+    await assert.rejects(run("update_soul", { soul: manyRules }), /under 1200 characters/);
+    await api.patch(`/api/life-areas/${area.id}`).send({ soul: "- One line.\n- One line!\n* no emojis" }).expect(200);
+    assert.equal((db.prepare("SELECT soul FROM life_areas WHERE id=?").get(area.id) as { soul: string }).soul, "- One line.\n* no emojis");
+    await run("update_soul", { soul: "- One line.\n- No follow-up questions." }, context);
 
     await assert.rejects(run("update_soul", { soul: "- Be loud." }, { ...context, readWeb: true }), /read text someone else wrote/);
     await assert.rejects(run("update_soul", { soul: "- Be loud." }, { ...context, readUntrusted: true }), /read text someone else wrote/);
