@@ -1,7 +1,7 @@
 import { type AlgoliaSync, configuredIndexNames, escapeFilterValue } from "./algolia.ts";
 import {
-  adoptStagedAttachments, attachmentForLink, attachmentsForMessage, readAttachment, setAttachmentDescription,
-  stageAttachment, storableType,
+  adoptStagedAttachments, attachmentFileIntact, attachmentForLink, attachmentsFull, attachmentsForMessage, readAttachment,
+  setAttachmentDescription, stageAttachment, stageForMessage, storableType,
 } from "./attachments.ts";
 import { ensureGroupLifeArea, groupAreas, id, now, queueIndexJob, recordMessageReaction, USER_ID } from "./db.ts";
 import { recordGroupParticipants, rosterLine } from "./group-members.ts";
@@ -12,15 +12,18 @@ import { localIsoWithOffset } from "./local-time.ts";
 import type { SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import {
-  describeMediaDetailed, fetchPicture, fillPendingPictures, hasImageDescription, imageInputMode, PICTURE_PENDING,
-  unviewedPictures, withoutMediaLines,
+  describeMediaDetailed, fetchPicture, fillPendingPictures, hasImageDescription, imageInputMode, PICTURE_BUDGET_MS,
+  PICTURE_FETCH_TIMEOUT_MS, PICTURE_PENDING, unviewedPictures, withoutMediaLines,
 } from "./image-input.ts";
 import { relevantFacts } from "./memory-context.ts";
 import { servableGroupProfile, servableOwnerProfile } from "./profile.ts";
 import { groupVoice, groupVoiceForThread, ownerSoul } from "./soul.ts";
 import { executeAgentTool, ownRecordsOnly, type GroupScope, type ToolTurnContext } from "./tool-executor.ts";
 import { TransientFailure } from "./transient.ts";
-import type { Db } from "./types.ts";
+import type { AttachmentRow, Db } from "./types.ts";
+
+/** What saving every picture of one message may take in all, whatever the number of links or how slow each is. */
+const STAGING_BUDGET_MS = 30_000;
 
 /**
  * Without a deadline an in-flight completion can outlive the reason anybody
@@ -620,7 +623,7 @@ function saveInboundMessage(
       // the recent window; the turn being answered now belongs back inside it.
       db.prepare("UPDATE channel_messages SET status='received',updated_at=? WHERE id=?")
         .run(now(), existing.id);
-      adoptStagedAttachments(db, threadId, providerMessageId);
+      adoptStagedAttachments(db, threadId, providerMessageId, existing.id);
       return existing.id;
     }
   }
@@ -628,7 +631,7 @@ function saveInboundMessage(
   // ever read by inference.
   const messageId = saveChannelMessage(db, threadId, "inbound", "user", body, providerMessageId, { ...metadata, runtimeReactions: [] });
   // The pictures it came with were saved to disk before it was filed.
-  adoptStagedAttachments(db, threadId, providerMessageId);
+  adoptStagedAttachments(db, threadId, providerMessageId, messageId);
   return messageId;
 }
 
@@ -636,9 +639,10 @@ function saveInboundMessage(
  * Keeps a copy of every picture on an inbound message before anything else
  * touches it, whether or not the assistant will look at it: the provider's
  * link can expire, and a group's held picture may not be asked about for an
- * hour. Runs ahead of the message being filed, which `saveInboundMessage`
- * then ties to its files. A link that cannot be fetched is logged and left
- * for the turn to try again from the provider.
+ * hour. Ties itself to the message if it is already filed (a held group
+ * message is), and otherwise `saveInboundMessage` ties it when it is. A link
+ * that cannot be fetched is logged, and the turn that reads the message tries
+ * it again from the provider and keeps what it gets.
  */
 export async function stageInboundPictures(
   db: Db,
@@ -649,15 +653,28 @@ export async function stageInboundPictures(
 ): Promise<void> {
   if (!urls.length) return;
   const thread = getOrCreateThread(db, "sms", address);
+  // The message's pictures share one allowance, so dead links cannot add up to a long wait.
+  const budget = AbortSignal.timeout(STAGING_BUDGET_MS);
   for (const url of urls) {
+    if (budget.aborted) {
+      console.warn("Saving attachments ran out of time; the rest are left for the turn to fetch.");
+      return;
+    }
     try {
       const have = db.prepare(`
-        SELECT 1 found FROM attachments WHERE thread_id=? AND COALESCE(provider_message_id,'')=? AND source_url=?
-      `).get(thread.id, providerMessageId ?? "", url);
-      if (have) continue;
-      const picture = await fetchPicture(url, fetcher);
+        SELECT * FROM attachments WHERE thread_id=? AND COALESCE(provider_message_id,'')=? AND source_url=?
+      `).get(thread.id, providerMessageId ?? "", url) as AttachmentRow | undefined;
+      // A row whose file has gone is staged again; `stageAttachment` repairs it.
+      if (have && attachmentFileIntact(db, have)) continue;
+      const picture = await fetchPicture(url, fetcher, AbortSignal.any([AbortSignal.timeout(PICTURE_FETCH_TIMEOUT_MS), budget]));
       if (!picture.bytes || !storableType(picture.type)) continue;
+      if (attachmentsFull(db, picture.bytes.length)) {
+        console.warn("Not keeping a picture: ATTACHMENTS_MAX_MB is reached.");
+        continue;
+      }
       stageAttachment(db, { threadId: thread.id, providerMessageId, sourceUrl: url, contentType: picture.type, bytes: picture.bytes });
+      // Converting a photo is synchronous work; let the server answer a request between two of them.
+      await new Promise(resolve => setImmediate(resolve));
     } catch (error) {
       console.warn("Saving an attachment failed:", error instanceof Error ? error.message : error);
     }
@@ -1011,15 +1028,29 @@ async function viewUnviewedPictures(
   // The mark goes out beside the first look rather than ahead of it, and has
   // landed before the turn reads the archive for the marks already up.
   const marking = pending.length && looking ? showMark?.() : undefined;
+  // Every picture of the turn shares one allowance of time, so a burst of
+  // receipts cannot keep the worker from the next thread for long.
+  const budget = AbortSignal.timeout(PICTURE_BUDGET_MS);
   for (const picture of pending) {
     // The copy kept when the picture arrived is what gets read, so a link that
     // has since expired costs nothing; a picture never kept comes from its link.
     const stored = new Map<string, ReturnType<typeof attachmentForLink>>();
     const looks = await describeMediaDetailed(picture.urls, fetcher, url => {
       const row = attachmentForLink(db, picture.id, url);
-      const bytes = row ? readAttachment(db, row) : undefined;
+      const bytes = row && attachmentFileIntact(db, row) ? readAttachment(db, row) : undefined;
       if (row && bytes) stored.set(url, row);
       return row && bytes ? { type: row.content_type, bytes } : undefined;
+    }, budget);
+    // A link the arrival could not fetch, but this look could, is kept now.
+    looks.forEach((look, index) => {
+      const url = picture.urls[index];
+      if (!look.fetched || stored.has(url) || attachmentsFull(db, look.fetched.bytes.length)) return;
+      try {
+        const row = stageForMessage(db, picture.id, url, look.fetched);
+        if (row) stored.set(url, row);
+      } catch (error) {
+        console.warn("Saving an attachment failed:", error instanceof Error ? error.message : error);
+      }
     });
     const lines = looks.map(look => look.line);
     seen.push(...lines);
@@ -1064,7 +1095,9 @@ function turnAttachmentIds(
 ): string[] {
   const messageIds = [inbound.id];
   if (group) {
-    for (const marker of ["[Image", PICTURE_PENDING]) {
+    // "[Picture attached" takes the pending line and the one a failed look leaves
+    // ("it could not be viewed"), so a held picture is linked whether or not it was read.
+    for (const marker of ["[Image", "[Picture attached"]) {
       messageIds.push(...heldRows(db, threadId, inbound, since, marker, PICTURES_PER_TURN).map(row => row.id));
     }
   }

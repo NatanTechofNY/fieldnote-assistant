@@ -8,6 +8,7 @@
  */
 
 import type { AlgoliaSync } from "./algolia.ts";
+import { pictureTextMatch } from "./attachments.ts";
 import { groupAreas, now, OWN_AREA_CLAUSE, queueIndexJob, USER_ID } from "./db.ts";
 import type { Db } from "./types.ts";
 
@@ -79,12 +80,13 @@ function scanRows(db: Db, text: string, scope: FactScope): FactRow[] {
   const words = keywords(text);
   if (!words.length) return [];
   const where = scopeClause(scope);
-  const match = words.map(() => "(lower(m.title) LIKE ? OR lower(m.content) LIKE ?)").join(" OR ");
+  // A receipt's vendor or total is in the memory's pictures, not its text.
+  const match = words.map(() => `(lower(m.title) LIKE ? OR lower(m.content) LIKE ? OR ${pictureTextMatch("m", "?")})`).join(" OR ");
   return db.prepare(`
     SELECT m.id,m.title,m.content,m.tags_json FROM memories m
     WHERE m.user_id=? AND m.kind IN ('fact','note') AND ${where.sql} AND (${match})
     ORDER BY m.updated_at DESC LIMIT ?
-  `).all(USER_ID, ...where.params, ...words.flatMap(word => [`%${word}%`, `%${word}%`]), SEARCH_LIMIT) as FactRow[];
+  `).all(USER_ID, ...where.params, ...words.flatMap(word => [`%${word}%`, `%${word}%`, `%${word}%`]), SEARCH_LIMIT) as FactRow[];
 }
 
 async function searchedRows(db: Db, search: MemorySearch, text: string, scope: FactScope): Promise<FactRow[]> {

@@ -1,7 +1,18 @@
 import { useState } from "react";
+import type { MouseEvent } from "react";
 import { FileText } from "lucide-react";
 import type { Attachment } from "../../types";
 import { Modal } from "./Modal";
+import { pictureLabel } from "./pictureLabel";
+
+/**
+ * What happens inside a picture's thumbnails or its viewer belongs to the
+ * picture. The viewer is drawn in a portal, but React still carries its clicks
+ * up through the component that opened it, which in a table or a journal is a
+ * row that opens the memory on a click; without this, looking at a receipt
+ * opens the editor behind it.
+ */
+const keepToThePicture = (event: MouseEvent) => event.stopPropagation();
 
 /**
  * The pictures kept with a record, as a row of thumbnails. A click opens the
@@ -11,29 +22,28 @@ import { Modal } from "./Modal";
 export function AttachmentThumbs({ attachments, size = 44 }: { attachments?: Attachment[]; size?: number }) {
   const [open, setOpen] = useState<Attachment | null>(null);
   if (!attachments?.length) return null;
-  return <>
-    <span className="attachment-thumbs">
-      {attachments.map(attachment => <button
-        type="button"
-        key={attachment.id}
-        className="attachment-thumb"
-        style={{ width: size, height: size }}
-        aria-label={attachment.kind === "document" ? "Open the saved document" : "Open the saved picture"}
-        title={attachment.description ?? "Saved picture"}
-        onClick={() => setOpen(attachment)}
-      >
-        <img src={attachment.url} alt="" loading="lazy" width={size} height={size} />
-        {attachment.kind === "document" && <FileText size={11} className="attachment-thumb-badge" aria-hidden="true" />}
-      </button>)}
-    </span>
+  return <span className="attachment-thumbs" onClick={keepToThePicture} onDoubleClick={keepToThePicture}>
+    {attachments.map(attachment => <button
+      type="button"
+      key={attachment.id}
+      className="attachment-thumb"
+      style={{ width: size, height: size }}
+      aria-label={`Open ${pictureLabel(attachment).toLowerCase()}`}
+      title={attachment.description ?? pictureLabel(attachment)}
+      onClick={() => setOpen(attachment)}
+    >
+      <img src={attachment.url} alt="" loading="lazy" width={size} height={size} />
+      {attachment.kind === "document" && <FileText size={11} className="attachment-thumb-badge" aria-hidden="true" />}
+    </button>)}
     {open && <AttachmentViewer attachment={open} onClose={() => setOpen(null)} />}
-  </>;
+  </span>;
 }
 
 export function AttachmentViewer({ attachment, onClose }: { attachment: Attachment; onClose: () => void }) {
   return <Modal title={attachment.kind === "document" ? "Saved document" : "Saved picture"} onClose={onClose} wide>
-    <div className="attachment-viewer">
-      <img src={attachment.url} alt={attachment.description ?? "A picture sent to the assistant"} />
+    <div className="attachment-viewer" onClick={keepToThePicture} onDoubleClick={keepToThePicture}>
+      {/* What it shows is the paragraph below; reading it twice helps no one. */}
+      <img src={attachment.url} alt={pictureLabel(attachment)} />
       {attachment.description && <p className="attachment-description">{attachment.description}</p>}
     </div>
   </Modal>;

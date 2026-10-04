@@ -359,6 +359,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS attachments_source
   ON attachments(thread_id, COALESCE(provider_message_id,''), source_url);
 CREATE INDEX IF NOT EXISTS attachments_message ON attachments(channel_message_id);
 CREATE INDEX IF NOT EXISTS attachments_created ON attachments(created_at);
+CREATE INDEX IF NOT EXISTS attachments_sha ON attachments(sha256);
+CREATE INDEX IF NOT EXISTS attachments_file ON attachments(file_name);
 CREATE TABLE IF NOT EXISTS memory_attachments (
   memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
   attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,

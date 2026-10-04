@@ -121,7 +121,9 @@ Set these as host secrets. Never commit them.
 |---|---|---|
 | `PORT` | `4174` | HTTP port |
 | `DATABASE_PATH` | `./data/assistant.db`, `/data/assistant.db` in the image | SQLite file |
-| `ATTACHMENTS_DIR` | `attachments/` beside `DATABASE_PATH` (`/data/attachments` in the image) | Pictures people text in, one file each. Keep it on the same persistent volume and back it up with the database: the rows in SQLite name these files |
+| `ATTACHMENTS_DIR` | `attachments/` beside `DATABASE_PATH` (`/data/attachments` in the image) | Pictures people text in, one file each. Keep it on the same persistent volume and back it up with the database: the rows in SQLite name these files. Restore the two together: at server start a file no row names is deleted once it is a day old, so restoring only an older `assistant.db` beside newer pictures costs the pictures it does not know about |
+| `ATTACHMENTS_MAX_MB` | unset (no cap) | The most the kept pictures may total. Once it would be passed, new pictures are logged and not kept, and the turn still reads them from the provider's link. Size the volume for this plus the database; the server logs the count and size at start |
+| `ATTACHMENT_TEXT_INDEX` | `on` | `off` keeps what pictures say (receipt vendors, totals, reference numbers) out of the Algolia memory records. Reindex after changing it |
 | `DEMO_USER_ID` | `devcon-demo` | The fixed identity every handler binds to. Changing it after data exists orphans that data, and the checked-in search-tool filter still pins `devcon-demo` |
 | `APP_ALLOW_NO_AUTH` | `false` | Lets the server start in production with no password at all. Rarely correct |
 | `CORS_ORIGIN` | `http://localhost:4173` | Only needed when the UI is served from a different origin than the API |

@@ -1542,7 +1542,14 @@ export async function executeAgentTool(
   if (name === "get_memory") {
     const memory = scopedMemory(db, input.id as string, scope, ownOnly);
     if (!memory) throw new Error("Memory not found");
-    return memoryWithPictures(db, memory);
+    const found = memoryWithPictures(db, memory);
+    // What a picture said is words from a document the owner did not write, the
+    // same as an `[Image: …]` line in a message: a turn that has read it may
+    // not act on it as the owner's word (see `assertOwnWords`).
+    if (context && found.attachments?.some(picture => picture.description)) {
+      context.readUntrusted = true;
+    }
+    return found;
   }
   if (name === "create_memory") {
     const timestamp = now();
@@ -1569,21 +1576,25 @@ export async function executeAgentTool(
       ownMoodOnly: ownMoodOnly(context),
       allowedNames: context?.burstSpeakerNames,
     });
-    db.prepare(`
-      INSERT INTO memories(
-        id,user_id,title,content,kind,mood_label,mood_score,moods_json,category_id,life_area_id,life_area_source,
-        occurred_at,review_worthy,tags_json,created_at,updated_at
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
-      memoryId, USER_ID, input.title ?? null, input.content as string, input.kind || "note",
-      mood.mood_label, mood.mood_score, mood.moods_json, area.category_id,
-      area.life_area_id, area.life_area_source,
-      input.occurred_at ?? null, input.review_worthy === true ? 1 : 0,
-      JSON.stringify(input.tags ?? []), timestamp, timestamp,
-    );
-    queueIndexJob(db, "memory", memoryId);
-    // The pictures this turn was sent are kept with the record they produced.
-    if (context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
+    // One write, so a memory is never left without the pictures it was saved
+    // from: the retry that would follow a half-finished call saves it twice.
+    db.transaction(() => {
+      db.prepare(`
+        INSERT INTO memories(
+          id,user_id,title,content,kind,mood_label,mood_score,moods_json,category_id,life_area_id,life_area_source,
+          occurred_at,review_worthy,tags_json,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        memoryId, USER_ID, input.title ?? null, input.content as string, input.kind || "note",
+        mood.mood_label, mood.mood_score, mood.moods_json, area.category_id,
+        area.life_area_id, area.life_area_source,
+        input.occurred_at ?? null, input.review_worthy === true ? 1 : 0,
+        JSON.stringify(input.tags ?? []), timestamp, timestamp,
+      );
+      queueIndexJob(db, "memory", memoryId);
+      // The pictures this turn was sent are kept with the record they produced.
+      if (context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
+    })();
     search.flushSoon();
     return memoryWithPictures(db, getMemory(db, memoryId) as MemoryRow);
   }
@@ -1643,7 +1654,10 @@ export async function executeAgentTool(
         JSON.stringify(value("tags", JSON.parse(current.tags_json))), now(), memoryId, USER_ID,
       );
       queueIndexJob(db, "memory", memoryId);
-      if (context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
+      // Rewording a memory can be about a picture; retagging an old note in the
+      // same turn is not, and must not pin the turn's receipt to it.
+      const reworded = value("title", current.title) !== current.title || value("content", current.content) !== current.content;
+      if (reworded && context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
     })();
     search.flushSoon();
     return memoryWithPictures(db, getMemory(db, memoryId) as MemoryRow);

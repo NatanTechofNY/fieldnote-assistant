@@ -61,7 +61,7 @@ The hosted Agent Studio search tool `personal_data_search` reads the first three
 
 **Not indexed, fetched live on every call:** all Jira and Confluence data. The eight Atlassian tools hit the Atlassian REST API through [`server/atlassian-service.ts`](../server/atlassian-service.ts) and return the response to the agent. Nothing is copied into Algolia or SQLite, so there is no staleness window and no second copy of somebody else's data to keep in sync.
 
-**Stored outside SQLite:** the pictures people text the assistant. SQLite holds the `attachments` row (content type, size, hash, description, kind) and `memory_attachments` links; the bytes live as files in `ATTACHMENTS_DIR`, beside the database by default, so they ride the same volume and need the same backup. The files are not indexed. A memory's search record carries only the text of its pictures' descriptions. See "Pictures kept" in [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md).
+**Stored outside SQLite:** the pictures people text the assistant. SQLite holds the `attachments` row (content type, size, hash, description, kind) and `memory_attachments` links; the bytes live as files in `ATTACHMENTS_DIR`, beside the database by default, so they ride the same volume and need the same backup. The files are not indexed. A memory's search record carries only the text of its pictures' descriptions, and only of pictures from the same chat as the memory's area (a private picture is never shown to, or searchable from, a group), unless `ATTACHMENT_TEXT_INDEX=off` leaves it out. See "Pictures kept" in [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md).
 
 **Not indexed until you choose:** Granola meeting notes sit in a review queue and only become searchable if you save one as a memory.
 

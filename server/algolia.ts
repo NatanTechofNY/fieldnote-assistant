@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { algoliasearch } from "algoliasearch";
-import { attachmentTextForMemory } from "./attachments.ts";
+import { attachmentTextForMemory, attachmentTextIndexed } from "./attachments.ts";
 import {
   getChannelMessage, getMemory, getStoreProduct, getTodo, now, queueIndexJob, USER_ID,
 } from "./db.ts";
@@ -260,7 +260,7 @@ export class AlgoliaSync {
         review_worthy: Boolean(row.review_worthy),
         tags: JSON.parse(row.tags_json),
         // What the pictures kept with the memory show, so a receipt's vendor or total can be searched for.
-        attachment_text: attachmentTextForMemory(this.db, row.id),
+        attachment_text: attachmentTextIndexed() ? attachmentTextForMemory(this.db, row.id) : "",
         created_at: row.created_at,
         updated_at: row.updated_at,
       };

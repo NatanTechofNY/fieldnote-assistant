@@ -12,7 +12,7 @@ import type { RouteContext } from "./context.ts";
  * auth gate like every other route: a receipt is personal data, so the file
  * is served only to a signed-in session, and nothing here is exempt.
  */
-export function registerAttachmentRoutes({ app, db }: RouteContext): void {
+export function registerAttachmentRoutes({ app, db, search }: RouteContext): void {
   app.get("/api/attachments", (req, res) => {
     const query = z.object({
       kind: z.enum(["photo", "document"]).optional(),
@@ -58,13 +58,17 @@ export function registerAttachmentRoutes({ app, db }: RouteContext): void {
     res.setHeader("Content-Type", row.content_type);
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Content-Security-Policy", "default-src 'none'; img-src 'self'; sandbox");
-    res.setHeader("Cache-Control", "private, max-age=3600");
+    // Revalidated on every use: the ETag makes that a cheap 304, and a picture
+    // that was deleted is gone from the browser's cache the next time it asks.
+    res.setHeader("Cache-Control", "private, no-cache");
     res.setHeader("Content-Disposition", "inline");
     return res.sendFile(path, { dotfiles: "allow" });
   });
 
   app.delete("/api/attachments/:id", (req, res) => {
     if (!deleteAttachment(db, req.params.id)) return failure(res, 404, "Attachment not found");
+    // The linked memories and the scrubbed conversation messages were queued for reindexing.
+    search.flushSoon();
     return success(res, { id: req.params.id });
   });
 }

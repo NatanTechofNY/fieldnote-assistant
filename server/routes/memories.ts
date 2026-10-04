@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { attachmentsForMemories, attachmentsForMemory } from "../attachments.ts";
+import { attachmentsForMemories, attachmentsForMemory, pictureTextMatch } from "../attachments.ts";
 import { OWN_AREA_CLAUSE, USER_ID, getMemory, id, likePattern, now, queueIndexJob } from "../db.ts";
 import { OWNER_SPEAKER_NAME } from "../group-thread.ts";
 import { failure, success } from "../http.ts";
@@ -78,7 +78,8 @@ export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
     const moodClause = query.mood_label ? "AND m.mood_label=@mood_label" : "";
     const searchClause = query.query
       ? "AND (m.title LIKE @query ESCAPE '\\' OR m.content LIKE @query ESCAPE '\\'"
-        + " OR m.mood_label LIKE @query ESCAPE '\\' OR m.tags_json LIKE @query ESCAPE '\\')"
+        + " OR m.mood_label LIKE @query ESCAPE '\\' OR m.tags_json LIKE @query ESCAPE '\\'"
+        + ` OR ${pictureTextMatch("m", "@query")})`
       : "";
     const filters = {
       user_id: USER_ID,

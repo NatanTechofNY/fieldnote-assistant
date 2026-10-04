@@ -15,7 +15,7 @@ export async function runCli(command: CliCommand): Promise<void> {
     } else if (command === "reset") {
       resetDatabase(db);
       // The rows are gone with their messages; so are the files they named.
-      console.log(JSON.stringify({ reset: true, attachmentFilesRemoved: sweepOrphanedAttachmentFiles(db) }));
+      console.log(JSON.stringify({ reset: true, attachmentFilesRemoved: sweepOrphanedAttachmentFiles(db, { graceMs: 0 }) }));
     } else if (command === "reindex") {
       console.log(JSON.stringify(await search.reindex()));
     } else {

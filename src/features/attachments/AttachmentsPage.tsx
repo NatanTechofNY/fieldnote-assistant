@@ -7,6 +7,7 @@ import { api } from "../../api";
 import { PageHead } from "../../components/layout/PageHead";
 import { Empty, ErrorState, Loading } from "../../components/ui";
 import { AttachmentViewer } from "../../components/ui/AttachmentThumbs";
+import { pictureLabel } from "../../components/ui/pictureLabel";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import type { Attachment } from "../../types";
 
@@ -32,17 +33,20 @@ export function AttachmentsPage() {
       void queryClient.invalidateQueries({ queryKey: ["memories"] });
     },
   });
+  // A picture that was not deleted must not look as if it were.
+  const deleteFailed = remove.isError;
   const attachments = data?.pages.flatMap(page => page.attachments) ?? [];
   return <div className="page">
     <PageHead eyebrow="Kept locally" title="Pictures, kept." description="Receipts, invoices, and photos you text the assistant are saved on your server, with what it read off each one." />
     <div className="tabs">{FILTERS.map(([value, label]) =>
       <button key={value} className={`tab ${filter === value ? "active" : ""}`} onClick={() => setFilter(value)}>{label}</button>)}
     </div>
+    {deleteFailed && <p role="alert" className="cell-quiet">That picture could not be deleted. It is still on the server; try again.</p>}
     {isLoading ? <Loading/> : error ? <ErrorState error={error}/> : attachments.length ? <>
       <div className="attachment-grid">
         {attachments.map(attachment => <article className="card attachment-card" key={attachment.id}>
-          <button type="button" className="attachment-card-image" aria-label="Open the picture" onClick={() => setViewing(attachment)}>
-            <img src={attachment.url} alt={attachment.description ?? "A picture sent to the assistant"} loading="lazy" />
+          <button type="button" className="attachment-card-image" aria-label={`Open ${pictureLabel(attachment).toLowerCase()}`} onClick={() => setViewing(attachment)}>
+            <img src={attachment.url} alt="" loading="lazy" />
           </button>
           <div className="attachment-card-body">
             <div className="attachment-card-meta">
@@ -57,8 +61,12 @@ export function AttachmentsPage() {
               <button
                 type="button"
                 className="button icon ghost"
-                aria-label="Delete picture"
-                onClick={() => { if (confirm("Delete this picture from the server?")) remove.mutate(attachment.id); }}
+                aria-label={`Delete ${pictureLabel(attachment).toLowerCase()}`}
+                onClick={() => {
+                  if (confirm("Delete this picture from the server? What the assistant read off it is also blanked in the conversation. A memory's own text stays; edit or delete the memory too if it quotes the picture.")) {
+                    remove.mutate(attachment.id);
+                  }
+                }}
               ><Trash2 size={12}/></button>
             </div>
           </div>
