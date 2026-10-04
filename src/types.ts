@@ -62,6 +62,14 @@ export interface Recurrence {
   lead_minutes: number | null;
 }
 
+/** One finished occurrence of a repeating todo, kept after the row rolls on. */
+export interface TodoCompletion {
+  id: string;
+  todo_id: string;
+  occurrence_at: string;
+  completed_at: string;
+}
+
 export interface Todo {
   id: string;
   title: string;

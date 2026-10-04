@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { OWN_AREA_CLAUSE, USER_ID, getReminders, getTodo, id, now, queueIndexJob, syncTodoReminders, userTimezone } from "../db.ts";
+import { OWN_AREA_CLAUSE, USER_ID, getRecentCompletions, getReminders, getTodo, id, now, queueIndexJob, syncTodoReminders, userTimezone } from "../db.ts";
 import { failure, success } from "../http.ts";
 import {
   DERIVED_SCHEDULE, REPEATING_SUBTASK, STEP_SCHEDULE, planRecurrenceWrite,
@@ -62,6 +62,16 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
       ORDER BY CASE WHEN t.due_at IS NULL THEN 1 ELSE 0 END,t.due_at,t.created_at DESC LIMIT @limit
     `).all(params) as TodoRow[];
     return success(res, rows.map(todoJson));
+  });
+  /*
+   * Registered ahead of `/api/todos/:id` so "completions" is not read as an id.
+   * The board joins these to the todos it already fetched, so its life-area
+   * filter applies to them without a second filter here.
+   */
+  app.get("/api/todos/completions", (req, res) => {
+    const query = z.object({ days: z.coerce.number().int().min(1).max(90).default(14) }).parse(req.query);
+    const since = new Date(Date.now() - query.days * 86_400_000).toISOString();
+    return success(res, getRecentCompletions(db, since).map(row => ({ ...completionJson(row), todo_id: row.todo_id })));
   });
   app.get("/api/todos/:id", (req, res) => {
     const todo = getTodo(db, req.params.id);

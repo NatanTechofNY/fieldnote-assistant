@@ -4,7 +4,7 @@ import { type DragEndEvent, DndContext, PointerSensor, useDraggable, useDroppabl
 import { Archive, BellRing, CalendarDays, ChevronRight, CornerDownRight, GripVertical, Columns3, List, Plus, Repeat, Search } from "lucide-react";
 import { api } from "../../api";
 import type {
-  LifeArea, Todo, TodoStatus,
+  LifeArea, Todo, TodoCompletion, TodoStatus,
 } from "../../types";
 import { PageHead } from "../../components/layout/PageHead";
 import { AttachButton, ErrorState, Loading } from "../../components/ui";
@@ -51,6 +51,14 @@ export function TodosPage() {
     placeholderData: previous => previous,
   });
   const todos = useMemo(() => narrowTodos(fetched, lifeAreas, lifeAreaId, query), [fetched, lifeAreas, lifeAreaId, query]);
+  // A repeating task rolls on to its next occurrence at midnight, so the row
+  // alone cannot say what was finished on earlier days. The log can. Keyed
+  // under "todos" so every status change that refreshes the board refreshes it.
+  const { data: completions = [] } = useQuery({
+    queryKey: ["todos", "completions"],
+    queryFn: () => api.todoCompletions(),
+    enabled: showDone,
+  });
   // `?open=` is how search results land on a specific card. Deriving the editor
   // from the URL keeps the deep link working on a refresh, and it is resolved
   // against everything fetched so a link to a group's task opens whatever the
@@ -77,6 +85,7 @@ export function TodosPage() {
   const children = useMemo(() => stepsByParent(todos), [todos]);
   const allChildren = useMemo(() => stepsByParent(fetched), [fetched]);
   const top = todos.filter(t => !t.parent_id);
+  const history = useMemo(() => finishedOccurrences(completions, todos), [completions, todos]);
   /*
    * Whichever way a task is finished — the row's menu, a drag to Done, the
    * editor — the steps it still owes are settled first. Every path routes
@@ -140,7 +149,8 @@ export function TodosPage() {
               key={status}
               lane={lane}
               status={status}
-              todos={laneTodos.filter(t => t.status === status)}
+              todos={laneTodos.filter(t => t.status === status).sort(status === "done" ? byCompletion : () => 0)}
+              history={lane === "recurring" && status === "done" && showDone ? history : undefined}
               children={children}
               hiddenNote={status === "done" && !showDone ? "Done tasks are hidden" : undefined}
               onOpen={setEditor}
@@ -185,6 +195,29 @@ const lanes: readonly BoardLane[] = ["one-off", "recurring"];
 const laneLabel: Record<BoardLane, string> = { "one-off": "One-off", recurring: "Recurring" };
 const laneOf = (todo: Todo): BoardLane => todo.recurrence ? "recurring" : "one-off";
 
+/** When a finished task was finished, as a sortable instant; `updated_at` stands in for rows that predate `completed_at`. */
+const finishedAt = (todo: Todo) => Date.parse(todo.completed_at ?? todo.updated_at) || 0;
+
+/** The Done column's order: most recently finished first, whatever the task was due. */
+const byCompletion = (a: Todo, b: Todo) => finishedAt(b) - finishedAt(a);
+
+interface FinishedOccurrence { completion: TodoCompletion; todo: Todo }
+
+/**
+ * The completion log as the board draws it: one entry per finished occurrence of
+ * a repeating task that is on the page. The occurrence a card is still showing
+ * as done is left out, since the card already says so.
+ */
+function finishedOccurrences(completions: TodoCompletion[], todos: Todo[]): FinishedOccurrence[] {
+  const byId = new Map(todos.filter(todo => todo.recurrence && !todo.parent_id).map(todo => [todo.id, todo]));
+  return completions.flatMap(completion => {
+    const todo = byId.get(completion.todo_id);
+    if (!todo) return [];
+    const onCard = todo.status === "done" && todo.due_at && Date.parse(todo.due_at) === Date.parse(completion.occurrence_at);
+    return onCard ? [] : [{ completion, todo }];
+  }).sort((a, b) => Date.parse(b.completion.completed_at) - Date.parse(a.completion.completed_at));
+}
+
 /** Steps grouped under the id of the task they belong to. */
 function stepsByParent(todos: Todo[]): Map<string, Todo[]> {
   const map = new Map<string, Todo[]>();
@@ -224,7 +257,8 @@ function TodoTable({ todos, children, onOpen, onStatus }: {
   onStatus: (id: string, status: TodoStatus) => void;
 }) {
   const timezone = useTimezone();
-  const rows = useMemo(() => [...todos].sort((a, b) => statusRank(a.status) - statusRank(b.status)), [todos]);
+  const rows = useMemo(() => [...todos].sort((a, b) =>
+    statusRank(a.status) - statusRank(b.status) || (a.status === "done" && b.status === "done" ? byCompletion(a, b) : 0)), [todos]);
   // A count on its own never said what the work was. The rows stay collapsed so
   // the list keeps its density, and either the chevron or the count opens them.
   const [expanded, setExpanded] = useState<string[]>([]);
@@ -396,10 +430,12 @@ function StatusPicker({ todo, onStatus }: { todo: Todo; onStatus: (id: string, s
   </div>;
 }
 
-function TodoColumn({ lane, status, todos, children, hiddenNote, onOpen, onStatus }: {
+function TodoColumn({ lane, status, todos, history = [], children, hiddenNote, onOpen, onStatus }: {
   lane: BoardLane;
   status: TodoStatus;
   todos: Todo[];
+  /** Earlier occurrences of repeating tasks, drawn under the cards as a read-only record. */
+  history?: FinishedOccurrence[];
   children: Map<string, Todo[]>;
   /** Set when the column's cards are hidden by choice, so the empty column says why and still takes a drop. */
   hiddenNote?: string;
@@ -407,13 +443,21 @@ function TodoColumn({ lane, status, todos, children, hiddenNote, onOpen, onStatu
   onStatus: (id: string, status: TodoStatus) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `${lane}:${status}` });
+  const timezone = useTimezone();
   const meta = statusMeta[status];
+  const count = todos.length + history.length;
   return <section ref={setNodeRef} className="column" style={{ outline: isOver ? `1px solid ${meta.color}` : undefined }}>
     {/* A finished task still holding open steps stays on the board whatever
         the setting, so the badge counts whenever there is something to count. */}
-    <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong>{hiddenNote && !todos.length ? <span className="badge" title={hiddenNote}>hidden</span> : <span className="badge">{todos.length}</span>}</div>
+    <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong>{hiddenNote && !count ? <span className="badge" title={hiddenNote}>hidden</span> : <span className="badge">{count}</span>}</div>
     <div className="column-body">{todos.map(todo => <DraggableTodo key={todo.id} todo={todo} subtasks={children.get(todo.id) || []} onOpen={onOpen} onStatus={onStatus} />)}
-      {!todos.length && <div className="empty"><span className="eyebrow">{hiddenNote ? `${hiddenNote} · drop here to finish` : "Drop here"}</span></div>}
+      {history.map(({ completion, todo }) => <article key={completion.id} className="todo-card history">
+        <h4><button type="button" className="card-open" onClick={() => onOpen(todo)}>{todo.title}</button></h4>
+        <div className="todo-meta">
+          <span title="Finished occurrence of a repeating task"><Repeat size={11}/>Done {friendlyDate(completion.completed_at, timezone)}</span>
+        </div>
+      </article>)}
+      {!count && <div className="empty"><span className="eyebrow">{hiddenNote ? `${hiddenNote} · drop here to finish` : "Drop here"}</span></div>}
     </div>
   </section>;
 }

@@ -1317,6 +1317,14 @@ export function getTodoCompletions(db: Db, todoId: string, limit = 30): TodoComp
   `).all(USER_ID, todoId, limit) as TodoCompletionRow[];
 }
 
+/** Every repeating todo's completions since an instant, newest first: what the board's Done lane reads. */
+export function getRecentCompletions(db: Db, sinceIso: string, limit = 500): TodoCompletionRow[] {
+  return db.prepare(`
+    SELECT * FROM todo_completions WHERE user_id=? AND completed_at>=?
+    ORDER BY completed_at DESC LIMIT ?
+  `).all(USER_ID, sinceIso, limit) as TodoCompletionRow[];
+}
+
 export function getReminders(
   db: Db,
   todoId?: string,

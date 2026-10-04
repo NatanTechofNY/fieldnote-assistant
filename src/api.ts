@@ -1,7 +1,7 @@
 import type {
   AgentTurnMemory, AttachmentPage, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
   ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
-  ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoStatus,
+  ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoCompletion, TodoStatus,
   UniversalSearchResult,
 } from "./types";
 
@@ -58,6 +58,8 @@ export const api = {
     if (scope) query.set("scope", scope);
     return request<Todo[]>(`/todos?${query}`);
   },
+  /** Finished occurrences of repeating todos from the last `days` days, newest first. */
+  todoCompletions: (days = 14) => request<TodoCompletion[]>(`/todos/completions?days=${days}`),
   todo: (id: string) => request<{ todo: Todo; subtasks: Todo[]; reminders: Reminder[] }>(`/todos/${id}`),
   // Children come along on the create call, so a task captured with its steps
   // lands as one record with its list rather than a parent and a follow-up.

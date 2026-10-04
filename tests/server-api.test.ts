@@ -11755,6 +11755,26 @@ describe("repeating todos", () => {
     assert.equal(completions(db, created.id), 2, "cancelling is not undoing");
   });
 
+  it("lists recent completions across repeating todos, newest first, for the board's Done lane", async () => {
+    const { api, db } = fixture();
+    const first = (await api.post("/api/todos").send({ title: "Stretch", recurrence: rule }).expect(201)).body.data;
+    const second = (await api.post("/api/todos").send({ title: "Floss", recurrence: rule }).expect(201)).body.data;
+    const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+    const log = db.prepare("INSERT INTO todo_completions(id,user_id,todo_id,occurrence_at,completed_at,created_at) VALUES(?,?,?,?,?,?)");
+    log.run("c_old", USER_ID, first.id, hoursAgo(24 * 40), hoursAgo(24 * 40), hoursAgo(24 * 40));
+    log.run("c_early", USER_ID, first.id, hoursAgo(48), hoursAgo(48), hoursAgo(48));
+    log.run("c_late", USER_ID, second.id, hoursAgo(2), hoursAgo(2), hoursAgo(2));
+
+    // The route is not swallowed by `/api/todos/:id`.
+    const listed = (await api.get("/api/todos/completions").expect(200)).body.data as Array<{ id: string; todo_id: string }>;
+    assert.deepEqual(listed.map(row => row.id), ["c_late", "c_early"], "newest first, and the 40-day-old one is outside the window");
+    assert.equal(listed[0].todo_id, second.id);
+
+    const wide = (await api.get("/api/todos/completions?days=60").expect(200)).body.data as Array<{ id: string }>;
+    assert.deepEqual(wide.map(row => row.id), ["c_late", "c_early", "c_old"]);
+    await api.get("/api/todos/completions?days=0").expect(400);
+  });
+
   it("rolls a finished or missed occurrence forward once its local day is over, and not before", async () => {
     const { api, db } = fixture();
     const search = fakeSearch(db);

@@ -723,6 +723,9 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 }
 .todo-card:hover { border-color:var(--border-strong); box-shadow:var(--shadow-sm); }
 .todo-card.dragging { opacity:.5; box-shadow:var(--shadow-md); }
+/* A finished occurrence of a repeating task: a record, so it sits back from the live cards. */
+.todo-card.history { background:transparent; opacity:.75; }
+.todo-card.history:hover { box-shadow:none; }
 .todo-card h4 { margin:0 0 6px; font-size:13px; font-weight:500; line-height:1.4; }
 .todo-meta { display:flex; gap:8px; flex-wrap:wrap; align-items:center; color:var(--text-tertiary); font-size:11px; }
 .todo-meta > span { display:inline-flex; align-items:center; gap:3px; }
