@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { attachmentsForMemories, attachmentsForMemory } from "../attachments.ts";
 import { OWN_AREA_CLAUSE, USER_ID, getMemory, id, likePattern, now, queueIndexJob } from "../db.ts";
 import { OWNER_SPEAKER_NAME } from "../group-thread.ts";
 import { failure, success } from "../http.ts";
@@ -43,6 +44,12 @@ function hydrateRanked(
   return objectIds
     .map(objectId => byId.get(objectId))
     .filter((row): row is MemoryRow => row !== undefined);
+}
+
+/** A page of memories with their saved pictures, fetched in one query. */
+function memoriesJson(db: Db, rows: MemoryRow[]) {
+  const pictures = attachmentsForMemories(db, rows.map(row => row.id));
+  return rows.map(row => memoryJson(row, pictures.get(row.id) ?? []));
 }
 
 export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
@@ -105,7 +112,7 @@ export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
           occurred_from: query.occurred_from,
           occurred_to: query.occurred_to,
         }) : [];
-        return success(res, { source: "algolia" as const, memories: hydrated.map(memoryJson) });
+        return success(res, { source: "algolia" as const, memories: memoriesJson(db, hydrated) });
       } catch {
         // SQLite remains authoritative and provides a bounded lexical fallback.
       }
@@ -122,11 +129,11 @@ export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
       ...filters,
       ...(query.query ? { query: likePattern(query.query) } : {}),
     }) as MemoryRow[];
-    return success(res, { source: "sqlite" as const, memories: rows.map(memoryJson) });
+    return success(res, { source: "sqlite" as const, memories: memoriesJson(db, rows) });
   });
   app.get("/api/memories/:id", (req, res) => {
     const memory = getMemory(db, req.params.id);
-    return memory ? success(res, memoryJson(memory)) : failure(res, 404, "Memory not found");
+    return memory ? success(res, memoryJson(memory, attachmentsForMemory(db, memory.id))) : failure(res, 404, "Memory not found");
   });
   app.post("/api/memories", (req, res) => {
     const body = memoryCreate.parse(req.body);
@@ -180,7 +187,7 @@ export function registerMemoryRoutes({ app, db, search }: RouteContext): void {
       queueIndexJob(db, "memory", current.id);
     })();
     search.flushSoon();
-    return success(res, memoryJson(getMemory(db, current.id) as MemoryRow));
+    return success(res, memoryJson(getMemory(db, current.id) as MemoryRow, attachmentsForMemory(db, current.id)));
   });
   app.delete("/api/memories/:id", (req, res) => {
     if (!getMemory(db, req.params.id)) return failure(res, 404, "Memory not found");

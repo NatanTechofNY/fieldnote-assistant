@@ -5,7 +5,7 @@ import { getTodo, groupAreas, id, now, queueIndexJob, syncTodoReminders, USER_ID
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
   archivedInboundText, archiveReactionText, burstStartedAt, failAgentTurn, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
-  recordOutboundProviderMessage, runSmsAgent,
+  recordOutboundProviderMessage, runSmsAgent, stageInboundPictures,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
@@ -1264,6 +1264,10 @@ export async function runWorkerOnce(
           threadOriginator: message.threadOriginator,
           ...(message.groupId ? { groupId: message.groupId, participants: message.participants } : {}),
         };
+        // The pictures are saved first, ahead of any decision about answering:
+        // a held group picture may not be asked about for an hour, and the
+        // provider's link will not last that long.
+        if (media.length) await stageInboundPictures(db, address, message.messageId, media, dependencies.fetch);
         // A group that asked the assistant to stay out until named gets no
         // answer, and no completion is spent, on a message that does not name it.
         const heldText = withMediaLines(message.body, media.map(() => PICTURE_PENDING));

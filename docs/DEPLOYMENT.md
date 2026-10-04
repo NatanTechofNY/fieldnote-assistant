@@ -121,6 +121,7 @@ Set these as host secrets. Never commit them.
 |---|---|---|
 | `PORT` | `4174` | HTTP port |
 | `DATABASE_PATH` | `./data/assistant.db`, `/data/assistant.db` in the image | SQLite file |
+| `ATTACHMENTS_DIR` | `attachments/` beside `DATABASE_PATH` (`/data/attachments` in the image) | Pictures people text in, one file each. Keep it on the same persistent volume and back it up with the database: the rows in SQLite name these files |
 | `DEMO_USER_ID` | `devcon-demo` | The fixed identity every handler binds to. Changing it after data exists orphans that data, and the checked-in search-tool filter still pins `devcon-demo` |
 | `APP_ALLOW_NO_AUTH` | `false` | Lets the server start in production with no password at all. Rarely correct |
 | `CORS_ORIGIN` | `http://localhost:4173` | Only needed when the UI is served from a different origin than the API |

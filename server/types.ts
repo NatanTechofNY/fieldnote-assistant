@@ -107,6 +107,28 @@ export interface MemoryRow {
   life_area_slug?: string | null;
 }
 
+/** A picture someone texted the assistant, kept on disk beside the database. */
+export interface AttachmentRow {
+  id: string;
+  user_id: string;
+  /** Null from the moment the file is staged until the message that carried it is archived. */
+  channel_message_id: string | null;
+  thread_id: string;
+  /** The provider's id for the inbound message, which is how a staged file finds its row. */
+  provider_message_id: string | null;
+  source_url: string;
+  content_type: string;
+  byte_size: number;
+  sha256: string;
+  file_name: string;
+  description: string | null;
+  kind: "photo" | "document";
+  created_at: string;
+  /** The group's life area, when the thread is a group chat. */
+  life_area_id?: string | null;
+  life_area_name?: string | null;
+}
+
 export interface LifeAreaRow {
   id: string;
   user_id: string;

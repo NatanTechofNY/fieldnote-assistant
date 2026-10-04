@@ -1,4 +1,5 @@
 import { AlgoliaSync } from "./algolia.ts";
+import { sweepOrphanedAttachmentFiles } from "./attachments.ts";
 import { loadStoreCatalog, openDatabase, resetDatabase, seedDatabase } from "./db.ts";
 
 export type CliCommand = "seed" | "reset" | "reindex" | "setup-algolia";
@@ -13,7 +14,8 @@ export async function runCli(command: CliCommand): Promise<void> {
       await search.flush();
     } else if (command === "reset") {
       resetDatabase(db);
-      console.log(JSON.stringify({ reset: true }));
+      // The rows are gone with their messages; so are the files they named.
+      console.log(JSON.stringify({ reset: true, attachmentFilesRemoved: sweepOrphanedAttachmentFiles(db) }));
     } else if (command === "reindex") {
       console.log(JSON.stringify(await search.reindex()));
     } else {

@@ -61,6 +61,8 @@ The hosted Agent Studio search tool `personal_data_search` reads the first three
 
 **Not indexed, fetched live on every call:** all Jira and Confluence data. The eight Atlassian tools hit the Atlassian REST API through [`server/atlassian-service.ts`](../server/atlassian-service.ts) and return the response to the agent. Nothing is copied into Algolia or SQLite, so there is no staleness window and no second copy of somebody else's data to keep in sync.
 
+**Stored outside SQLite:** the pictures people text the assistant. SQLite holds the `attachments` row (content type, size, hash, description, kind) and `memory_attachments` links; the bytes live as files in `ATTACHMENTS_DIR`, beside the database by default, so they ride the same volume and need the same backup. The files are not indexed. A memory's search record carries only the text of its pictures' descriptions. See "Pictures kept" in [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md).
+
 **Not indexed until you choose:** Granola meeting notes sit in a review queue and only become searchable if you save one as a memory.
 
 ## The agent, two transports, one executor
@@ -133,6 +135,8 @@ SQLite is strongly consistent for this app's reads and writes. Algolia is eventu
 Todos carry `objectID`, `userId`, `title`, `notes`, `status`, `priority`, `category_id`, `category_name`, `parent_id`, `due_at`, `reminder_at`, `extra_reminders`, `recurrence`, `is_recurring` (a facet), `last_completed_at`, `started_at`, `completed_at`, `created_at`, `updated_at`, and the resolved life area (`life_area_id`, `life_area_name`, `life_area_slug`, `life_area_source`). A subtask is a todo whose `parent_id` points at another todo. A repeating todo is one whose `recurrence_json` holds a rule; its `due_at` is the current occurrence, and the completed ones are logged in `todo_completions` (see [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#repeating-todos)).
 
 Memories carry `objectID`, `userId`, `kind` (exactly `fact`, `note`, or `journal`), `title`, `content`, `mood_label`, `mood_score`, `category_id`, `category_name`, `tags`, `occurred_at`, `occurred_on` and `occurred_on_text` (the local day, as `2026-07-31` and `Friday, July 31, 2026`, searchable so a date works as a query term), `review_worthy`, `created_at`, `updated_at`, and the same life-area fields.
+
+Memories also carry `attachment_text`, the descriptions of the pictures saved with them, and it is searchable (the memory index settings list it, so re-run `npm run setup:algolia` after upgrading).
 
 Messages carry `objectID`, `userId`, `threadId`, `channel`, `role`, `content`, and `created_at`. A message from a group chat also carries `group_id` (a `filterOnly` facet), `group_name`, and, on a user message, `speaker_name` — the name from the trusted-contacts list, so recall can answer "what did Cementa ask for". Phone numbers, provider message IDs, delivery metadata, tool inputs and results, and the raw `metadata_json` stay in SQLite only; the completion request likewise names a group speaker by name or by a redacted number, never the full one.
 

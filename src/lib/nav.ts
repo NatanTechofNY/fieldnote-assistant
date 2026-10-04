@@ -1,4 +1,4 @@
-import { Award, BookOpen, Brain, LayoutDashboard, ListTodo, Network, Settings2 } from "lucide-react";
+import { Award, BookOpen, Brain, Images, LayoutDashboard, ListTodo, Network, Settings2 } from "lucide-react";
 
 // The agent is not here on purpose: it is a side panel reachable from anywhere
 // with Cmd/Ctrl+I rather than a page you navigate to.
@@ -15,6 +15,7 @@ export const nav = [
 export const navMore = [
   { to: "/reflections", label: "Reflections", icon: Award },
   { to: "/history", label: "History", icon: BookOpen },
+  { to: "/attachments", label: "Pictures", icon: Images },
 ];
 
 /** The app talking about itself, which belongs in a menu at the bottom. */

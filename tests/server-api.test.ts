@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -28,7 +28,11 @@ import { composeDigestTurn } from "../server/daily-digest.ts";
 import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } from "../server/event-ingestion.ts";
 import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
 import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } from "../server/group-thread.ts";
-import { describeMedia, fillPendingPictures, mediaUrlsOf, unviewedPictures, withMediaLines } from "../server/image-input.ts";
+import { attachmentTextForMemory, deleteAttachment, stageAttachment, sweepOrphanedAttachmentFiles } from "../server/attachments.ts";
+import {
+  describeMedia, describeMediaDetailed, fillPendingPictures, hasImageDescription, mediaUrlsOf, unviewedPictures, withMediaLines,
+  withoutMediaLines,
+} from "../server/image-input.ts";
 import { relevantFacts } from "../server/memory-context.ts";
 import { assertPublicHost, setHostResolver } from "../server/public-fetch.ts";
 import {
@@ -7221,6 +7225,261 @@ describe("Sendblue provider", () => {
   });
 
   /*
+   * A picture texted to the assistant is kept as a file, so a receipt is still
+   * there after the provider's link expires, and it travels with the memory
+   * the turn saves from it.
+   */
+  describe("saved pictures", () => {
+    const receipt = "https://cdn.sendblue.example/receipt.jpg";
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("a receipt from Corner Market")]);
+    let scratch = "";
+
+    function keepFilesInScratch() {
+      scratch = mkdtempSync(join(tmpdir(), "fieldnote-attachments-test-"));
+      process.env.ATTACHMENTS_DIR = scratch;
+    }
+
+    afterEach(() => {
+      delete process.env.ATTACHMENTS_DIR;
+      if (scratch) rmSync(scratch, { recursive: true, force: true });
+      scratch = "";
+    });
+
+    /** The network: the picture's link, and a vision model that reads a receipt twice (a glance, then in detail). */
+    function network(seen: string[], vision: string[] = []) {
+      const fetcher: typeof fetch = async (input, init) => {
+        const url = String(input);
+        seen.push(url);
+        if (url === receipt) return new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: unknown }> };
+        const detailed = String(body.messages[0].content).includes("transcribe");
+        vision.push(detailed ? "detailed" : "glance");
+        return json({ choices: [{ message: { content: detailed
+          ? "Corner Market, Oct 3 2026, invoice 4471. Oat milk 4.50, eggs 6.20, total 42.17 USD, paid by Visa."
+          : "DOCUMENT: A grocery receipt from Corner Market." } }] });
+      };
+      return fetcher;
+    }
+
+    function workerFor(agent: typeof fetch, fetcher: typeof fetch) {
+      return {
+        runSmsAgent: async (...args: Parameters<typeof runSmsAgent>) =>
+          runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher: agent }),
+        sendSms: async () => ({ sid: `SB_out_${crypto.randomUUID()}`, status: "queued" as const }),
+        pollGranola: async () => ({ fetched: 0, queued: 0 }),
+        startTypingIndicator: () => () => {},
+        fetch: fetcher,
+      };
+    }
+
+    it("keeps the picture, transcribes a receipt, and attaches it to the memory the turn saves", () => withEnv({
+      OPENAI_API_KEY: "sk-test",
+      OPENAI_BASE_URL: undefined,
+      OPENAI_DOCUMENT_DETAIL: undefined,
+    }, async () => {
+      keepFilesInScratch();
+      const { db, api } = connectedFixture();
+      withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+      agentStudioEnv();
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`)
+        .send(groupMessage(WIFE, "", { media_url: receipt, message_handle: "SB_receipt" })).expect(200);
+      const seen: string[] = [];
+      const vision: string[] = [];
+      const agent = agentCallingMany([
+        { tool: "create_memory", input: { title: "Corner Market", content: "Groceries, 42.17 USD on Oct 3.", kind: "note" } },
+      ], "Saved it.");
+      await runWorkerOnce(db, fakeSearch(db), workerFor(agent.fetcher, network(seen, vision)) as never);
+
+      assert.deepEqual(seen.filter(url => url === receipt), [receipt], "the picture is downloaded once, then read from disk");
+      assert.deepEqual(vision, ["glance", "detailed"], "a document is read again in detail");
+      const archived = db.prepare("SELECT id,content FROM channel_messages WHERE provider_message_id='SB_receipt'").get() as { id: string; content: string };
+      assert.match(archived.content, /^\[Image \(document\): Corner Market, Oct 3 2026, invoice 4471\..*total 42\.17 USD/);
+      assert.match(JSON.stringify(agent.requests[0]), /invoice 4471/, "the agent reads the figures");
+
+      const rows = db.prepare("SELECT * FROM attachments").all() as Array<Record<string, string | number | null>>;
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].channel_message_id, archived.id, "the staged file is tied to the archived message");
+      assert.equal(rows[0].kind, "document");
+      assert.equal(rows[0].content_type, "image/jpeg");
+      assert.equal(rows[0].byte_size, jpeg.length);
+      assert.match(String(rows[0].description), /Corner Market/);
+      assert.deepEqual(readFileSync(join(scratch, String(rows[0].file_name))), jpeg, "the bytes are on disk");
+
+      const memory = db.prepare("SELECT id FROM memories").get() as { id: string };
+      const linked = db.prepare("SELECT attachment_id FROM memory_attachments WHERE memory_id=?").all(memory.id);
+      assert.deepEqual(linked, [{ attachment_id: rows[0].id }]);
+      const toolRow = toolOutputs(db, `group:${GROUP}`).create_memory.data as { attachments: Array<{ id: string; kind: string }> };
+      assert.deepEqual(toolRow.attachments.map(item => [item.id, item.kind]), [[rows[0].id, "document"]], "the tool result carries the picture");
+
+      // The app serves it back, lists it, and carries it on the memory.
+      const fetched = await api.get(`/api/attachments/${rows[0].id}/file`).expect(200);
+      assert.equal(fetched.headers["content-type"], "image/jpeg");
+      assert.equal(fetched.headers["x-content-type-options"], "nosniff");
+      assert.deepEqual(Buffer.from(fetched.body), jpeg);
+      const listed = (await api.get("/api/attachments").expect(200)).body.data;
+      assert.equal(listed.attachments.length, 1);
+      assert.deepEqual(listed.attachments[0].memory_ids, [memory.id]);
+      assert.equal(listed.attachments[0].life_area_name, "Home", "a group's picture says whose it is");
+      assert.equal((await api.get("/api/attachments?kind=photo").expect(200)).body.data.attachments.length, 0);
+      const viaMemory = (await api.get(`/api/memories/${memory.id}`).expect(200)).body.data;
+      assert.equal(viaMemory.attachments[0].url, `/api/attachments/${rows[0].id}/file`);
+      const inList = (await api.get("/api/memories").expect(200)).body.data.memories;
+      assert.equal(inList[0].attachments.length, 1);
+      assert.match(attachmentTextForMemory(db, memory.id), /invoice 4471/, "the memory's search record can match the receipt");
+      assert.match(JSON.stringify(new AlgoliaSync(db, { client: null }).projection("memory", memory.id)), /invoice 4471/);
+
+      // A retry answers the words it archived, fetching and storing nothing again.
+      db.prepare("UPDATE external_events SET status='pending',available_at=? WHERE external_id='SB_receipt'").run(new Date(Date.now() - 1000).toISOString());
+      seen.length = 0;
+      await runWorkerOnce(db, fakeSearch(db), workerFor(agentCallingMany([], "Saved.").fetcher, network(seen, vision)) as never);
+      assert.deepEqual(seen, []);
+      assert.equal((db.prepare("SELECT count(*) n FROM attachments").get() as { n: number }).n, 1);
+      assert.equal(readdirSync(scratch).length, 1);
+
+      // Deleting it takes the row, the link, and the file.
+      await api.delete(`/api/attachments/${rows[0].id}`).expect(200);
+      assert.equal(readdirSync(scratch).length, 0);
+      assert.equal((db.prepare("SELECT count(*) n FROM memory_attachments").get() as { n: number }).n, 0);
+      await api.get(`/api/attachments/${rows[0].id}/file`).expect(404);
+      await api.delete(`/api/attachments/${rows[0].id}`).expect(404);
+      assert.equal(db.prepare("SELECT 1 FROM memories WHERE id=?").get(memory.id) !== undefined, true, "the memory stays");
+    }));
+
+    it("keeps the picture even when there is no way to see it", () => withEnv({ OPENAI_API_KEY: undefined }, async () => {
+      keepFilesInScratch();
+      const { db, api } = connectedFixture();
+      withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+      agentStudioEnv();
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`)
+        .send(groupMessage(WIFE, "keep this", { media_url: receipt, message_handle: "SB_unseen" })).expect(200);
+      const seen: string[] = [];
+      await runWorkerOnce(db, fakeSearch(db), workerFor(agentCallingMany([], "Got it.").fetcher, network(seen)) as never);
+      assert.deepEqual(seen, [receipt], "only the download; nothing is sent to a vision model");
+      const row = db.prepare("SELECT description,kind,channel_message_id FROM attachments").get() as { description: string | null; kind: string; channel_message_id: string | null };
+      assert.equal(row.description, null);
+      assert.equal(row.kind, "photo");
+      assert.ok(row.channel_message_id);
+      assert.equal(readdirSync(scratch).length, 1);
+    }));
+
+    it("saves a picture held while the group asked the assistant to stay out", () => withEnv({ OPENAI_API_KEY: undefined }, async () => {
+      keepFilesInScratch();
+      const { db, api } = connectedFixture();
+      withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+      agentStudioEnv();
+      const address = `group:${GROUP}`;
+      await runSmsAgent(db, fakeSearch(db), address, "hello", "SB_hello_held", groupTurnOptions(agentCallingMany([], "Hi!").fetcher, RECIPIENT, "the owner"));
+      const threadId = (db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string }).id;
+      db.prepare("UPDATE life_areas SET reply_mode='named_only' WHERE thread_id=?").run(threadId);
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`)
+        .send(groupMessage(WIFE, "", { media_url: receipt, message_handle: "SB_held_receipt" })).expect(200);
+      await runWorkerOnce(db, fakeSearch(db), workerFor(agentCallingMany([], "no").fetcher, network([])) as never);
+      const held = db.prepare("SELECT id,content,metadata_json FROM channel_messages WHERE provider_message_id='SB_held_receipt'").get() as { id: string; content: string; metadata_json: string };
+      assert.equal(JSON.parse(held.metadata_json).heldUntilNamed, true, "the assistant stayed out of it");
+      const row = db.prepare("SELECT channel_message_id FROM attachments").get() as { channel_message_id: string };
+      assert.equal(row.channel_message_id, held.id, "the picture is saved before anyone asks about it");
+      assert.equal(readdirSync(scratch).length, 1);
+    }));
+
+    it("skips the detailed read when it is turned off, and falls back to the glance when it fails", () => withEnv({
+      OPENAI_API_KEY: "sk-test", OPENAI_BASE_URL: undefined,
+    }, async () => {
+      const calls: Array<{ detail: string; system: string }> = [];
+      const reads: typeof fetch = async (input, init) => {
+        if (String(input) === receipt) return new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: unknown }> };
+        const user = body.messages[1].content as Array<{ image_url: { detail: string } }>;
+        calls.push({ detail: user[0].image_url.detail, system: String(body.messages[0].content) });
+        if (calls.length > 1 && calls.at(-1)?.detail === "high") return new Response("busy", { status: 503 });
+        return json({ choices: [{ message: { content: "DOCUMENT: An invoice from Acme for $90." } }] });
+      };
+      await withEnv({ OPENAI_DOCUMENT_DETAIL: "off" }, async () => {
+        const [off] = await describeMediaDetailed([receipt], reads);
+        assert.deepEqual(calls.map(call => call.detail), ["low"]);
+        assert.deepEqual(off, { line: "[Image (document): An invoice from Acme for $90.]", description: "An invoice from Acme for $90.", kind: "document" });
+      });
+      calls.length = 0;
+      const [failed] = await describeMediaDetailed([receipt], reads);
+      assert.deepEqual(calls.map(call => call.detail), ["low", "high"]);
+      assert.equal(failed.line, "[Image (document): An invoice from Acme for $90.]", "a failed second read keeps the first");
+      assert.equal(failed.kind, "document");
+      // A photo is described once, at low detail, as before.
+      const photo: typeof fetch = async input => String(input) === receipt
+        ? new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } })
+        : json({ choices: [{ message: { content: "A dog on a beach." } }] });
+      assert.deepEqual(await describeMediaDetailed([receipt], photo), [{ line: "[Image: A dog on a beach.]", description: "A dog on a beach.", kind: "photo" }]);
+      assert.equal(hasImageDescription("see\n[Image (document): total 5]"), true);
+      assert.equal(withoutMediaLines("see\n[Image (document): total 5]"), "see");
+    }));
+
+    /** A bare group thread and the turn context for answering in it. */
+    function groupContext(db: Db, threadId: string) {
+      const stamp = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+        VALUES(?,?,'sms',?,?,?,?)
+      `).run(threadId, USER_ID, `group:${threadId}`, `alg_cnv_${threadId}`, stamp, stamp);
+      const area = ensureGroupLifeArea(db, threadId, threadId);
+      const context: ToolTurnContext = {
+        channel: "sms", address: `group:${threadId}`, threadId, provider: "sendblue", groupId: threadId,
+        scope: { lifeAreaId: area.id, threadId }, speakerIsOwner: false, inboundMessageHandle: `SB_${threadId}`,
+      };
+      return { area, context };
+    }
+
+    it("shares one file between identical pictures and removes it with the last one", async () => {
+      keepFilesInScratch();
+      const { db } = fixture();
+      const { context: first } = groupContext(db, "thread_pic_a");
+      const { context: second } = groupContext(db, "thread_pic_b");
+      const stage = (threadId: string, handle: string) => stageAttachment(db, {
+        threadId, providerMessageId: handle, sourceUrl: receipt, contentType: "image/jpeg", bytes: jpeg,
+      });
+      const a = stage(first.threadId, "SB_a");
+      const again = stage(first.threadId, "SB_a");
+      const b = stage(second.threadId, "SB_b");
+      assert.equal(again.id, a.id, "staging the same message and link twice is one picture");
+      assert.equal(a.file_name, b.file_name, "identical bytes share a file");
+      assert.equal(readdirSync(scratch).length, 1);
+      assert.equal(deleteAttachment(db, a.id), true);
+      assert.equal(readdirSync(scratch).length, 1, "the other picture still needs the file");
+      assert.equal(deleteAttachment(db, b.id), true);
+      assert.equal(readdirSync(scratch).length, 0);
+
+      // Files no row names are swept, and only files this app wrote.
+      const orphan = stage(first.threadId, "SB_c");
+      db.prepare("DELETE FROM attachments WHERE id=?").run(orphan.id);
+      writeFileSync(join(scratch, "notes.txt"), "not ours");
+      assert.equal(sweepOrphanedAttachmentFiles(db), 1);
+      assert.deepEqual(readdirSync(scratch), ["notes.txt"]);
+    });
+
+    it("attaches only pictures from the thread the turn is answering", async () => {
+      keepFilesInScratch();
+      const { db } = fixture();
+      const { context: mine } = groupContext(db, "thread_pic_mine");
+      const { context: other } = groupContext(db, "thread_pic_other");
+      const theirs = stageAttachment(db, { threadId: other.threadId, providerMessageId: "SB_theirs", sourceUrl: receipt, contentType: "image/jpeg", bytes: jpeg });
+      const ours = stageAttachment(db, { threadId: mine.threadId, providerMessageId: "SB_ours", sourceUrl: `${receipt}?own`, contentType: "image/jpeg", bytes: Buffer.from("other bytes") });
+      const created = await executeAgentTool(db, { flushSoon() {} }, "create_memory", { title: "Receipt", content: "x", kind: "note" }, {
+        ...mine, turnAttachmentIds: [theirs.id, ours.id],
+      }) as { id: string; attachments: Array<{ id: string }> };
+      assert.deepEqual(created.attachments.map(item => item.id), [ours.id], "another chat's picture is never attached");
+      const queued = db.prepare("SELECT count(*) n FROM index_jobs WHERE entity_id=? AND entity_type='memory'").get(created.id) as { n: number };
+      assert.ok(queued.n > 0, "the memory is reindexed with its picture");
+
+      // Updating a memory in the turn attaches the turn's picture to it too.
+      const note = await executeAgentTool(db, { flushSoon() {} }, "create_memory", { title: "Later", content: "y", kind: "note" }, mine) as { id: string };
+      const updated = await executeAgentTool(db, { flushSoon() {} }, "update_memory", { id: note.id, patch: { content: "y, with the picture" } }, {
+        ...mine, turnAttachmentIds: [ours.id],
+      }) as { attachments: Array<{ id: string }> };
+      assert.deepEqual(updated.attachments.map(item => item.id), [ours.id]);
+      const got = await executeAgentTool(db, { flushSoon() {} }, "get_memory", { id: note.id }, mine) as { attachments: unknown[] };
+      assert.equal(got.attachments.length, 1);
+    });
+  });
+
+  /*
    * A row written before the archive said who placed what has only
    * `reactions`. A progress-mark emoji on it is read as the runtime's, unless
    * the agent is on record choosing that emoji for this message.
@@ -11708,6 +11967,13 @@ describe("authentication", () => {
     const health = await api.get("/api/health").expect(200);
     assert.deepEqual(health.body.data, { ok: true }, "anonymous callers get liveness only");
     await api.post("/api/webhooks/twilio/status").send({ MessageSid: "SM_none" }).expect(204);
+  });
+
+  it("keeps saved pictures behind the sign-in", async () => {
+    const { api } = authFixture();
+    await api.get("/api/attachments").expect(401);
+    await api.get("/api/attachments/attachment_x/file").expect(401);
+    await api.delete("/api/attachments/attachment_x").expect(401);
   });
 
   it("sends browsers to the login page and answers the API with 401", async () => {

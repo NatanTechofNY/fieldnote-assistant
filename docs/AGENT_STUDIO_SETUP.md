@@ -93,6 +93,8 @@ These are denormalized retrieval projections. Do not put secrets, tokens, privat
 
 `occurred_on` and `occurred_on_text` are the day the memory belongs to — `occurred_at` when it has one, otherwise `created_at` — in the user's timezone, and both are in `searchableAttributes`. Timestamps are returned with a hit but never matched, so without them "what was my mood on July 31" had no query that could reach a record whose text does not name the date. They are deliberately *not* exposed as a facet: a date typed as a query term still lets the rest of the words rank, where a facet filter with the day off by one would hide the record.
 
+`attachment_text` is the descriptions of the pictures saved with the memory (a receipt's vendor, date, and total, say), and it is in `searchableAttributes` too. It is why a memory is rebuilt when a picture is linked to it, and why an upgrade needs **Configure Algolia** (or `npm run setup:algolia`) and then **Reindex**: the setting is not pushed by a reindex, and memories saved before have no `attachment_text`. A transcribed document is as sensitive as any memory, so a picture of anything you would not put in a memory should be deleted from the Pictures page rather than left for the index. **Sync Agent config** is needed as well, because the system prompt now says what a `[Image (document): …]` line is.
+
 ## 3. Apply index settings
 
 `agent-studio/indices/*.json` is the single source of truth for index settings. `npm run setup:algolia` reads those exact files and passes each one to the Search API `setSettings` operation, so there is nothing to copy by hand:

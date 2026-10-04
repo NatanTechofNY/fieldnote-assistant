@@ -335,6 +335,37 @@ CREATE TABLE IF NOT EXISTS digest_briefs (
   UNIQUE(user_id, name)
 );
 CREATE INDEX IF NOT EXISTS digest_briefs_due ON digest_briefs(user_id, enabled, send_time);
+-- Pictures texted to the assistant, kept as files beside the database (see
+-- server/attachments.ts). A file is staged before the message that carried it
+-- is archived, so channel_message_id starts null and is filled in by the
+-- provider's message id. Deleting the message deletes the rows; the file goes
+-- with the last row that names it.
+CREATE TABLE IF NOT EXISTS attachments (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  channel_message_id TEXT REFERENCES channel_messages(id) ON DELETE CASCADE,
+  thread_id TEXT NOT NULL REFERENCES channel_threads(id) ON DELETE CASCADE,
+  provider_message_id TEXT,
+  source_url TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  description TEXT,
+  kind TEXT NOT NULL DEFAULT 'photo' CHECK(kind IN ('photo','document')),
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS attachments_source
+  ON attachments(thread_id, COALESCE(provider_message_id,''), source_url);
+CREATE INDEX IF NOT EXISTS attachments_message ON attachments(channel_message_id);
+CREATE INDEX IF NOT EXISTS attachments_created ON attachments(created_at);
+CREATE TABLE IF NOT EXISTS memory_attachments (
+  memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(memory_id, attachment_id)
+);
+CREATE INDEX IF NOT EXISTS memory_attachments_attachment ON memory_attachments(attachment_id);
 `;
 
 function columns(db: Db, table: string): Set<string> {

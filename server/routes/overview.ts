@@ -53,7 +53,7 @@ export function registerOverviewRoutes({ app, db }: RouteContext): void {
       due_today: todoRows.filter((todo) => todo.due_at
         && localDate(todo.due_at) === today
         && todo.status !== "done" && todo.status !== "cancelled").map(todoJson),
-      recent_memories: memories.map(memoryJson),
+      recent_memories: memories.map(row => memoryJson(row)),
       /*
        * Only what is still ahead: a due-date row is never delivered, so without
        * a horizon every overdue task would sit at the top of this list forever

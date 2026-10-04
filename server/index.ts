@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { createApp } from "./app.ts";
+import { sweepOrphanedAttachmentFiles } from "./attachments.ts";
 import { runCli, type CliCommand } from "./cli.ts";
 import { loadStoreCatalog } from "./db.ts";
 import { startWorker } from "./worker.ts";
@@ -37,6 +38,8 @@ if (selectedFlag) {
   // The demo catalog lives in a checked-in file; a changed entry is queued for
   // indexing here and reaches Algolia on the worker's first flush.
   loadStoreCatalog(db);
+  // A thread deleted while the app was down leaves its pictures on disk.
+  sweepOrphanedAttachmentFiles(db);
   const stopWorker = startWorker(db, search);
   const server = app.listen(port, () => {
     console.log(`Personal assistant API listening on http://localhost:${port}`);

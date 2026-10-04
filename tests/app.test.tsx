@@ -102,6 +102,21 @@ const taskPreferences = { autoCompleteParent: false };
 /** Every SMS schedule the settings page saved. */
 const notificationSaves: Array<Record<string, unknown>> = [];
 
+/** Pictures texted to the assistant and kept on the server. */
+const savedPictures = [
+  {
+    id: "attachment_receipt", kind: "document", content_type: "image/jpeg", byte_size: 2048,
+    description: "Corner Market, invoice 4471, total 42.17 USD.", url: "/api/attachments/attachment_receipt/file",
+    life_area_id: null, life_area_name: null, created_at: "2026-07-23T12:00:00.000Z", memory_ids: ["memory_1"],
+  },
+  {
+    id: "attachment_dog", kind: "photo", content_type: "image/jpeg", byte_size: 1024,
+    description: "A dog on a beach.", url: "/api/attachments/attachment_dog/file",
+    life_area_id: "area_group", life_area_name: "Home", created_at: "2026-07-22T12:00:00.000Z", memory_ids: [],
+  },
+];
+const deletedAttachments: string[] = [];
+
 const memory = (over: Partial<Record<string, unknown>> = {}) => ({
   id: "memory_1",
   kind: "note",
@@ -308,6 +323,18 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     return new Response(JSON.stringify({
       success: true,
       data: todos.filter(item => includeDone || item.status !== "done"),
+    }));
+  }
+  if (url.includes("/api/attachments")) {
+    if (init?.method === "DELETE") {
+      const id = url.split("/").pop() as string;
+      deletedAttachments.push(id);
+      return new Response(JSON.stringify({ success: true, data: { id } }));
+    }
+    const kind = new URLSearchParams(url.split("?")[1] || "").get("kind");
+    return new Response(JSON.stringify({
+      success: true,
+      data: { attachments: savedPictures.filter(item => !kind || item.kind === kind), next_before: null },
     }));
   }
   if (url.includes("/api/memories?") || url.endsWith("/api/memories")) {
@@ -2830,6 +2857,29 @@ it("opens a task from the keyboard and traps focus in the editor", async () => {
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(document.activeElement).toBe(title);
+});
+
+it("lists the pictures the assistant kept, filters them, and deletes one", async () => {
+  renderAt("/attachments");
+  expect(await screen.findByText("Pictures, kept.")).toBeInTheDocument();
+  expect(await screen.findByText("Corner Market, invoice 4471, total 42.17 USD.")).toBeInTheDocument();
+  expect(screen.getByText("A dog on a beach.")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "From memory" })).toHaveAttribute("href", "/memories?open=memory_1");
+  expect(screen.getAllByRole("img")[0]).toHaveAttribute("src", "/api/attachments/attachment_receipt/file");
+
+  await userEvent.click(screen.getByRole("button", { name: "Documents" }));
+  await waitFor(() => expect(screen.queryByText("A dog on a beach.")).not.toBeInTheDocument());
+  expect(requestedUrls.some(url => url.includes("/api/attachments?") && url.includes("kind=document"))).toBe(true);
+
+  // The full picture opens beside what was read off it.
+  await userEvent.click(screen.getByRole("button", { name: "Open the picture" }));
+  const viewer = await screen.findByRole("dialog");
+  expect(within(viewer).getByRole("img")).toHaveAttribute("src", "/api/attachments/attachment_receipt/file");
+  await userEvent.keyboard("{Escape}");
+
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  await userEvent.click(screen.getByRole("button", { name: "Delete picture" }));
+  await waitFor(() => expect(deletedAttachments).toEqual(["attachment_receipt"]));
 });
 
 it("switches memory views and searches by meaning", async () => {
