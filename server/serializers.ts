@@ -1,7 +1,8 @@
+import { attachmentJson } from "./attachments.ts";
 import { id, now, USER_ID } from "./db.ts";
 import { parseMoods } from "./moods.ts";
 import { parseRecurrence, recurrenceJson } from "./recurrence.ts";
-import type { Db, MemoryRow, MessageRow, ReminderRow, TodoCompletionRow, TodoRow, TodoStatus } from "./types.ts";
+import type { AttachmentRow, Db, MemoryRow, MessageRow, ReminderRow, TodoCompletionRow, TodoRow, TodoStatus } from "./types.ts";
 
 export function todoJson(row: TodoRow): Record<string, unknown> {
   return {
@@ -39,7 +40,8 @@ export function completionJson(row: TodoCompletionRow): Record<string, unknown> 
   return { id: row.id, occurrence_at: row.occurrence_at, completed_at: row.completed_at };
 }
 
-export function memoryJson(row: MemoryRow): Record<string, unknown> {
+/** `attachments` is the memory's saved pictures; leave it out where they were not looked up. */
+export function memoryJson(row: MemoryRow, attachments?: AttachmentRow[]): Record<string, unknown> {
   return {
     id: row.id,
     title: row.title,
@@ -59,6 +61,7 @@ export function memoryJson(row: MemoryRow): Record<string, unknown> {
     tags: JSON.parse(row.tags_json) as string[],
     created_at: row.created_at,
     updated_at: row.updated_at,
+    ...(attachments ? { attachments: attachments.map(attachment => attachmentJson(attachment)) } : {}),
   };
 }
 

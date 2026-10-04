@@ -26,6 +26,8 @@ beforeEach(() => {
   // each test open in whatever state the one before it left behind.
   window.localStorage.clear();
   servedLifeAreas = lifeAreas;
+  deletedAttachments.length = 0;
+  attachmentDeleteFails = false;
 });
 
 const health = {
@@ -102,6 +104,23 @@ const taskPreferences = { autoCompleteParent: false };
 /** Every SMS schedule the settings page saved. */
 const notificationSaves: Array<Record<string, unknown>> = [];
 
+/** Pictures texted to the assistant and kept on the server. */
+const savedPictures = [
+  {
+    id: "attachment_receipt", kind: "document", content_type: "image/jpeg", byte_size: 2048,
+    description: "Corner Market, invoice 4471, total 42.17 USD.", url: "/api/attachments/attachment_receipt/file",
+    life_area_id: null, life_area_name: null, created_at: "2026-07-23T12:00:00.000Z", memory_ids: ["memory_1"],
+  },
+  {
+    id: "attachment_dog", kind: "photo", content_type: "image/jpeg", byte_size: 1024,
+    description: "A dog on a beach.", url: "/api/attachments/attachment_dog/file",
+    life_area_id: "area_group", life_area_name: "Home", created_at: "2026-07-22T12:00:00.000Z", memory_ids: [],
+  },
+];
+const deletedAttachments: string[] = [];
+/** A test about a delete the server refuses sets this. */
+let attachmentDeleteFails = false;
+
 const memory = (over: Partial<Record<string, unknown>> = {}) => ({
   id: "memory_1",
   kind: "note",
@@ -125,7 +144,7 @@ const memory = (over: Partial<Record<string, unknown>> = {}) => ({
 
 const memories = [
   memory(),
-  memory({ id: "memory_fact", kind: "fact", title: "Venue wifi", content: "Guest network is throttled." }),
+  memory({ id: "memory_fact", kind: "fact", title: "Venue wifi", content: "Guest network is throttled.", attachments: [savedPictures[0]] }),
   memory({
     id: "memory_journal",
     kind: "journal",
@@ -308,6 +327,19 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     return new Response(JSON.stringify({
       success: true,
       data: todos.filter(item => includeDone || item.status !== "done"),
+    }));
+  }
+  if (url.includes("/api/attachments")) {
+    if (init?.method === "DELETE") {
+      if (attachmentDeleteFails) return new Response(JSON.stringify({ success: false, error: { message: "Disk is read-only" } }), { status: 500 });
+      const id = url.split("/").pop() as string;
+      deletedAttachments.push(id);
+      return new Response(JSON.stringify({ success: true, data: { id } }));
+    }
+    const kind = new URLSearchParams(url.split("?")[1] || "").get("kind");
+    return new Response(JSON.stringify({
+      success: true,
+      data: { attachments: savedPictures.filter(item => !kind || item.kind === kind), next_before: null },
     }));
   }
   if (url.includes("/api/memories?") || url.endsWith("/api/memories")) {
@@ -2830,6 +2862,67 @@ it("opens a task from the keyboard and traps focus in the editor", async () => {
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(document.activeElement).toBe(title);
+});
+
+it("lists the pictures the assistant kept, filters them, and deletes one", async () => {
+  renderAt("/attachments");
+  expect(await screen.findByText("Pictures, kept.")).toBeInTheDocument();
+  expect(await screen.findByText("Corner Market, invoice 4471, total 42.17 USD.")).toBeInTheDocument();
+  expect(screen.getByText("A dog on a beach.")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "From memory" })).toHaveAttribute("href", "/memories?open=memory_1");
+  // The card's picture is decoration (its name is on the button), so it has no image role.
+  const openReceipt = screen.getByRole("button", { name: /^Open saved document/ });
+  expect(openReceipt.querySelector("img")).toHaveAttribute("src", "/api/attachments/attachment_receipt/file");
+
+  await userEvent.click(screen.getByRole("button", { name: "Documents" }));
+  await waitFor(() => expect(screen.queryByText("A dog on a beach.")).not.toBeInTheDocument());
+  expect(requestedUrls.some(url => url.includes("/api/attachments?") && url.includes("kind=document"))).toBe(true);
+
+  // The full picture opens beside what was read off it.
+  await userEvent.click(screen.getByRole("button", { name: /^Open saved document/ }));
+  const viewer = await screen.findByRole("dialog");
+  expect(within(viewer).getByRole("img")).toHaveAttribute("src", "/api/attachments/attachment_receipt/file");
+  await userEvent.keyboard("{Escape}");
+
+  const listRequests = () => requestedUrls.filter(url => url.includes("/api/attachments?")).length;
+  const before = listRequests();
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  try {
+    await userEvent.click(screen.getByRole("button", { name: /^Delete saved document/ }));
+    await waitFor(() => expect(deletedAttachments).toEqual(["attachment_receipt"]));
+    expect(confirmSpy.mock.calls[0][0]).toMatch(/conversation/i);
+    await waitFor(() => expect(listRequests()).toBeGreaterThan(before));
+  } finally {
+    confirmSpy.mockRestore();
+  }
+});
+
+it("says so when a picture could not be deleted", async () => {
+  attachmentDeleteFails = true;
+  renderAt("/attachments");
+  expect(await screen.findByText("A dog on a beach.")).toBeInTheDocument();
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  try {
+    await userEvent.click(screen.getByRole("button", { name: /^Delete saved document/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not be deleted");
+    expect(deletedAttachments).toEqual([]);
+  } finally {
+    confirmSpy.mockRestore();
+  }
+});
+
+it("looks at a memory's picture without opening the memory behind it", async () => {
+  renderAt("/memories");
+  expect(await screen.findByText("Venue wifi")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: /^Open saved document/ }));
+  const viewer = await screen.findByRole("dialog");
+  // The viewer is drawn outside the row but React still routes its clicks through it.
+  await userEvent.click(within(viewer).getByRole("img"));
+  await userEvent.click(within(viewer).getByText("Corner Market, invoice 4471, total 42.17 USD."));
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 });
 
 it("switches memory views and searches by meaning", async () => {

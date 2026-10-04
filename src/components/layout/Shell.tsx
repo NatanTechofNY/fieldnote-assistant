@@ -12,6 +12,7 @@ import { ReminderWatcher } from "../ReminderWatcher";
 import { ThemeToggle } from "../ui";
 import { AgentPanel } from "./AgentPanel";
 import { ConversationHistoryPage } from "../../features/history/ConversationHistoryPage";
+import { AttachmentsPage } from "../../features/attachments/AttachmentsPage";
 import { MemoriesPage } from "../../features/memories/MemoriesPage";
 import { OverviewPage } from "../../features/overview/OverviewPage";
 import { ReflectionsPage } from "../../features/reflections/ReflectionsPage";
@@ -90,6 +91,7 @@ function ShellBody() {
         {/* The agent used to be a page; the panel replaces it, so old links
             open the panel over the dashboard instead of 404ing. */}
         <Route path="/chat" element={<AgentRedirect />} />
+        <Route path="/attachments" element={<AttachmentsPage />} />
         <Route path="/history" element={<ConversationHistoryPage />} />
         <Route path="/settings" element={<IntegrationsPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />

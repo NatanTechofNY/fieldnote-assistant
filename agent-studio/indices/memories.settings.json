@@ -2,6 +2,7 @@
   "searchableAttributes": [
     "unordered(title)",
     "unordered(content)",
+    "unordered(attachment_text)",
     "unordered(mood_label)",
     "unordered(tags)",
     "unordered(occurred_on_text)",

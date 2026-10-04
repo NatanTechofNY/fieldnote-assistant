@@ -1,5 +1,5 @@
 import type {
-  AgentTurnMemory, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
+  AgentTurnMemory, AttachmentPage, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
   ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoStatus,
   UniversalSearchResult,
@@ -83,6 +83,13 @@ export const api = {
     request<Memory>(`/memories/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteMemory: (id: string) => request<{ id: string }>(`/memories/${id}`, { method: "DELETE" }),
   memory: (id: string) => request<Memory>(`/memories/${id}`),
+  attachments: (params?: { kind?: "photo" | "document"; before?: string | null }) => {
+    const query = new URLSearchParams();
+    if (params?.kind) query.set("kind", params.kind);
+    if (params?.before) query.set("before", params.before);
+    return request<AttachmentPage>(`/attachments?${query}`);
+  },
+  deleteAttachment: (id: string) => request<{ id: string }>(`/attachments/${id}`, { method: "DELETE" }),
   categories: () => request<Category[]>("/categories"),
   lifeAreas: () => request<LifeArea[]>("/life-areas"),
   createLifeArea: (input: { name: string; color: string }) =>

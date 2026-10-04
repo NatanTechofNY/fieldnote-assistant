@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { sweepOrphanedAttachmentFiles } from "../attachments.ts";
 import { resetDatabase, seedDatabase } from "../db.ts";
 import { success } from "../http.ts";
 import { saveSearchPreferences } from "../integrations.ts";
@@ -9,13 +10,15 @@ export function registerAdminRoutes({ app, db, search, agentStudio }: RouteConte
   app.post("/api/admin/seed", (req, res) => {
     z.object({ confirmation: z.literal("SEED") }).strict().parse(req.body);
     const result = seedDatabase(db);
+    // Seeding starts from an empty database, so the pictures it had go too.
+    sweepOrphanedAttachmentFiles(db, { graceMs: 0 });
     search.flushSoon();
     return success(res, result);
   });
   app.post("/api/admin/reset", (req, res) => {
     z.object({ confirmation: z.literal("RESET") }).strict().parse(req.body);
     resetDatabase(db);
-    return success(res, { reset: true });
+    return success(res, { reset: true, attachmentFilesRemoved: sweepOrphanedAttachmentFiles(db, { graceMs: 0 }) });
   });
   app.post("/api/admin/reindex", async (_req, res) => success(res, await search.reindex()));
   // Tags facts that read like preferences, so every turn carries them. A dry

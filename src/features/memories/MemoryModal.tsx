@@ -4,7 +4,7 @@ import { api } from "../../api";
 import type {
   LifeArea, Memory, MemoryKind,
 } from "../../types";
-import { Field, MarkdownEditor, Modal, MoodPill } from "../../components/ui";
+import { AttachmentThumbs, Field, MarkdownEditor, Modal, MoodPill } from "../../components/ui";
 import { defaultMoodLabel, moodEmoji } from "../../lib/mood";
 import { toZonedDateTimeLocal, useTimezone, zonedDateTimeLocalToIso } from "../../lib/timezone";
 import { invalidateContent } from "../../lib/invalidate";
@@ -56,6 +56,7 @@ export function MemoryModal({ memory, defaultKind, lifeAreas, onClose }: { memor
       <Field label="Kind"><select className="select" value={kind} onChange={e => setKind(e.target.value as MemoryKind)}><option value="fact">Fact</option><option value="note">Note</option><option value="journal">Journal</option></select></Field>
       <Field label="Title"><input className="input" value={title} onChange={e => setTitle(e.target.value)} placeholder="Optional, but useful" /></Field>
       <Field label="What should I remember?"><MarkdownEditor value={content} onChange={setContent} required autoFocus /></Field>
+      {memory?.attachments?.length ? <Field label="Saved pictures"><AttachmentThumbs attachments={memory.attachments} size={64}/></Field> : null}
       <div className="form-grid">
         <Field label="Life area"><select className="select" value={lifeAreaId} onChange={e => setLifeAreaId(e.target.value)}><option value="">Unclassified</option>{lifeAreas.map(area => <option value={area.id} key={area.id}>{area.name}</option>)}</select></Field>
         <Field label={`Occurred · ${timezone}`}><input type="datetime-local" className="input" value={occurredAt} onChange={e => setOccurredAt(e.target.value)} /></Field>

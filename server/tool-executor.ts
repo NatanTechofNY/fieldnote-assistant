@@ -1,4 +1,5 @@
 import type { AlgoliaSync } from "./algolia.ts";
+import { attachmentJson, attachmentsForMemory, linkMemoryAttachments } from "./attachments.ts";
 import {
   getConfluencePage, getJiraIssue, listConfluenceComments, listConfluencePages,
   listConfluenceSpaces, listJiraBoards, listJiraIssues, listJiraUsers,
@@ -33,7 +34,7 @@ import {
   clearStepSchedules, completeParentIfSettled, completionStats, isStepOfRepeating, reopenStepsForNextOccurrence,
   startParentIfPending, syncOccurrenceCompletion,
 } from "./todo-status.ts";
-import type { Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
+import type { AttachmentRow, Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus } from "./types.ts";
 import {
   assertPublicUrl, linksIn, readWebPage, rememberResults, searchWeb, takeWebCall, wasReturned, webConfig, WebServiceError,
 } from "./web-service.ts";
@@ -94,7 +95,7 @@ const todoJson = (row: TodoRow) => ({
   created_at: row.created_at, updated_at: row.updated_at,
 });
 
-const memoryJson = (row: MemoryRow) => ({
+const memoryJson = (row: MemoryRow, attachments?: AttachmentRow[]) => ({
   id: row.id, title: row.title, content: row.content, kind: row.kind,
   mood_label: row.mood_label, mood_score: row.mood_score, moods: parseMoods(row.moods_json), category_id: row.category_id,
   category_name: row.category_name ?? null, life_area_id: row.life_area_id,
@@ -102,7 +103,12 @@ const memoryJson = (row: MemoryRow) => ({
   life_area_source: row.life_area_source, occurred_at: row.occurred_at,
   review_worthy: Boolean(row.review_worthy), tags: JSON.parse(row.tags_json),
   created_at: row.created_at, updated_at: row.updated_at,
+  // Only the reads of a single memory carry its pictures; a list of drafts does not.
+  ...(attachments ? { attachments: attachments.map(attachment => attachmentJson(attachment)) } : {}),
 });
+
+/** A memory as one tool call returns it: with the saved pictures it holds. */
+const memoryWithPictures = (db: Db, row: MemoryRow) => memoryJson(row, attachmentsForMemory(db, row.id));
 
 export function getReviewEvidence(
   db: Db,
@@ -141,9 +147,9 @@ export function getReviewEvidence(
   });
   return {
     range,
-    memories: memories.map(memoryJson),
+    memories: memories.map(row => memoryJson(row)),
     todos: todos.map(todoJson),
-    memory_candidates: memoryCandidates.map(memoryJson),
+    memory_candidates: memoryCandidates.map(row => memoryJson(row)),
     todo_candidates: todoCandidates.map(todoJson),
     draft: drafts[0] ? memoryJson(drafts[0]) : null,
   };
@@ -213,9 +219,9 @@ export function getReflectionEvidence(
       category_ids: categoryIds,
       sources,
     },
-    memories: memories.map(memoryJson),
+    memories: memories.map(row => memoryJson(row)),
     todos: todos.map(todoJson),
-    memory_candidates: memoryCandidates.filter(inScope).map(memoryJson),
+    memory_candidates: memoryCandidates.filter(inScope).map(row => memoryJson(row)),
     todo_candidates: todoCandidates.filter(inScope).map(todoJson),
     selected: selections.map(item => ({ type: item.entity_type, id: item.entity_id })),
     draft: draft ? memoryJson(draft) : null,
@@ -303,6 +309,14 @@ export type ToolTurnContext = {
   speakerPhone?: string;
   /** The message being answered, and so the only one a tapback may land on. */
   inboundMessageHandle?: string;
+  /**
+   * The saved pictures this turn answers (the ones on its message and, in a
+   * group, those held while the assistant was told to stay out). A memory the
+   * turn creates or updates carries them, which is how a receipt texted in
+   * stays attached to the record that keeps its figures. Only pictures from
+   * this turn's own thread are ever linked.
+   */
+  turnAttachmentIds?: string[];
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
   replyToMessageHandle?: string;
   /**
@@ -1528,7 +1542,14 @@ export async function executeAgentTool(
   if (name === "get_memory") {
     const memory = scopedMemory(db, input.id as string, scope, ownOnly);
     if (!memory) throw new Error("Memory not found");
-    return memoryJson(memory);
+    const found = memoryWithPictures(db, memory);
+    // What a picture said is words from a document the owner did not write, the
+    // same as an `[Image: …]` line in a message: a turn that has read it may
+    // not act on it as the owner's word (see `assertOwnWords`).
+    if (context && found.attachments?.some(picture => picture.description)) {
+      context.readUntrusted = true;
+    }
+    return found;
   }
   if (name === "create_memory") {
     const timestamp = now();
@@ -1555,21 +1576,27 @@ export async function executeAgentTool(
       ownMoodOnly: ownMoodOnly(context),
       allowedNames: context?.burstSpeakerNames,
     });
-    db.prepare(`
-      INSERT INTO memories(
-        id,user_id,title,content,kind,mood_label,mood_score,moods_json,category_id,life_area_id,life_area_source,
-        occurred_at,review_worthy,tags_json,created_at,updated_at
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
-      memoryId, USER_ID, input.title ?? null, input.content as string, input.kind || "note",
-      mood.mood_label, mood.mood_score, mood.moods_json, area.category_id,
-      area.life_area_id, area.life_area_source,
-      input.occurred_at ?? null, input.review_worthy === true ? 1 : 0,
-      JSON.stringify(input.tags ?? []), timestamp, timestamp,
-    );
-    queueIndexJob(db, "memory", memoryId);
+    // One write, so a memory is never left without the pictures it was saved
+    // from: the retry that would follow a half-finished call saves it twice.
+    db.transaction(() => {
+      db.prepare(`
+        INSERT INTO memories(
+          id,user_id,title,content,kind,mood_label,mood_score,moods_json,category_id,life_area_id,life_area_source,
+          occurred_at,review_worthy,tags_json,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        memoryId, USER_ID, input.title ?? null, input.content as string, input.kind || "note",
+        mood.mood_label, mood.mood_score, mood.moods_json, area.category_id,
+        area.life_area_id, area.life_area_source,
+        input.occurred_at ?? null, input.review_worthy === true ? 1 : 0,
+        JSON.stringify(input.tags ?? []), timestamp, timestamp,
+      );
+      queueIndexJob(db, "memory", memoryId);
+      // The pictures this turn was sent are kept with the record they produced.
+      if (context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
+    })();
     search.flushSoon();
-    return memoryJson(getMemory(db, memoryId) as MemoryRow);
+    return memoryWithPictures(db, getMemory(db, memoryId) as MemoryRow);
   }
   if (name === "update_memory") {
     const memoryId = input.id as string;
@@ -1627,9 +1654,13 @@ export async function executeAgentTool(
         JSON.stringify(value("tags", JSON.parse(current.tags_json))), now(), memoryId, USER_ID,
       );
       queueIndexJob(db, "memory", memoryId);
+      // Rewording a memory can be about a picture; retagging an old note in the
+      // same turn is not, and must not pin the turn's receipt to it.
+      const reworded = value("title", current.title) !== current.title || value("content", current.content) !== current.content;
+      if (reworded && context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
     })();
     search.flushSoon();
-    return memoryJson(getMemory(db, memoryId) as MemoryRow);
+    return memoryWithPictures(db, getMemory(db, memoryId) as MemoryRow);
   }
   if (name === "delete_memory") {
     if (input.confirmed !== true) throw new Error("Explicit confirmation is required");

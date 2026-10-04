@@ -86,6 +86,26 @@ export interface Todo {
   updated_at: string;
 }
 
+/** A picture texted to the assistant, kept on the server; `url` serves the file to a signed-in session. */
+export interface Attachment {
+  id: string;
+  kind: "photo" | "document";
+  description: string | null;
+  content_type: string;
+  byte_size: number;
+  url: string;
+  life_area_id: string | null;
+  life_area_name: string | null;
+  created_at: string;
+  /** The memories this picture is kept with; only the gallery's list carries it. */
+  memory_ids?: string[];
+}
+
+export interface AttachmentPage {
+  attachments: Attachment[];
+  next_before: string | null;
+}
+
 export interface Memory {
   id: string;
   title?: string | null;
@@ -104,6 +124,8 @@ export interface Memory {
   occurred_at?: string | null;
   review_worthy?: boolean;
   tags: string[];
+  /** The pictures saved with this memory, when the response looked them up. */
+  attachments?: Attachment[];
   created_at: string;
   updated_at: string;
 }

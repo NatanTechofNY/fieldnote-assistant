@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SEARCH_ENTITY_TYPES, type SearchEntityType } from "../algolia.ts";
+import { pictureTextMatch } from "../attachments.ts";
 import { USER_ID, likePattern } from "../db.ts";
 import { success } from "../http.ts";
 import type { RouteContext } from "./context.ts";
@@ -146,9 +147,10 @@ export function registerSearchRoutes({ app, db, search }: RouteContext): void {
         WHERE m.user_id=? AND (lower(COALESCE(m.title,'')) LIKE lower(?) ESCAPE '\\'
           OR lower(m.content) LIKE lower(?) ESCAPE '\\'
           OR lower(COALESCE(m.mood_label,'')) LIKE lower(?) ESCAPE '\\'
-          OR lower(m.tags_json) LIKE lower(?) ESCAPE '\\')
+          OR lower(m.tags_json) LIKE lower(?) ESCAPE '\\'
+          OR ${pictureTextMatch("m", "?")})
         ORDER BY m.created_at DESC,m.rowid DESC LIMIT ?
-      `).all(USER_ID, pattern, pattern, pattern, pattern, input.limit) as Array<Record<string, unknown>>;
+      `).all(USER_ID, pattern, pattern, pattern, pattern, pattern, input.limit) as Array<Record<string, unknown>>;
     }
     if (types.includes("message")) {
       fallback.message = db.prepare(`

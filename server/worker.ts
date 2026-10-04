@@ -5,7 +5,7 @@ import { getTodo, groupAreas, id, now, queueIndexJob, syncTodoReminders, USER_ID
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
   archivedInboundText, archiveReactionText, burstStartedAt, failAgentTurn, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
-  recordOutboundProviderMessage, runSmsAgent,
+  recordOutboundProviderMessage, runSmsAgent, stageInboundPictures,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
@@ -1264,6 +1264,15 @@ export async function runWorkerOnce(
           threadOriginator: message.threadOriginator,
           ...(message.groupId ? { groupId: message.groupId, participants: message.participants } : {}),
         };
+        // Every picture is saved whatever the decision about answering: a held
+        // group picture may not be asked about for an hour, and the provider's
+        // link will not last that long. The saving waits until the decision is
+        // made, and the typing bubble is up, because converting a photo is slow;
+        // a message filed first is tied to its pictures as they are saved.
+        const providerMessageId = message.messageId;
+        const savePictures = async () => {
+          if (media.length) await stageInboundPictures(db, address, providerMessageId, media, dependencies.fetch);
+        };
         // A group that asked the assistant to stay out until named gets no
         // answer, and no completion is spent, on a message that does not name it.
         const heldText = withMediaLines(message.body, media.map(() => PICTURE_PENDING));
@@ -1273,6 +1282,7 @@ export async function runWorkerOnce(
         // read as the assistant having spoken since.
         const retrying = archivedInboundText(db, address, message.messageId) !== undefined;
         if (group && !retrying && holdUntilNamed(db, address, heldText, message.messageId, inbound, groupMetadata)) {
+          await savePictures();
           completeExternalEvent(db, event.id, "processed");
           continue;
         }
@@ -1283,6 +1293,7 @@ export async function runWorkerOnce(
         const started = next && message.messageId ? burstStartedAt(db, address, message.messageId) ?? event.created_at : undefined;
         if (next?.messageId && message.messageId && started && Date.now() - Date.parse(started) < MAX_BURST_MS) {
           foldIntoNextTurn(db, address, heldText, message.messageId, inbound, groupMetadata, next.messageId);
+          await savePictures();
           completeExternalEvent(db, event.id, "processed");
           continue;
         }
@@ -1290,6 +1301,8 @@ export async function runWorkerOnce(
         // is out rather than in between, so the wait is covered end to end and no
         // bubble outlives the answer.
         stopTyping = group ? () => {} : showTyping(db, message.from);
+        // Filed by the turn below, which ties the message to the pictures saved here.
+        await savePictures();
         // A picture reaches the agent as a description, which is also what the
         // archive keeps; the link rides along in the metadata. The turn looks at
         // it, so the look is on the record, and a retry reuses what it saw.
