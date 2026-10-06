@@ -409,12 +409,6 @@ const NO_TOOL_APP_TURNS = new Set([
 ]);
 
 /**
- * App-composed turns that report on the owner's own day. A group's work is its
- * own check-ins' to report, so these read only what is not filed under a group
- * chat — the reverse of a group turn's fence. The owner asking on their own
- * line is not fenced: "did we clean the kitchen?" is theirs to ask.
- */
-/**
  * The app-composed messages that may carry a GIF the owner asked for: the digest,
  * a brief, and the check-ins. On these turns `find_gif` is the one tool the
  * agent has, and it picks the GIF by ending its text with `GIF: <url>`; the
@@ -424,6 +418,12 @@ const NO_TOOL_APP_TURNS = new Set([
  */
 export const GIF_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "daily_digest", "digest_brief"]);
 
+/**
+ * App-composed turns that report on the owner's own day. A group's work is its
+ * own check-ins' to report, so these read only what is not filed under a group
+ * chat — the reverse of a group turn's fence. The owner asking on their own
+ * line is not fenced: "did we clean the kitchen?" is theirs to ask.
+ */
 const OWN_RECORDS_APP_TURNS = new Set(["daily_digest", "digest_brief", "follow_up", "profile_refresh", "memory_sweep"]);
 
 /**
