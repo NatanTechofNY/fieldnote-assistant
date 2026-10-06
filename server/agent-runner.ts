@@ -7,6 +7,7 @@ import { ensureGroupLifeArea, groupAreas, id, now, queueIndexJob, recordMessageR
 import { recordGroupParticipants, rosterLine } from "./group-members.ts";
 import { EVENING_ANSWER_WINDOW_MS, eveningBeingAnswered, eveningEntryFor, eveningOccurredAt } from "./group-journal.ts";
 import { addressesAssistant, OWNER_SPEAKER_NAME, redactedNumber, speakerLabel, withoutQuotedSpans } from "./group-thread.ts";
+import { assertSendableImage, pullGifLine } from "./image-output.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset } from "./local-time.ts";
 import {
@@ -149,6 +150,16 @@ function rotateStaleConversation(db: Db, thread: ChannelThreadRow): ChannelThrea
   db.prepare("UPDATE channel_threads SET agent_conversation_id=?,updated_at=? WHERE id=?")
     .run(agent_conversation_id, now(), thread.id);
   return { ...thread, agent_conversation_id };
+}
+
+/** Whether a GIF the reply picked is still one the provider can fetch; if not, the words go out alone. */
+async function sendableGif(url: string): Promise<boolean> {
+  try {
+    await assertSendableImage(url);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1366,6 +1377,8 @@ export type AgentTurnResult = {
   inboundMessageId?: string;
   /** The archived reply; absent when the turn ended without one (a gesture, or stay_quiet). */
   replyMessageId?: string;
+  /** A GIF the reply picked with `GIF: <url>` on a turn that may attach one, sent with the text. */
+  mediaUrl?: string;
 };
 
 export async function runChannelAgent(
@@ -1385,6 +1398,13 @@ export async function runChannelAgent(
      * back as something the user said.
      */
     internal?: boolean;
+    /**
+     * The turn may attach a GIF: a scheduled message the owner asked to carry
+     * one. The reply picks it with a final `GIF: <url>` line, which has to be a
+     * link `find_gif` returned this turn; it is taken out of the words and
+     * handed back as `mediaUrl` for the caller to send with them.
+     */
+    gif?: boolean;
     /**
      * What the provider said about the message that started this turn. An
      * app-composed turn has none, which is what stops the iMessage tools from
@@ -1788,7 +1808,10 @@ export async function runChannelAgent(
          * top complaint, so the text is dropped — unless a record changed
          * after the call, which the room has to be told about.
          */
-        const kept = context.scope && context.stayedQuiet && !changedRecord ? "" : written;
+        const spokenOrQuiet = context.scope && context.stayedQuiet && !changedRecord ? "" : written;
+        // The GIF line is not words: it comes out before the claims are read and the text is archived.
+        const picked = options.gif ? pullGifLine(spokenOrQuiet, context.foundGifs) : { text: spokenOrQuiet };
+        const kept = picked.text;
         // Checked before a repeat is dropped: "checked it off" said twice is still a claim to back.
         // App-composed turns are told to save nothing and promise nothing, so only a status claim is held there.
         const unbacked = [
@@ -1849,14 +1872,20 @@ export async function runChannelAgent(
         // where the real message is recorded elsewhere once sent; on a real
         // thread the caller keeps it public, since it is the message.
         const replyMark = (options.replyInternal ?? options.internal) ? { internal: true } : {};
+        // A GIF rides with words only, and only one the provider can still fetch.
+        const mediaUrl = spoken && picked.url && await sendableGif(picked.url) ? picked.url : undefined;
         const replyMessageId = saveChannelMessage(db, thread.id, "outbound", "assistant", finalText, undefined, {
           ...options.assistantMetadata,
+          ...(mediaUrl ? { mediaUrl } : {}),
           parts: response.parts,
           agentConversationId: thread.agent_conversation_id,
           ...replyMark,
         });
         search.flushSoon();
-        return { text: finalText, threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId, replyMessageId };
+        return {
+          text: finalText, threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId, replyMessageId,
+          ...(mediaUrl ? { mediaUrl } : {}),
+        };
       }
 
       // Real work is about to start, and the mark says on what. A batch that
@@ -1951,6 +1980,7 @@ export async function runSmsAgent(
   options: {
     fetcher?: typeof fetch;
     internal?: boolean;
+    gif?: boolean;
     userMessageMetadata?: Record<string, unknown>;
     inbound?: InboundContext;
     sendSms?: SmsSender;

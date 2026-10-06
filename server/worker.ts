@@ -696,6 +696,16 @@ function claimDispatch(
   })();
 }
 
+/** The send options for a scheduled message that picked a GIF: the picture goes with the words, in the same message. */
+function withGif(response: { mediaUrl?: string }): { mediaUrl: string } | undefined {
+  return response.mediaUrl ? { mediaUrl: response.mediaUrl } : undefined;
+}
+
+/** What the archive keeps of it, where a picture sent any other way keeps it. */
+function gifMetadata(response: { mediaUrl?: string }): { mediaUrl?: string } {
+  return response.mediaUrl ? { mediaUrl: response.mediaUrl } : {};
+}
+
 /**
  * A transient failure leaves the row `pending` behind a backoff so a later tick
  * can finish the job, which is what lets a digest survive a laptop that was
@@ -746,12 +756,14 @@ async function deliverDailyDigest(
      */
     const response = await runAgent(db, search, `digest:${recipient}`, prompt, undefined, {
       internal: true,
+      gif: true,
       userMessageMetadata: { kind: "daily_digest", date },
     });
-    const sent = await send(db, recipient, response.text);
+    const sent = await send(db, recipient, response.text, withGif(response));
     recordOutboundChannelMessage(db, "sms", recipient, response.text, sent.sid, sent.status, {
       kind: "daily_digest",
       date,
+      ...gifMetadata(response),
     });
     search.flushSoon();
     db.prepare(`
@@ -790,6 +802,7 @@ async function deliverDigestBrief(
      */
     const response = await runAgent(db, search, `digest:${recipient}`, prompt, undefined, {
       internal: true,
+      gif: true,
       /*
        * History renders this turn from the metadata rather than from the prompt,
        * so the catalog of board IDs stays collapsed behind the instruction the
@@ -803,9 +816,10 @@ async function deliverDigestBrief(
         date: local.date,
       },
     });
-    const sent = await send(db, recipient, response.text);
+    const sent = await send(db, recipient, response.text, withGif(response));
     recordOutboundChannelMessage(db, "sms", recipient, response.text, sent.sid, sent.status, {
       kind: "digest_brief",
+      ...gifMetadata(response),
       briefId: brief.id,
       briefName: brief.name,
       date: local.date,
@@ -841,12 +855,14 @@ async function deliverEveningCheckin(
     const prompt = composeEveningCheckinTurn(db, { date: local.date, timezone, ask });
     const response = await runAgent(db, search, `digest:${recipient}`, prompt, undefined, {
       internal: true,
+      gif: true,
       userMessageMetadata: { kind: "evening_checkin", date: local.date },
     });
-    const sent = await send(db, recipient, response.text);
+    const sent = await send(db, recipient, response.text, withGif(response));
     recordOutboundChannelMessage(db, "sms", recipient, response.text, sent.sid, sent.status, {
       kind: "evening_checkin",
       date: local.date,
+      ...gifMetadata(response),
     });
     search.flushSoon();
     db.prepare(`
@@ -1151,6 +1167,7 @@ async function deliverGroupCheckin(
       : composeGroupEveningTurn(db, checkinArea, { date: local.date, timezone });
     const response = await runAgent(db, search, area.address, prompt, undefined, {
       internal: true,
+      gif: true,
       replyInternal: false,
       inbound: { provider: "sendblue", groupId },
       userMessageMetadata: { kind: metaKind, groupId, date: local.date },
@@ -1160,7 +1177,7 @@ async function deliverGroupCheckin(
     if (!response.text) throw new Error(`The ${kind} check-in came back empty`);
     let sent: Awaited<ReturnType<typeof send>>;
     try {
-      sent = await send(db, area.address, response.text, { groupId });
+      sent = await send(db, area.address, response.text, { groupId, ...withGif(response) });
     } catch (error) {
       // Nobody received it: the turn leaves the conversation before the retry composes anew.
       failAgentTurn(db, response);
@@ -1185,9 +1202,9 @@ async function deliverGroupCheckin(
     if (area.checkin_copy_to_owner) {
       try {
         const copyText = `[${area.name}] ${response.text}`;
-        const copy = await send(db, recipient, copyText);
+        const copy = await send(db, recipient, copyText, withGif(response));
         recordOutboundChannelMessage(db, "sms", recipient, copyText, copy.sid, copy.status, {
-          kind: metaKind, date: local.date, groupId, copyOf: area.id, groupName: area.name, internal: true,
+          kind: metaKind, date: local.date, groupId, copyOf: area.id, groupName: area.name, internal: true, ...gifMetadata(response),
         });
       } catch (error) {
         console.warn(`Could not copy the ${kind} check-in to the owner:`, error instanceof Error ? error.message : error);

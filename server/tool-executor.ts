@@ -414,6 +414,16 @@ const NO_TOOL_APP_TURNS = new Set([
  * chat — the reverse of a group turn's fence. The owner asking on their own
  * line is not fenced: "did we clean the kitchen?" is theirs to ask.
  */
+/**
+ * The app-composed messages that may carry a GIF the owner asked for: the digest,
+ * a brief, and the check-ins. On these turns `find_gif` is the one tool the
+ * agent has, and it picks the GIF by ending its text with `GIF: <url>`; the
+ * runner checks the link against what `find_gif` returned and the worker sends
+ * it with the message. `send_image` stays refused: a scheduled turn runs on a
+ * scratch thread, and its reply is sent by the app.
+ */
+export const GIF_APP_TURNS = new Set(["group_morning", "group_evening", "evening_checkin", "daily_digest", "digest_brief"]);
+
 const OWN_RECORDS_APP_TURNS = new Set(["daily_digest", "digest_brief", "follow_up", "profile_refresh", "memory_sweep"]);
 
 /**
@@ -763,7 +773,7 @@ export async function executeAgentTool(
   // as a 400 through the shared error handler.
   const schema = toolInput[name as ToolName];
   if (schema) input = schema.parse(input) as Input;
-  if (context?.appTurn && NO_TOOL_APP_TURNS.has(context.appTurn)) {
+  if (context?.appTurn && NO_TOOL_APP_TURNS.has(context.appTurn) && !(name === "find_gif" && GIF_APP_TURNS.has(context.appTurn))) {
     throw new Error(
       `This turn is the app asking you to write the ${context.appTurn.replace(/_/g, " ")}; it uses no tools`
       + (name === "stay_quiet" ? " — there is no message to stay quiet on" : ", so write the text instead"),
@@ -771,6 +781,9 @@ export async function executeAgentTool(
   }
   if (context?.appTurn === "memory_sweep" && !MEMORY_SWEEP_TOOLS.has(name)) {
     throw new Error("This turn is the app keeping what a conversation established; it saves and updates memories and uses no other tool");
+  }
+  if (context?.appTurn && SENDING_TOOLS.has(name)) {
+    throw new Error("This turn is the app writing; it sends your reply itself, so nothing goes out any other way");
   }
   const scope = context?.scope;
   if (scope && OWNER_ONLY_TOOLS.has(name)) throw new Error(`${name} is not available in a group chat`);

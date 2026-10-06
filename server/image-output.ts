@@ -83,6 +83,26 @@ export function imagesInMarkdown(markdown: string): string[] {
 }
 
 /**
+ * The GIF a scheduled message was told to attach. The agent ends its text with
+ * `GIF: <url>`; the line is taken out of the words either way, and the link
+ * counts only when `find_gif` returned it this turn, for the same reason
+ * `send_image` takes nothing else: a link the model composed could carry the
+ * owner's records out in its query string.
+ */
+export function pullGifLine(text: string, returned: ReadonlySet<string> | undefined): { text: string; url?: string } {
+  let url: string | undefined;
+  const kept = text.split("\n").filter(line => {
+    const labelled = /^\W{0,4}GIF\W{0,4}[:-]\s*(.{0,2000})$/i.exec(line.trim());
+    const link = labelled ? /https?:\/\/[^\s)>\]]+/.exec(labelled[1])?.[0] : undefined;
+    // A line that says "GIF:" with no link is words, not the pick.
+    if (!link) return true;
+    if (!url && returned?.has(link)) url = link;
+    return false;
+  });
+  return { text: kept.join("\n").replace(/\n{3,}/g, "\n\n").trim(), ...(url ? { url } : {}) };
+}
+
+/**
  * What the provider will find when it fetches the picture: refused here with
  * a reason the model can act on, rather than as a failed send in the chat.
  */

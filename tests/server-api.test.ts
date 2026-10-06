@@ -74,7 +74,7 @@ import { z } from "zod";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { executeAgentTool, resetBrowserTurnState, type ToolTurnContext } from "../server/tool-executor.ts";
 import { resetWebState } from "../server/web-service.ts";
-import { rememberImages } from "../server/image-output.ts";
+import { pullGifLine, rememberImages } from "../server/image-output.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
 import { TransientFailure } from "../server/transient.ts";
 import { sendTwilioSms } from "../server/twilio-service.ts";
@@ -8322,6 +8322,116 @@ describe("Sendblue provider", () => {
     const outputs = toolOutputs(db, address);
     assert.match(outputs.delete_todo.error ?? "", /^This turn is the app asking you to write the group morning; it uses no tools, so write the text instead$/);
     assert.match(outputs.send_message.error ?? "", /uses no tools/);
+  });
+
+  /*
+   * A scheduled message the owner told to "end with a GIF" had no way to: a
+   * check-in refused every tool, and a digest's sends went to its scratch thread.
+   */
+  it("sends the GIF a scheduled message picked with it, and refuses everything else a check-in could try", async () => {
+    const { db, api, area } = checkinFixture();
+    agentStudioEnv();
+    const address = `group:${GROUP}`;
+    const laundry = (await api.post("/api/todos").send({ title: "Laundry", life_area_id: area.id, due_at: "2030-01-19T21:00:00.000Z" }).expect(201)).body.data;
+    await api.patch(`/api/todos/${laundry.id}/status`).send({ status: "in_progress" }).expect(200);
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30", checkin_copy_to_owner: true }).expect(200);
+    const gifUrl = "https://media2.giphy.com/media/abc123/giphy-downsized.gif";
+    const before = process.env.GIPHY_API_KEY;
+    process.env.GIPHY_API_KEY = "giphy_test_key";
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.host === "api.giphy.com") {
+        return Response.json({ data: [{ id: "abc123", title: "Happy Dance", images: { downsized: { url: `${gifUrl}?cid=tracking` } } }] });
+      }
+      if (url.host === "media2.giphy.com") return new Response(null, { headers: { "content-type": "image/gif", "content-length": "900000" } });
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    let round = 0;
+    const requests: Array<{ messages: Array<{ parts: Array<{ text?: string }> }> }> = [];
+    const composes: typeof fetch = async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      round += 1;
+      if (round === 1) {
+        return new Response(JSON.stringify({
+          role: "assistant",
+          parts: [
+            { type: "tool-find_gif", tool_call_id: "call_gif", state: "input-available", input: { query: "happy dance", limit: 3 } },
+            { type: "tool-send_image", tool_call_id: "call_img", state: "input-available", input: { url: gifUrl, caption: null } },
+            { type: "tool-web_search", tool_call_id: "call_web", state: "input-available", input: { query: "laundry", limit: 3 } },
+          ],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        role: "assistant",
+        parts: [{ type: "text", text: `Morning! Laundry is still going.\n\nGIF: ${gifUrl}` }],
+      }), { status: 200 });
+    };
+    const sends: Array<{ to: string; body: string; mediaUrl?: string; groupId?: string }> = [];
+    const restore = atUtcTime("09:00");
+    try {
+      await runWorkerOnce(db, fakeSearch(db), {
+        sendSms: async (_db: Db, to: string, body: string, options?: { groupId?: string; mediaUrl?: string }) => {
+          sends.push({ to, body, ...(options?.groupId ? { groupId: options.groupId } : {}), ...(options?.mediaUrl ? { mediaUrl: options.mediaUrl } : {}) });
+          return { sid: `SB_${sends.length}`, status: "queued" as const };
+        },
+        runSmsAgent: (...args: Parameters<typeof runSmsAgent>) =>
+          runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher: composes }),
+        pollGranola: async () => ({ fetched: 0, queued: 0 }),
+        startTypingIndicator: () => () => {},
+      });
+    } finally {
+      restore();
+      globalThis.fetch = realFetch;
+      if (before === undefined) delete process.env.GIPHY_API_KEY; else process.env.GIPHY_API_KEY = before;
+    }
+
+    assert.deepEqual(sends, [
+      { to: address, body: "Morning! Laundry is still going.", groupId: GROUP, mediaUrl: gifUrl },
+      { to: "+17185551111", body: "[Home] Morning! Laundry is still going.", mediaUrl: gifUrl },
+    ], "the GIF goes with the words, in the group and in the owner's copy, and the pick line is not part of the words");
+    assert.match(requests[0].messages.at(-1)?.parts[0]?.text ?? "", /find_gif is the one tool|The one tool this turn has is find_gif/);
+    const outputs = toolOutputs(db, address);
+    assert.equal(outputs.find_gif.error, undefined, "the check-in may look for a GIF");
+    assert.match(outputs.send_image.error ?? "", /uses no tools/, "the app sends the GIF, not the agent");
+    assert.match(outputs.web_search.error ?? "", /uses no tools/);
+    const note = db.prepare(`
+      SELECT m.content,m.metadata_json FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      WHERE t.address=? AND m.role='assistant' AND m.direction='outbound'
+    `).get(address) as { content: string; metadata_json: string };
+    assert.equal(note.content, "Morning! Laundry is still going.");
+    assert.equal(JSON.parse(note.metadata_json).mediaUrl, gifUrl, "the archive shows the picture that went out");
+  });
+
+  it("takes a GIF line out of a digest and attaches only a link find_gif returned", async () => {
+    const { db } = fixture();
+    agentStudioEnv();
+    const ask = async (text: string, options: { gif?: boolean }) => {
+      const fetcher: typeof fetch = async () => new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text }] }), { status: 200 });
+      return runSmsAgent(db, fakeSearch(db), `digest:${RECIPIENT}`, "Send my digest", undefined, {
+        fetcher, internal: true, ...options, userMessageMetadata: { kind: "daily_digest", date: "2030-01-15" },
+      });
+    };
+    const invented = "https://evil.example.com/x.gif?records=everything";
+    const composed = await ask(`Good morning, two things today.\nGIF: ${invented}`, { gif: true });
+    assert.equal(composed.text, "Good morning, two things today.", "the pick line is never part of the words");
+    assert.equal(composed.mediaUrl, undefined, "a link no tool returned is one the model composed");
+    const off = await ask("Good morning.\nGIF: https://media2.giphy.com/media/abc123/giphy-downsized.gif", {});
+    assert.match(off.text, /GIF:/, "a turn that was not offered a GIF keeps its words as written");
+    assert.equal(off.mediaUrl, undefined);
+    assert.equal(
+      pullGifLine("A line.\nGIF: nothing today", new Set()).text,
+      "A line.\nGIF: nothing today",
+      "a line that says GIF with no link is words",
+    );
+    assert.match(composeDigestTurn(db, { date: "2030-01-15", timezone: "UTC", includeTodos: false, includeOverdue: false }), /`GIF: `/);
+    // A digest's agent can read and look for a GIF, but a mid-turn send would go to its scratch thread.
+    const digestTurn: ToolTurnContext = { channel: "sms", address: `digest:${RECIPIENT}`, threadId: "thread_digest", appTurn: "daily_digest" };
+    await assert.rejects(
+      executeAgentTool(db, { flushSoon() {} }, "send_message", { text: "hi" }, digestTurn),
+      /sends your reply itself/,
+    );
   });
 
   it("stays silent on a morning with nothing open, and is held by the switch and quiet hours", async () => {
