@@ -2059,6 +2059,17 @@ describe("SMS, reminders, and channel agent execution", () => {
     };
     assert.equal((await runSmsAgent(db, fakeSearch(db), "+17185551111", "good day", undefined, { fetcher: offer })).text, "Want me to save that as today's entry?");
     assert.equal(calls, 1, "an offer is not a claim");
+
+    // A reply that reports an earlier save must not be told to write a duplicate.
+    for (const earlier of ["You saved your gate code on Sunday.", "Here's what I remembered: the code is on the fridge."]) {
+      calls = 0;
+      const readBack: typeof fetch = async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: earlier }] }), { status: 200 });
+      };
+      assert.equal((await runSmsAgent(db, fakeSearch(db), "+17185551111", "what did I save", undefined, { fetcher: readBack })).text, earlier);
+      assert.equal(calls, 1, `"${earlier}" is a read-back, not a claim`);
+    }
   });
 
   /*

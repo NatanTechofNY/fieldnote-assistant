@@ -281,15 +281,17 @@ const STATUS_CLAIM_CHECK = [
  * A reply that says something was kept, in the first person: "I'll save this as
  * today's entry", "saved", "I've logged it". A past turn said it and never
  * called a tool, and the entry only existed after the owner asked "You didn't?".
- * An offer ("want me to save it?") and a question about what is saved do not match.
+ * An offer ("want me to save it?") and a reply that reports what was saved
+ * earlier ("you saved your gate code on Sunday", "here's what I remembered")
+ * do not match: only a claim about this turn has to be backed by a write.
  */
-const SAVE_CLAIM = /\b(?:i(?:'ll| will|'ve| have|'m going to)|let me|going to)\s+(?:go ahead and\s+)?(?:save|saved|log|logged|remember|note|record|recorded|jot|jotted)\b|\b(?:saved|logged|recorded|remembered)(?:\s+(?:it|that|this|your|these|those|them)\b|\s*(?:[—–.!:,]|-{1,2}|$))/i;
+const SAVE_CLAIM = /\b(?:i(?:'ll| will|'ve| have|'m going to)|let me|going to)\s+(?:go ahead and\s+)?(?:save|saved|log|logged|remember|remembered|note|noted|record|recorded|jot|jotted)\b|(?:^|[.!?\n]\s*|\b(?:got it|done|okay|ok|sure)[,.!—–-]*\s+)(?:saved|logged|recorded)\b/i;
 
 const SAVE_CLAIM_CHECK = [
   "[runtime check, not from the user] Your reply says something was saved or will be saved,",
   "but no create_memory, update_memory, or other write succeeded in this turn, so nothing was kept.",
   "Call the matching tool now, then write your reply again.",
-  "If you were only offering, ask instead of confirming.",
+  "If you were only offering, ask instead of confirming. If you were only reporting something saved earlier, say it was saved earlier and write nothing.",
 ].join(" ");
 
 /**
