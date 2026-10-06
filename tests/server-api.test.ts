@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { archiveReactionText, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
+import { archiveReactionText, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
@@ -67,7 +67,7 @@ async function withEnv<T>(vars: Record<string, string | undefined>, run: () => P
 
 // No test reaches real DNS: every host is public unless a test says otherwise.
 setHostResolver(async () => ["93.184.216.34"]);
-import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
+import { isInboundSenderAllowed, plainText, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { z } from "zod";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
@@ -2001,6 +2001,130 @@ describe("SMS, reminders, and channel agent execution", () => {
 
     assert.equal(response.text, "Marked Vacuum as done.");
     assert.equal(calls, 2, "no extra round when the claim is backed");
+  });
+
+  /*
+   * "I'll save this as today's entry" went out from a turn that called nothing,
+   * and the entry only existed after the owner asked "You didn't?".
+   */
+  it("sends a reply that promises to save back until a write lands", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    type Message = { id: string; role: string; parts: Array<{ type?: string; text?: string }> };
+    const requests: Message[][] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] };
+      requests.push(messages);
+      const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+      if (requests.length === 1) return reply([{ type: "text", text: "Love that. I'll save this as today's entry: productive, 5/5." }]);
+      if (requests.length === 2) {
+        return reply([{
+          type: "tool-create_memory", tool_call_id: "call_save", state: "input-available",
+          input: { kind: "journal", title: "Good productive day", content: "Day was good. Productive 5/5." },
+        }]);
+      }
+      return reply([{ type: "text", text: "Saved, a good productive day." }]);
+    };
+
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "Day was good. Productive 5/5", undefined, { fetcher });
+
+    assert.equal(requests.length, 3);
+    assert.match(requests[1][requests[1].length - 1].parts[0].text ?? "", /nothing was kept/);
+    assert.match(response.text, /^Saved, a good productive day\./);
+    assert.equal((db.prepare("SELECT count(*) count FROM memories WHERE title='Good productive day'").get() as { count: number }).count, 1);
+  });
+
+  it("lets a save that a write backs, and an offer to save, through untouched", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    let calls = 0;
+    const backed: typeof fetch = async () => {
+      calls += 1;
+      const parts = calls === 1
+        ? [{ type: "tool-create_memory", tool_call_id: "call_1", state: "input-available", input: { kind: "fact", title: "Gate code", content: "The gate code is on the fridge." } }]
+        : [{ type: "text", text: "Saved the gate note." }];
+      return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+    };
+    assert.match((await runSmsAgent(db, fakeSearch(db), "+17185551111", "remember the gate code", undefined, { fetcher: backed })).text, /^Saved the gate note\./);
+    assert.equal(calls, 2, "no extra round when the save is backed");
+
+    calls = 0;
+    const offer: typeof fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "Want me to save that as today's entry?" }] }), { status: 200 });
+    };
+    assert.equal((await runSmsAgent(db, fakeSearch(db), "+17185551111", "good day", undefined, { fetcher: offer })).text, "Want me to save that as today's entry?");
+    assert.equal(calls, 1, "an offer is not a claim");
+  });
+
+  /*
+   * "I'll text you in 10 minutes" went out in a group from a turn with no tool
+   * call, so no reminder row existed to fire.
+   */
+  it("sends a reply that promises a text back until a reminder exists", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    type Message = { id: string; role: string; parts: Array<{ type?: string; text?: string }> };
+    const requests: Message[][] = [];
+    const due = new Date(Date.now() + 10 * 60_000).toISOString();
+    const fetcher: typeof fetch = async (_input, init) => {
+      const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] };
+      requests.push(messages);
+      const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+      if (requests.length === 1) return reply([{ type: "text", text: "Nice. I'll text you in 10 minutes about the post office." }]);
+      if (requests.length === 2) {
+        return reply([{
+          type: "tool-create_todo", tool_call_id: "call_todo", state: "input-available",
+          input: { title: "Post office", due_at: due, reminder_at: due },
+        }]);
+      }
+      return reply([{ type: "text", text: "Done, I'll text you then." }]);
+    };
+
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "Going to post office in 10 mins", undefined, { fetcher });
+
+    assert.equal(requests.length, 3);
+    assert.match(requests[1][requests[1].length - 1].parts[0].text ?? "", /nothing will be sent/);
+    assert.equal(response.text, "Done, I'll text you then.");
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM reminders r JOIN todos t ON t.id=r.todo_id WHERE t.title='Post office'").get() as { count: number }).count > 0,
+      true,
+      "a reminder row is there to fire",
+    );
+  });
+
+  it("sends a text without markdown, and keeps the web chat's", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    const marked = "**Metis**:  \n\n- Check *status*\n- Fix the [YC bug](https://example.com/bug)";
+    const fetcher: typeof fetch = async () =>
+      new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: marked }] }), { status: 200 });
+
+    const text = await runSmsAgent(db, fakeSearch(db), "+17185551111", "break it down", undefined, { fetcher });
+    assert.equal(text.text, "Metis:\n\nCheck status\nFix the YC bug https://example.com/bug");
+    const archived = db.prepare("SELECT content FROM channel_messages WHERE role='assistant' AND direction='outbound'").get() as { content: string };
+    assert.equal(archived.content, text.text, "the archive holds what the phone shows");
+
+    const web = await runChannelAgent(db, fakeSearch(db), "web", "web", "break it down", undefined, { fetcher });
+    assert.equal(web.text, marked, "the web chat renders markdown, so it is left alone");
+  });
+
+  it("flattens markdown for a text and leaves plain prose and look-alikes alone", () => {
+    assert.equal(plainText("**Bold** and __also__ and *lean*"), "Bold and also and lean");
+    assert.equal(plainText("# Plan\n1. one\n2) two\n* three\n- four"), "Plan\none\ntwo\nthree\nfour");
+    assert.equal(plainText("```js\nlet a = 1\n```\nuse `npm test`"), "let a = 1\nuse npm test");
+    assert.equal(plainText("![cat](https://x.test/c.png) and [x](https://x.test)"), "cat https://x.test/c.png and x https://x.test");
+    assert.equal(plainText("Line one  \n\n\n\nLine two   "), "Line one\n\nLine two");
+    assert.equal(plainText("5*3 = 15, snake_case_name, 2026-10-06 at 2:41 PM, rate 4* hotel"), "5*3 = 15, snake_case_name, 2026-10-06 at 2:41 PM, rate 4* hotel");
+    assert.equal(plainText("https://example.com/a_b_c?x=*1*"), "https://example.com/a_b_c?x=*1*");
   });
 
   /*
@@ -7506,6 +7630,63 @@ describe("Sendblue provider", () => {
       const got = await executeAgentTool(db, { flushSoon() {} }, "get_memory", { id: note.id }, mine) as { attachments: unknown[] };
       assert.equal(got.attachments.length, 1);
     });
+
+    it("keeps a group's pictures only while its switch is on", async () => {
+      keepFilesInScratch();
+      const { db, api } = fixture();
+      const { area, context } = groupContext(db, "thread_pic_switch");
+      const fetcher: typeof fetch = async () => new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+      const stored = () => (db.prepare("SELECT count(*) n FROM attachments WHERE thread_id=?").get(context.threadId) as { n: number }).n;
+
+      assert.equal((await api.get("/api/life-areas").expect(200)).body.data.find((row: { id: string }) => row.id === area.id).keep_pictures, 1, "on by default");
+      await stageInboundPictures(db, context.address, "SB_on", [receipt], fetcher);
+      assert.equal(stored(), 1, "kept while the switch is on");
+
+      const off = (await api.patch(`/api/life-areas/${area.id}`).send({ keep_pictures: false }).expect(200)).body.data;
+      assert.equal(off.keep_pictures, 0);
+      await stageInboundPictures(db, context.address, "SB_off", [`${receipt}?two`], fetcher);
+      assert.equal(stored(), 1, "nothing more is stored once it is off");
+      assert.equal(readdirSync(scratch).length, 1, "and no file is written");
+
+      const back = (await api.patch(`/api/life-areas/${area.id}`).send({ keep_pictures: true }).expect(200)).body.data;
+      assert.equal(back.keep_pictures, 1);
+      await stageInboundPictures(db, context.address, "SB_back", [`${receipt}?three`], fetcher);
+      assert.equal(stored(), 2);
+
+      await api.patch("/api/life-areas/area_work").send({ keep_pictures: false }).expect(400);
+    });
+
+    it("still reads a picture in a group that keeps none, and says nothing is attached", () => withEnv({
+      OPENAI_API_KEY: "sk-test",
+      OPENAI_BASE_URL: undefined,
+      OPENAI_DOCUMENT_DETAIL: undefined,
+    }, async () => {
+      keepFilesInScratch();
+      const { db, api } = connectedFixture();
+      withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+      agentStudioEnv();
+      // The group's thread and area exist before its first picture, as they do once it has been talked in.
+      const { area } = groupContext(db, GROUP);
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`)
+        .send(groupMessage(WIFE, "", { media_url: receipt, message_handle: "SB_none" })).expect(200);
+      await api.patch(`/api/life-areas/${area.id}`).send({ keep_pictures: false }).expect(200);
+      const seen: string[] = [];
+      const vision: string[] = [];
+      const agent = agentCallingMany([
+        { tool: "create_memory", input: { title: "Corner Market", content: "Groceries, 42.17 USD on Oct 3.", kind: "note" } },
+      ], "Saved it.");
+      await runWorkerOnce(db, fakeSearch(db), workerFor(agent.fetcher, network(seen, vision)) as never);
+
+      assert.deepEqual(vision, ["glance", "detailed"], "the picture is still read");
+      const archived = db.prepare("SELECT content FROM channel_messages WHERE provider_message_id='SB_none'").get() as { content: string };
+      assert.match(archived.content, /invoice 4471/, "and what it says is archived");
+      assert.equal((db.prepare("SELECT count(*) n FROM attachments").get() as { n: number }).n, 0, "no picture is stored");
+      assert.equal(readdirSync(scratch).length, 0, "and no file is written");
+      const memory = db.prepare("SELECT id FROM memories").get() as { id: string };
+      assert.deepEqual(db.prepare("SELECT attachment_id FROM memory_attachments WHERE memory_id=?").all(memory.id), [], "the memory carries only the words");
+      const turnContext = ((agent.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+      assert.match(String(turnContext.groupPictures), /read but not kept/);
+    }));
 
     /** The owner's own chat: no group area, so what it files is the owner's private records. */
     function ownerContext(db: Db, threadId: string): ToolTurnContext {

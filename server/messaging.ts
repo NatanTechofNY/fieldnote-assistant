@@ -52,6 +52,35 @@ export type SmsSender = (
   options?: SendOptions,
 ) => Promise<{ sid: string; status: string; replyTo?: string }>;
 
+/**
+ * A text message has no markdown: Messages shows the asterisks and hyphens as
+ * typed. The model reaches for bullets and bold anyway, so every outgoing text
+ * is flattened here rather than trusted to the prompt. Line breaks stay;
+ * a lone `*` ("5*") and underscores inside words or links are left alone.
+ */
+export function plainText(text: string): string {
+  // A link is carried through untouched: its `*` and `_` are part of the address.
+  const links: string[] = [];
+  const keepLink = (url: string) => `\uE000${links.push(url) - 1}\uE000`;
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/```[^\n]*\n?([\s\S]*?)\n?```/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/!\[([^\]\n]*)\]\((https?:\/\/[^)\s]+)[^)]*\)/g, (_match, alt: string, url: string) => (alt.trim() ? `${alt.trim()} ${keepLink(url)}` : keepLink(url)))
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)[^)]*\)/g, (_match, label: string, url: string) => (label.trim() === url ? keepLink(url) : `${label.trim()} ${keepLink(url)}`))
+    .replace(/https?:\/\/[^\s)]+/g, keepLink)
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, "")
+    .replace(/^[ \t]{0,3}>[ \t]?/gm, "")
+    .replace(/\*\*(?=\S)([^\n]*?\S)\*\*/g, "$1")
+    .replace(/(?<!\w)__(?=\S)([^\n]*?\S)__(?!\w)/g, "$1")
+    .replace(/(?<![\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])/g, "$1")
+    .replace(/^[ \t]*(?:[-*]|\d{1,2}[.)])[ \t]+/gm, "")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\uE000(\d+)\uE000/g, (_match, index: string) => links[Number(index)])
+    .trim();
+}
+
 export function activeSmsProvider(db: Db): SmsProvider {
   return getNotificationPreferences(db).smsProvider;
 }
@@ -127,7 +156,7 @@ export async function sendSms(
   options: SendOptions = {},
 ): Promise<{ sid: string; status: string; replyTo?: string }> {
   const provider = options.groupId ? "sendblue" : activeSmsProvider(db);
-  return senders[provider](db, to, body, options);
+  return senders[provider](db, to, plainText(body), options);
 }
 
 const typingIndicators: Record<SmsProvider, (db: Db, to: string) => StopTypingIndicator> = {

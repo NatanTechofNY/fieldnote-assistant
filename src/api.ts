@@ -98,7 +98,7 @@ export const api = {
     request<LifeArea>("/life-areas", { method: "POST", body: JSON.stringify(input) }),
   updateLifeArea: (id: string, input: {
     name?: string; color?: string;
-    morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean;
+    morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean; keep_pictures?: boolean;
     morning_checkin_prompt?: string | null; evening_checkin_prompt?: string | null;
     soul?: string | null; assistant_nickname?: string | null; reply_mode?: ReplyMode;
   }) =>

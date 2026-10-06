@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AtSign, Copy, LoaderCircle, MessageSquareText, Moon, PenLine, RefreshCw, Sparkles, Sun } from "lucide-react";
+import { AtSign, Copy, ImageDown, LoaderCircle, MessageSquareText, Moon, PenLine, RefreshCw, Sparkles, Sun } from "lucide-react";
 import { api } from "../../api";
 import type { IntegrationState, LifeArea, ReplyMode } from "../../types";
 import { AskEditor } from "./AskEditor";
@@ -11,6 +11,7 @@ type CheckinPatch = {
   morning_checkin_time?: string | null;
   evening_checkin_time?: string | null;
   checkin_copy_to_owner?: boolean;
+  keep_pictures?: boolean;
   morning_checkin_prompt?: string | null;
   evening_checkin_prompt?: string | null;
   soul?: string | null;
@@ -93,6 +94,19 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
           />
           <Copy size={12} aria-hidden="true"/>
           <span>Also text me a copy</span>
+        </label>
+        <label
+          className={`life-area-checkin ${keepsPictures(group) ? "on" : ""}`}
+          title="Pictures sent here are always read; this decides whether the files are saved too"
+        >
+          <input
+            type="checkbox"
+            checked={keepsPictures(group)}
+            aria-label={`Save pictures sent in ${group.name}`}
+            onChange={event => checkin.mutate({ id: group.id, keep_pictures: event.target.checked })}
+          />
+          <ImageDown size={12} aria-hidden="true"/>
+          <span>Save pictures</span>
         </label>
       </div>
       <details className="checkin-wording">
@@ -193,6 +207,11 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
       </details>
     </div>)}
   </div>;
+}
+
+/** A group keeps the pictures sent in it unless its switch was turned off. */
+function keepsPictures(group: LifeArea): boolean {
+  return group.keep_pictures === undefined || Boolean(group.keep_pictures);
 }
 
 /** What the group calls the assistant; it answers to this like its own name. Saves on leave or Enter. */

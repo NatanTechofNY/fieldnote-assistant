@@ -9,7 +9,7 @@ import { EVENING_ANSWER_WINDOW_MS, eveningBeingAnswered, eveningEntryFor, evenin
 import { addressesAssistant, OWNER_SPEAKER_NAME, redactedNumber, speakerLabel, withoutQuotedSpans } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset } from "./local-time.ts";
-import type { SmsSender } from "./messaging.ts";
+import { plainText, type SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import {
   describeMediaDetailed, fetchPicture, fillPendingPictures, hasImageDescription, imageInputMode, PICTURE_BUDGET_MS,
@@ -127,6 +127,16 @@ function getOrCreateThread(db: Db, channel: "sms" | "web", address: string): Cha
  * once the thread falls outside the context window gives each conversation the
  * same span the model is shown, and a title drawn from its own opening line.
  */
+/**
+ * Whether pictures sent on this thread are kept as files. Only a group's area
+ * carries the switch; the owner's own chat always keeps them.
+ */
+export function threadKeepsPictures(db: Db, threadId: string): boolean {
+  const row = db.prepare("SELECT keep_pictures FROM life_areas WHERE thread_id=? AND user_id=?")
+    .get(threadId, USER_ID) as { keep_pictures: 0 | 1 } | undefined;
+  return row?.keep_pictures !== 0;
+}
+
 function rotateStaleConversation(db: Db, thread: ChannelThreadRow): ChannelThreadRow {
   const latest = db.prepare(`
     SELECT max(created_at) last FROM channel_messages WHERE thread_id=?
@@ -266,6 +276,48 @@ const STATUS_CLAIM_CHECK = [
   "Call set_todo_status now for each todo you said you changed, then write your reply again.",
   "If a tool result showed a todo already had that status, say that instead of claiming you changed it.",
 ].join(" ");
+
+/**
+ * A reply that says something was kept, in the first person: "I'll save this as
+ * today's entry", "saved", "I've logged it". A past turn said it and never
+ * called a tool, and the entry only existed after the owner asked "You didn't?".
+ * An offer ("want me to save it?") and a question about what is saved do not match.
+ */
+const SAVE_CLAIM = /\b(?:i(?:'ll| will|'ve| have|'m going to)|let me|going to)\s+(?:go ahead and\s+)?(?:save|saved|log|logged|remember|note|record|recorded|jot|jotted)\b|\b(?:saved|logged|recorded|remembered)(?:\s+(?:it|that|this|your|these|those|them)\b|\s*(?:[—–.!:,]|-{1,2}|$))/i;
+
+const SAVE_CLAIM_CHECK = [
+  "[runtime check, not from the user] Your reply says something was saved or will be saved,",
+  "but no create_memory, update_memory, or other write succeeded in this turn, so nothing was kept.",
+  "Call the matching tool now, then write your reply again.",
+  "If you were only offering, ask instead of confirming.",
+].join(" ");
+
+/**
+ * A reply that promises a text later: "I'll text you in 10 minutes". A promise
+ * of this kind was made in a group with no reminder behind it, so it never fired.
+ */
+const REMINDER_CLAIM = /\bi(?:'ll| will|'m going to)\s+(?:go ahead and\s+)?(?:text|remind|ping|nudge|message|notify)\s+(?:you|y'all|u|the group|everyone)\b|\bi(?:'ll| will)\s+send\s+(?:you|y'all)\s+a\s+(?:reminder|text|nudge)\b|\b(?:reminder|alarm|timer)\s+(?:is\s+|has been\s+|'s\s+)?(?:now\s+)?set\b|\bset (?:a|the|your) reminder\b|\bi(?:'ve| have) set (?:a|the|your|it|that)\b/i;
+
+const REMINDER_CLAIM_CHECK = [
+  "[runtime check, not from the user] Your reply promises a text or reminder at a later time,",
+  "but no reminder was created or changed in this turn, and nothing was read to show one exists, so nothing will be sent.",
+  "Create the todo with reminder_at (or call create_reminder for a todo that exists) now, then write your reply again.",
+  "If you were only offering, ask instead of promising.",
+].join(" ");
+
+/** The writes that put a reminder on the calendar; a todo write counts only when its result carries one. */
+const REMINDER_WRITE_TOOLS = new Set(["create_reminder", "update_reminder"]);
+const TODO_REMINDER_TOOLS = new Set(["create_todo", "update_todo"]);
+/** Reads that show which reminders exist, so a reply about one already there is backed. */
+const REMINDER_READ_TOOLS = new Set(["list_reminders", "get_agenda"]);
+
+/** Whether a todo write's result leaves a reminder on the todo. */
+function todoCarriesReminder(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  const record = data as { reminder_at?: unknown; extra_reminders?: unknown; recurrence?: unknown };
+  return Boolean(record.reminder_at) || (Array.isArray(record.extra_reminders) && record.extra_reminders.length > 0)
+    || Boolean(record.recurrence);
+}
 
 /** The mark for one round of tool calls, or `undefined` when the round is gestures only. */
 function progressReactionFor(toolNames: string[]): string | undefined {
@@ -653,6 +705,8 @@ export async function stageInboundPictures(
 ): Promise<void> {
   if (!urls.length) return;
   const thread = getOrCreateThread(db, "sms", address);
+  // A group that keeps no pictures still has them read; the turn fetches each from the provider's link.
+  if (!threadKeepsPictures(db, thread.id)) return;
   // The message's pictures share one allowance, so dead links cannot add up to a long wait.
   const budget = AbortSignal.timeout(STAGING_BUDGET_MS);
   for (const url of urls) {
@@ -1019,6 +1073,7 @@ async function viewUnviewedPictures(
   showMark: (() => Promise<void>) | undefined,
 ): Promise<{ body: string; describedEarlier: boolean; attachmentIds: string[] }> {
   const looking = imageInputMode() === "describe";
+  const keeps = threadKeepsPictures(db, threadId);
   const since = group ? heldPicturesSince(db, threadId) : "";
   const own = unviewedOn(inbound.id, inbound.body, inbound.mediaUrls, PICTURES_PER_TURN);
   const held = group && looking ? heldPictures(db, threadId, inbound, since, PICTURES_PER_TURN - (own[0]?.urls.length ?? 0)) : [];
@@ -1044,7 +1099,7 @@ async function viewUnviewedPictures(
     // A link the arrival could not fetch, but this look could, is kept now.
     looks.forEach((look, index) => {
       const url = picture.urls[index];
-      if (!look.fetched || stored.has(url) || attachmentsFull(db, look.fetched.bytes.length)) return;
+      if (!look.fetched || stored.has(url) || !keeps || attachmentsFull(db, look.fetched.bytes.length)) return;
       try {
         const row = stageForMessage(db, picture.id, url, look.fetched);
         if (row) stored.set(url, row);
@@ -1296,6 +1351,7 @@ function groupRoomContext(db: Db, threadId: string, areaId: string): Record<stri
   const roster = rosterLine(db, threadId);
   const times = db.prepare("SELECT morning_checkin_time,evening_checkin_time FROM life_areas WHERE id=?")
     .get(areaId) as { morning_checkin_time: string | null; evening_checkin_time: string | null } | undefined;
+  const keepsPictures = threadKeepsPictures(db, threadId);
   const schedule = [
     times?.morning_checkin_time ? `morning note at ${times.morning_checkin_time}` : null,
     times?.evening_checkin_time ? `evening question at ${times.evening_checkin_time}` : null,
@@ -1303,6 +1359,9 @@ function groupRoomContext(db: Db, threadId: string, areaId: string): Record<stri
   return {
     ...(roster ? { groupMembers: roster } : {}),
     groupCheckins: schedule || "none set; the owner can turn them on in the app",
+    ...(keepsPictures ? {} : {
+      groupPictures: "Pictures sent here are read but not kept: a memory holds only the text read off one, so never say a picture is attached or saved.",
+    }),
   };
 }
 
@@ -1653,7 +1712,11 @@ export async function runChannelAgent(
   let changedStatus = priorWrites.some(part => part.type === "tool-set_todo_status");
   let savedMemory = priorWrites.some(part => MEMORY_WRITE_TOOLS.has(String(part.type).slice(5)));
   let changedSoul = priorWrites.some(part => SOUL_WRITE_TOOLS.has(String(part.type).slice(5)));
-  let checkedStatusClaim = false;
+  // A reminder is backed by a write that left one, or by a read that showed one.
+  let reminderBacked = priorWrites.some(part => REMINDER_WRITE_TOOLS.has(String(part.type).slice(5))
+    || (TODO_REMINDER_TOOLS.has(String(part.type).slice(5)) && todoCarriesReminder((part.output as { data?: unknown } | undefined)?.data)));
+  // Each kind of unbacked claim is sent back once per turn, so a model that insists cannot loop the turn out of its budget.
+  const checkedClaims = new Set<string>();
   let lookedUp = false;
   const closingMark = (): string | undefined => {
     if (changedSoul) return CLOSING_REACTIONS.soul;
@@ -1752,15 +1815,20 @@ export async function runChannelAgent(
          * after the call, which the room has to be told about.
          */
         const kept = context.scope && context.stayedQuiet && !changedRecord ? "" : written;
-        // Once per turn, so a model that insists cannot loop the turn out of its budget.
         // Checked before a repeat is dropped: "checked it off" said twice is still a claim to back.
-        if (!changedStatus && !checkedStatusClaim && STATUS_CLAIM.test(kept)) {
-          checkedStatusClaim = true;
+        // App-composed turns are told to save nothing and promise nothing, so only a status claim is held there.
+        const unbacked = [
+          { name: "status", pattern: STATUS_CLAIM, backed: changedStatus, check: STATUS_CLAIM_CHECK },
+          { name: "save", pattern: SAVE_CLAIM, backed: changedRecord || Boolean(options.internal), check: SAVE_CLAIM_CHECK },
+          { name: "reminder", pattern: REMINDER_CLAIM, backed: reminderBacked || Boolean(options.internal), check: REMINDER_CLAIM_CHECK },
+        ].find(claim => !claim.backed && !checkedClaims.has(claim.name) && claim.pattern.test(kept));
+        if (unbacked) {
+          checkedClaims.add(unbacked.name);
           appendResponse(messages, response);
           messages.push({
             id: `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`,
             role: "user",
-            parts: [{ type: "text", text: STATUS_CLAIM_CHECK }],
+            parts: [{ type: "text", text: unbacked.check }],
           });
           continue;
         }
@@ -1795,8 +1863,10 @@ export async function runChannelAgent(
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
         }
         // An app-composed turn's text is a profile or a draft, not a message to mark.
-        const finalText = text
-          ? options.internal ? text : withWriteMarks(text, { soul: changedSoul, memory: savedMemory })
+        // A text message shows markdown as typed, so what is archived is what the phone shows.
+        const spoken = channel === "sms" ? plainText(text) : text;
+        const finalText = spoken
+          ? options.internal ? spoken : withWriteMarks(spoken, { soul: changedSoul, memory: savedMemory })
           : NO_TEXT_FALLBACK;
         // The reply is marked internal with the instruction on a scratch thread,
         // where the real message is recorded elsewhere once sent; on a real
@@ -1839,6 +1909,8 @@ export async function runChannelAgent(
             context.changedRecord = true;
           }
           if (toolName === "set_todo_status") changedStatus = true;
+          if (REMINDER_WRITE_TOOLS.has(toolName) || REMINDER_READ_TOOLS.has(toolName)
+            || (TODO_REMINDER_TOOLS.has(toolName) && todoCarriesReminder(data))) reminderBacked = true;
           if (MEMORY_WRITE_TOOLS.has(toolName)) savedMemory = true;
           if (SOUL_WRITE_TOOLS.has(toolName)) changedSoul = true;
         } catch (error) {

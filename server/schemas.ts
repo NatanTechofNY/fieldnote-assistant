@@ -206,6 +206,8 @@ export const lifeAreaPatch = lifeAreaCreate.partial().extend({
   evening_checkin_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use a 24-hour HH:MM time").nullable().optional(),
   /** Whether the owner is also texted a copy of the group's check-ins on their own number. */
   checkin_copy_to_owner: z.boolean().optional(),
+  /** Whether pictures sent in this group are kept as files; off, they are still read but not stored. */
+  keep_pictures: z.boolean().optional(),
   /** The owner's wording for each ask; null returns to the default. */
   morning_checkin_prompt: checkinPrompt.nullable().optional(),
   evening_checkin_prompt: checkinPrompt.nullable().optional(),

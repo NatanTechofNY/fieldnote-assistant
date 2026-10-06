@@ -11,7 +11,8 @@ import type { RouteContext } from "./context.ts";
 
 /**
  * What a group chat's area carries beyond its name: its check-ins — the two
- * local times, whether the owner gets a copy, the owner's wording for each ask
+ * local times, whether the owner gets a copy, the owner's wording for each ask,
+ * whether pictures sent there are kept as files
  * — and how the assistant behaves there: the group's Soul, what the group
  * calls it, and whether it answers only when named. Read and written together;
  * only an area a group owns may have any of them.
@@ -20,6 +21,7 @@ const GROUP_FIELDS = [
   "morning_checkin_time",
   "evening_checkin_time",
   "checkin_copy_to_owner",
+  "keep_pictures",
   "morning_checkin_prompt",
   "evening_checkin_prompt",
   "soul",
@@ -121,7 +123,7 @@ export function registerTaxonomyRoutes({ app, db, search, draftWithAgent }: Rout
       FROM life_areas WHERE id=? AND user_id=?
     `).get(req.params.id, USER_ID) as {
       id: string; slug: string; name: string; color: string; thread_id: string | null;
-      morning_checkin_time: string | null; evening_checkin_time: string | null; checkin_copy_to_owner: 0 | 1;
+      morning_checkin_time: string | null; evening_checkin_time: string | null; checkin_copy_to_owner: 0 | 1; keep_pictures: 0 | 1;
       morning_checkin_prompt: string | null; evening_checkin_prompt: string | null;
       soul: string | null; assistant_nickname: string | null; reply_mode: "normal" | "named_only";
     } | undefined;
