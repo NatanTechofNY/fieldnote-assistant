@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS life_areas (
   morning_checkin_time TEXT,
   evening_checkin_time TEXT,
   checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1)),
+  keep_pictures INTEGER NOT NULL DEFAULT 1 CHECK(keep_pictures IN (0,1)),
   morning_checkin_prompt TEXT,
   evening_checkin_prompt TEXT,
   soul TEXT,
@@ -570,6 +571,10 @@ function migrateMessaging(db: Db): void {
   // Whether the owner is also texted a copy of the group's check-ins on their own number.
   if (!areaColumns.has("checkin_copy_to_owner")) {
     db.exec("ALTER TABLE life_areas ADD COLUMN checkin_copy_to_owner INTEGER NOT NULL DEFAULT 0 CHECK(checkin_copy_to_owner IN (0,1))");
+  }
+  // Whether pictures sent in a group are kept as files. Off, they are still read, but only the text read off them is kept.
+  if (!areaColumns.has("keep_pictures")) {
+    db.exec("ALTER TABLE life_areas ADD COLUMN keep_pictures INTEGER NOT NULL DEFAULT 1 CHECK(keep_pictures IN (0,1))");
   }
   // Each person's mood on a shared journal entry; mood_label/mood_score are derived from it.
   if (!columns(db, "memories").has("moods_json")) db.exec("ALTER TABLE memories ADD COLUMN moods_json TEXT");

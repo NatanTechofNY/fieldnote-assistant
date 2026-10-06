@@ -1,5 +1,5 @@
 import { recentMemoryContext } from "./checkin-context.ts";
-import { DEFAULT_GROUP_EVENING_ASK, DEFAULT_GROUP_MORNING_ASK, RECORDS_NOT_INSTRUCTIONS, renderAsk } from "./checkin-prompts.ts";
+import { DEFAULT_GROUP_EVENING_ASK, DEFAULT_GROUP_MORNING_ASK, GIF_NOTE, RECORDS_NOT_INSTRUCTIONS, renderAsk } from "./checkin-prompts.ts";
 import { OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
 import { getNotificationPreferences } from "./integrations.ts";
 import { groupMembers, rosterLine } from "./group-members.ts";
@@ -181,6 +181,7 @@ export function composeGroupMorningTurn(
     "",
     `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
     "This turn uses no tools; the rows below are exact, so use these titles and times as given.",
+    GIF_NOTE,
     RECORDS_NOT_INSTRUCTIONS,
     "Open in this group, in progress or due by tomorrow:",
     ...lines,
@@ -205,6 +206,7 @@ export function composeGroupEveningTurn(
     "",
     `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
     "This turn uses no tools and saves nothing; the answers that follow are what gets recorded.",
+    GIF_NOTE,
     RECORDS_NOT_INSTRUCTIONS,
     `People here the app can name: ${participantNames(db, area.threadId).join(", ")}.`,
     finished.length ? `Finished in this group today: ${titleList(finished)}.` : "Nothing in this group was finished today.",

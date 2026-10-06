@@ -1,4 +1,5 @@
 import { describeJiraBoards } from "./atlassian-service.ts";
+import { GIF_NOTE_WITH_TOOLS } from "./checkin-prompts.ts";
 import { USER_ID } from "./db.ts";
 import type { Db, DigestBriefResource, DigestBriefRow } from "./types.ts";
 
@@ -99,5 +100,6 @@ export async function composeBriefTurn(
       ? "Use these IDs and keys directly; do not guess a board ID, space key, or status ID, and do not look up boards or spaces that are not listed."
       : "Nothing is pinned to this brief, so resolve any board or space by name with list_jira_boards or list_confluence_spaces before filtering.",
     `This is delivered as an SMS, so answer in under ${SMS_BUDGET} characters of plain text with no markdown, and lead with what changed.`,
+    GIF_NOTE_WITH_TOOLS,
   ].join("\n");
 }

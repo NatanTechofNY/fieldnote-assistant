@@ -7,9 +7,21 @@ import { ensureGroupLifeArea, groupAreas, id, now, queueIndexJob, recordMessageR
 import { recordGroupParticipants, rosterLine } from "./group-members.ts";
 import { EVENING_ANSWER_WINDOW_MS, eveningBeingAnswered, eveningEntryFor, eveningOccurredAt } from "./group-journal.ts";
 import { addressesAssistant, OWNER_SPEAKER_NAME, redactedNumber, speakerLabel, withoutQuotedSpans } from "./group-thread.ts";
+import { assertSendableImage, pullGifLine } from "./image-output.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset } from "./local-time.ts";
-import type { SmsSender } from "./messaging.ts";
+import {
+  claimsReminder,
+  claimsSave,
+  MAX_CLAIM_SCAN,
+  mentionsTodo,
+  readShowsReminder,
+  REMINDER_CLAIM_CHECK,
+  REMINDER_WRITE_TOOLS,
+  SAVE_CLAIM_CHECK,
+  todoWriteSetsReminder,
+} from "./claims.ts";
+import { plainText, type SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import {
   describeMediaDetailed, fetchPicture, fillPendingPictures, hasImageDescription, imageInputMode, PICTURE_BUDGET_MS,
@@ -48,6 +60,8 @@ const CONTEXT_WINDOW_MS = 24 * 60 * 60_000;
  * by the next text in the thread.
  */
 const MAX_TOOL_ITERATIONS = 16;
+/** A claim check costs a model round; with less than this left in the budget the reply goes out as written. */
+const CLAIM_CHECK_MARGIN_MS = 60_000;
 
 /**
  * How long a turn may keep going before it is abandoned. The round cap bounds
@@ -136,6 +150,26 @@ function rotateStaleConversation(db: Db, thread: ChannelThreadRow): ChannelThrea
   db.prepare("UPDATE channel_threads SET agent_conversation_id=?,updated_at=? WHERE id=?")
     .run(agent_conversation_id, now(), thread.id);
   return { ...thread, agent_conversation_id };
+}
+
+/** Whether a GIF the reply picked is still one the provider can fetch; if not, the words go out alone. */
+async function sendableGif(url: string): Promise<boolean> {
+  try {
+    await assertSendableImage(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether pictures sent on this thread are kept as files. Only a group's area
+ * carries the switch; the owner's own chat always keeps them.
+ */
+export function threadKeepsPictures(db: Db, threadId: string): boolean {
+  const row = db.prepare("SELECT keep_pictures FROM life_areas WHERE thread_id=? AND user_id=?")
+    .get(threadId, USER_ID) as { keep_pictures: 0 | 1 } | undefined;
+  return row?.keep_pictures !== 0;
 }
 
 /**
@@ -653,6 +687,8 @@ export async function stageInboundPictures(
 ): Promise<void> {
   if (!urls.length) return;
   const thread = getOrCreateThread(db, "sms", address);
+  // A group that keeps no pictures still has them read; the turn fetches each from the provider's link.
+  if (!threadKeepsPictures(db, thread.id)) return;
   // The message's pictures share one allowance, so dead links cannot add up to a long wait.
   const budget = AbortSignal.timeout(STAGING_BUDGET_MS);
   for (const url of urls) {
@@ -1019,6 +1055,7 @@ async function viewUnviewedPictures(
   showMark: (() => Promise<void>) | undefined,
 ): Promise<{ body: string; describedEarlier: boolean; attachmentIds: string[] }> {
   const looking = imageInputMode() === "describe";
+  const keeps = threadKeepsPictures(db, threadId);
   const since = group ? heldPicturesSince(db, threadId) : "";
   const own = unviewedOn(inbound.id, inbound.body, inbound.mediaUrls, PICTURES_PER_TURN);
   const held = group && looking ? heldPictures(db, threadId, inbound, since, PICTURES_PER_TURN - (own[0]?.urls.length ?? 0)) : [];
@@ -1044,7 +1081,7 @@ async function viewUnviewedPictures(
     // A link the arrival could not fetch, but this look could, is kept now.
     looks.forEach((look, index) => {
       const url = picture.urls[index];
-      if (!look.fetched || stored.has(url) || attachmentsFull(db, look.fetched.bytes.length)) return;
+      if (!look.fetched || stored.has(url) || !keeps || attachmentsFull(db, look.fetched.bytes.length)) return;
       try {
         const row = stageForMessage(db, picture.id, url, look.fetched);
         if (row) stored.set(url, row);
@@ -1296,6 +1333,7 @@ function groupRoomContext(db: Db, threadId: string, areaId: string): Record<stri
   const roster = rosterLine(db, threadId);
   const times = db.prepare("SELECT morning_checkin_time,evening_checkin_time FROM life_areas WHERE id=?")
     .get(areaId) as { morning_checkin_time: string | null; evening_checkin_time: string | null } | undefined;
+  const keepsPictures = threadKeepsPictures(db, threadId);
   const schedule = [
     times?.morning_checkin_time ? `morning note at ${times.morning_checkin_time}` : null,
     times?.evening_checkin_time ? `evening question at ${times.evening_checkin_time}` : null,
@@ -1303,6 +1341,9 @@ function groupRoomContext(db: Db, threadId: string, areaId: string): Record<stri
   return {
     ...(roster ? { groupMembers: roster } : {}),
     groupCheckins: schedule || "none set; the owner can turn them on in the app",
+    ...(keepsPictures ? {} : {
+      groupPictures: "Pictures sent here are read but not kept: a memory holds only the text read off one, so never say a picture is attached or saved.",
+    }),
   };
 }
 
@@ -1336,6 +1377,8 @@ export type AgentTurnResult = {
   inboundMessageId?: string;
   /** The archived reply; absent when the turn ended without one (a gesture, or stay_quiet). */
   replyMessageId?: string;
+  /** A GIF the reply picked with `GIF: <url>` on a turn that may attach one, sent with the text. */
+  mediaUrl?: string;
 };
 
 export async function runChannelAgent(
@@ -1355,6 +1398,13 @@ export async function runChannelAgent(
      * back as something the user said.
      */
     internal?: boolean;
+    /**
+     * The turn may attach a GIF: a scheduled message the owner asked to carry
+     * one. The reply picks it with a final `GIF: <url>` line, which has to be a
+     * link `find_gif` returned this turn; it is taken out of the words and
+     * handed back as `mediaUrl` for the caller to send with them.
+     */
+    gif?: boolean;
     /**
      * What the provider said about the message that started this turn. An
      * app-composed turn has none, which is what stops the iMessage tools from
@@ -1653,7 +1703,14 @@ export async function runChannelAgent(
   let changedStatus = priorWrites.some(part => part.type === "tool-set_todo_status");
   let savedMemory = priorWrites.some(part => MEMORY_WRITE_TOOLS.has(String(part.type).slice(5)));
   let changedSoul = priorWrites.some(part => SOUL_WRITE_TOOLS.has(String(part.type).slice(5)));
-  let checkedStatusClaim = false;
+  // A reminder is backed by a write that left one, or by a read that showed one.
+  let reminderBacked = priorWrites.some(part => {
+    const tool = String(part.type).slice(5);
+    return REMINDER_WRITE_TOOLS.has(tool)
+      || todoWriteSetsReminder(tool, part.input, (part.output as { data?: unknown } | undefined)?.data);
+  });
+  // Each kind of unbacked claim is sent back once per turn, so a model that insists cannot loop the turn out of its budget.
+  const checkedClaims = new Set<string>();
   let lookedUp = false;
   const closingMark = (): string | undefined => {
     if (changedSoul) return CLOSING_REACTIONS.soul;
@@ -1751,16 +1808,27 @@ export async function runChannelAgent(
          * top complaint, so the text is dropped — unless a record changed
          * after the call, which the room has to be told about.
          */
-        const kept = context.scope && context.stayedQuiet && !changedRecord ? "" : written;
-        // Once per turn, so a model that insists cannot loop the turn out of its budget.
+        const spokenOrQuiet = context.scope && context.stayedQuiet && !changedRecord ? "" : written;
+        // The GIF line is not words: it comes out before the claims are read and the text is archived.
+        const picked = options.gif ? pullGifLine(spokenOrQuiet, context.foundGifs) : { text: spokenOrQuiet };
+        const kept = picked.text;
         // Checked before a repeat is dropped: "checked it off" said twice is still a claim to back.
-        if (!changedStatus && !checkedStatusClaim && STATUS_CLAIM.test(kept)) {
-          checkedStatusClaim = true;
+        // App-composed turns are told to save nothing and promise nothing, so only a status claim is held there.
+        const unbacked = [
+          { name: "status", claimed: () => STATUS_CLAIM.test(kept.slice(0, MAX_CLAIM_SCAN)), backed: changedStatus, check: STATUS_CLAIM_CHECK },
+          // A memory write backs a save; a todo write backs it only for a reply that is about a todo or a list.
+          { name: "save", claimed: () => claimsSave(kept), backed: savedMemory || (changedRecord && mentionsTodo(kept)) || Boolean(options.internal), check: SAVE_CLAIM_CHECK },
+          { name: "reminder", claimed: () => claimsReminder(kept), backed: reminderBacked || Boolean(options.internal), check: REMINDER_CLAIM_CHECK },
+        ].find(claim => !claim.backed && !checkedClaims.has(claim.name) && claim.claimed());
+        // Near the end of the budget there is no round left to answer a check in: the reply goes as written.
+        const roomForCheck = iteration < (options.maxRounds ?? MAX_TOOL_ITERATIONS) - 2 && Date.now() < deadline - CLAIM_CHECK_MARGIN_MS;
+        if (unbacked && roomForCheck) {
+          checkedClaims.add(unbacked.name);
           appendResponse(messages, response);
           messages.push({
             id: `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`,
             role: "user",
-            parts: [{ type: "text", text: STATUS_CLAIM_CHECK }],
+            parts: [{ type: "text", text: unbacked.check }],
           });
           continue;
         }
@@ -1795,21 +1863,29 @@ export async function runChannelAgent(
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
         }
         // An app-composed turn's text is a profile or a draft, not a message to mark.
-        const finalText = text
-          ? options.internal ? text : withWriteMarks(text, { soul: changedSoul, memory: savedMemory })
+        // A text message shows markdown as typed, so what is archived is what the phone shows.
+        const spoken = channel === "sms" ? plainText(text) : text;
+        const finalText = spoken
+          ? options.internal ? spoken : withWriteMarks(spoken, { soul: changedSoul, memory: savedMemory })
           : NO_TEXT_FALLBACK;
         // The reply is marked internal with the instruction on a scratch thread,
         // where the real message is recorded elsewhere once sent; on a real
         // thread the caller keeps it public, since it is the message.
         const replyMark = (options.replyInternal ?? options.internal) ? { internal: true } : {};
+        // A GIF rides with words only, and only one the provider can still fetch.
+        const mediaUrl = spoken && picked.url && await sendableGif(picked.url) ? picked.url : undefined;
         const replyMessageId = saveChannelMessage(db, thread.id, "outbound", "assistant", finalText, undefined, {
           ...options.assistantMetadata,
+          ...(mediaUrl ? { mediaUrl } : {}),
           parts: response.parts,
           agentConversationId: thread.agent_conversation_id,
           ...replyMark,
         });
         search.flushSoon();
-        return { text: finalText, threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId, replyMessageId };
+        return {
+          text: finalText, threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId, replyMessageId,
+          ...(mediaUrl ? { mediaUrl } : {}),
+        };
       }
 
       // Real work is about to start, and the mark says on what. A batch that
@@ -1839,6 +1915,8 @@ export async function runChannelAgent(
             context.changedRecord = true;
           }
           if (toolName === "set_todo_status") changedStatus = true;
+          if (REMINDER_WRITE_TOOLS.has(toolName) || readShowsReminder(toolName, data)
+            || todoWriteSetsReminder(toolName, part.input, data)) reminderBacked = true;
           if (MEMORY_WRITE_TOOLS.has(toolName)) savedMemory = true;
           if (SOUL_WRITE_TOOLS.has(toolName)) changedSoul = true;
         } catch (error) {
@@ -1902,6 +1980,7 @@ export async function runSmsAgent(
   options: {
     fetcher?: typeof fetch;
     internal?: boolean;
+    gif?: boolean;
     userMessageMetadata?: Record<string, unknown>;
     inbound?: InboundContext;
     sendSms?: SmsSender;

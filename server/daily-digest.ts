@@ -1,5 +1,5 @@
 import { recentMemoryContext } from "./checkin-context.ts";
-import { DEFAULT_OWNER_EVENING_ASK, RECORDS_NOT_INSTRUCTIONS, renderAsk } from "./checkin-prompts.ts";
+import { DEFAULT_OWNER_EVENING_ASK, GIF_NOTE, GIF_NOTE_WITH_TOOLS, RECORDS_NOT_INSTRUCTIONS, renderAsk } from "./checkin-prompts.ts";
 import { dayTodoTitles, titleList } from "./group-checkin.ts";
 import { getReminders, OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
 import { localParts } from "./local-time.ts";
@@ -138,6 +138,7 @@ export function composeEveningCheckinTurn(
     "",
     `--- Context supplied by the app, not by me. Today is ${context.date} in ${context.timezone}.`,
     "This turn uses no tools and saves nothing; my answer is the entry.",
+    GIF_NOTE,
     RECORDS_NOT_INSTRUCTIONS,
     finished.length ? `Finished today: ${titleList(finished)}.` : "Nothing was finished today.",
     going.length ? `Still in progress: ${titleList(going)}.` : "Nothing is marked in progress.",
@@ -169,7 +170,7 @@ export function composeDigestTurn(
   const lead = active.length
     ? `Prepare my concise daily SMS reminder digest for ${context.date}. I have ${active.length} pending reminder${active.length === 1 ? "" : "s"}.${carried} Use the agenda and todo tools for exact titles and dates.`
     : `Send a concise daily SMS check-in for ${context.date}. I have no pending reminders.${carried}`;
-  if (!options.includeToday && !options.includeOverdue) return lead;
+  if (!options.includeToday && !options.includeOverdue) return `${lead}\n\n${GIF_NOTE_WITH_TOOLS}`;
   const distinctions = [
     today.length ? "which are due today and which are only reminding me" : null,
     overdue.length ? "which have been carried over from an earlier day" : null,
@@ -192,5 +193,6 @@ export function composeDigestTurn(
         + ` again, and make clear ${distinctions}.`,
       ]
       : [emptyNote(options)],
+    GIF_NOTE_WITH_TOOLS,
   ].join("\n");
 }

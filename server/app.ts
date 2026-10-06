@@ -83,6 +83,8 @@ export function createApp(options: AppOptions = {}): { app: express.Express; db:
   ) => (await runChannelAgent(db, search, draft.channel ?? "web", address, prompt, undefined, {
     userMessageMetadata: draft.context,
     internal: true,
+    // A brief's preview is told it may pick a GIF; the pick line comes out of the draft the way it does of a send.
+    gif: draft.context?.kind === "digest_brief",
   })).text);
   const app = express();
   app.disable("x-powered-by");

@@ -16,6 +16,8 @@ export interface LifeArea {
   evening_checkin_time?: string | null;
   /** Whether the owner is also texted a copy of the group's check-ins on their own number. */
   checkin_copy_to_owner?: number | boolean;
+  /** Whether pictures sent in the group are kept as files; absent or on keeps them. Group areas only. */
+  keep_pictures?: number | boolean;
   /** The owner's wording for each ask; null or absent uses the default. `{group}` stands for the group's name. */
   morning_checkin_prompt?: string | null;
   evening_checkin_prompt?: string | null;

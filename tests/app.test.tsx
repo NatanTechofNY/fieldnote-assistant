@@ -1807,6 +1807,12 @@ it("schedules a group's check-ins, and a copy to the owner, from the Group chats
   await userEvent.click(copy);
   await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { checkin_copy_to_owner: true } }));
 
+  // Pictures are kept unless the group's switch is turned off.
+  const keepPictures = screen.getByLabelText("Save pictures sent in Home");
+  expect(keepPictures).toBeChecked();
+  await userEvent.click(keepPictures);
+  await waitFor(() => expect(lifeAreaPatches.at(-1)).toEqual({ id: "area_group", body: { keep_pictures: false } }));
+
   // The wording shows the default with the group named, saves the owner's own, and goes back on "Use default".
   const wording = screen.getByLabelText("Morning check-in wording for Home") as HTMLTextAreaElement;
   expect(wording.placeholder).toBe('Write this morning\'s check-in for the group chat "Home": two or three warm sentences.');

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { archiveReactionText, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runSmsAgent } from "../server/agent-runner.ts";
+import { archiveReactionText, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
@@ -67,13 +67,14 @@ async function withEnv<T>(vars: Record<string, string | undefined>, run: () => P
 
 // No test reaches real DNS: every host is public unless a test says otherwise.
 setHostResolver(async () => ["93.184.216.34"]);
-import { isInboundSenderAllowed, sendSms } from "../server/messaging.ts";
+import { claimsReminder, claimsSave, readShowsReminder, todoWriteSetsReminder } from "../server/claims.ts";
+import { isInboundSenderAllowed, plainText, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { z } from "zod";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { executeAgentTool, resetBrowserTurnState, type ToolTurnContext } from "../server/tool-executor.ts";
 import { resetWebState } from "../server/web-service.ts";
-import { rememberImages } from "../server/image-output.ts";
+import { pullGifLine, rememberImages } from "../server/image-output.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
 import { TransientFailure } from "../server/transient.ts";
 import { sendTwilioSms } from "../server/twilio-service.ts";
@@ -2001,6 +2002,239 @@ describe("SMS, reminders, and channel agent execution", () => {
 
     assert.equal(response.text, "Marked Vacuum as done.");
     assert.equal(calls, 2, "no extra round when the claim is backed");
+  });
+
+  /*
+   * "I'll save this as today's entry" went out from a turn that called nothing,
+   * and the entry only existed after the owner asked "You didn't?".
+   */
+  it("sends a reply that promises to save back until a write lands", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    type Message = { id: string; role: string; parts: Array<{ type?: string; text?: string }> };
+    const requests: Message[][] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] };
+      requests.push(messages);
+      const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+      if (requests.length === 1) return reply([{ type: "text", text: "Love that. I\u2019ll save this as today\u2019s entry: productive, 5/5." }]);
+      if (requests.length === 2) {
+        return reply([{
+          type: "tool-create_memory", tool_call_id: "call_save", state: "input-available",
+          input: { kind: "journal", title: "Good productive day", content: "Day was good. Productive 5/5." },
+        }]);
+      }
+      return reply([{ type: "text", text: "Saved, a good productive day." }]);
+    };
+
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "Day was good. Productive 5/5", undefined, { fetcher });
+
+    assert.equal(requests.length, 3);
+    assert.match(requests[1][requests[1].length - 1].parts[0].text ?? "", /nothing was kept/);
+    assert.match(response.text, /^Saved, a good productive day\./);
+    assert.equal((db.prepare("SELECT count(*) count FROM memories WHERE title='Good productive day'").get() as { count: number }).count, 1);
+  });
+
+  it("lets a save that a write backs, and an offer to save, through untouched", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    let calls = 0;
+    const backed: typeof fetch = async () => {
+      calls += 1;
+      const parts = calls === 1
+        ? [{ type: "tool-create_memory", tool_call_id: "call_1", state: "input-available", input: { kind: "fact", title: "Gate code", content: "The gate code is on the fridge." } }]
+        : [{ type: "text", text: "Saved the gate note." }];
+      return new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+    };
+    assert.match((await runSmsAgent(db, fakeSearch(db), "+17185551111", "remember the gate code", undefined, { fetcher: backed })).text, /^Saved the gate note\./);
+    assert.equal(calls, 2, "no extra round when the save is backed");
+
+    calls = 0;
+    const offer: typeof fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "Want me to save that as today's entry?" }] }), { status: 200 });
+    };
+    assert.equal((await runSmsAgent(db, fakeSearch(db), "+17185551111", "good day", undefined, { fetcher: offer })).text, "Want me to save that as today's entry?");
+    assert.equal(calls, 1, "an offer is not a claim");
+
+    // A reply that reports an earlier save must not be told to write a duplicate.
+    for (const earlier of ["You saved your gate code on Sunday.", "Here's what I remembered: the code is on the fridge."]) {
+      calls = 0;
+      const readBack: typeof fetch = async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: earlier }] }), { status: 200 });
+      };
+      assert.equal((await runSmsAgent(db, fakeSearch(db), "+17185551111", "what did I save", undefined, { fetcher: readBack })).text, earlier);
+      assert.equal(calls, 1, `"${earlier}" is a read-back, not a claim`);
+    }
+  });
+
+  /*
+   * "I'll text you in 10 minutes" went out in a group from a turn with no tool
+   * call, so no reminder row existed to fire.
+   */
+  it("sends a reply that promises a text back until a reminder exists", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    type Message = { id: string; role: string; parts: Array<{ type?: string; text?: string }> };
+    const requests: Message[][] = [];
+    const due = new Date(Date.now() + 10 * 60_000).toISOString();
+    const fetcher: typeof fetch = async (_input, init) => {
+      const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] };
+      requests.push(messages);
+      const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+      if (requests.length === 1) return reply([{ type: "text", text: "Nice. I\u2019ll text you in 10 minutes about the post office." }]);
+      if (requests.length === 2) {
+        return reply([{
+          type: "tool-create_todo", tool_call_id: "call_todo", state: "input-available",
+          input: { title: "Post office", due_at: due, reminder_at: due },
+        }]);
+      }
+      return reply([{ type: "text", text: "Done, I'll text you then." }]);
+    };
+
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "Going to post office in 10 mins", undefined, { fetcher });
+
+    assert.equal(requests.length, 3);
+    assert.match(requests[1][requests[1].length - 1].parts[0].text ?? "", /nothing will be sent/);
+    assert.equal(response.text, "Done, I'll text you then.");
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM reminders r JOIN todos t ON t.id=r.todo_id WHERE t.title='Post office'").get() as { count: number }).count > 0,
+      true,
+      "a reminder row is there to fire",
+    );
+  });
+
+  it("reads claims the way a phone types them, and only claims", () => {
+    for (const claim of [
+      "Nice. I\u2019ll text you in 10 minutes about the post office.",
+      "Love that. I\u2019ll save this as today\u2019s entry.",
+      "Got it, saved.",
+      "I\u2019ve logged it.",
+      "Reminder\u2019s set for 3pm.",
+      "I set a reminder for 5.",
+      "You\u2019ll get a text at 5:30.",
+    ]) assert.equal(claimsSave(claim) || claimsReminder(claim), true, claim);
+    for (const quiet of [
+      "Want me to save that?",
+      "I can save that if you\u2019d like.",
+      "I\u2019ll save you a seat.",
+      "I remember the day we met.",
+      "I\u2019ll text you the link.",
+      "Should I text you at 5?",
+      "Saved earlier: the gate code is 42.",
+      "You saved your gate code on Sunday.",
+      "Here\u2019s what I remembered: the code is on the fridge.",
+      "Nothing to remind you of today.",
+    ]) assert.equal(claimsSave(quiet) || claimsReminder(quiet), false, quiet);
+    assert.equal(claimsReminder("I\u2019ll text you the link."), false, "a promise needs a when");
+    assert.equal(claimsReminder("I'll text you when it's time."), true);
+  });
+
+  it("counts a read as backing only when it showed a reminder, and a todo write only when it set one", () => {
+    assert.equal(readShowsReminder("list_reminders", []), false);
+    assert.equal(readShowsReminder("list_reminders", [{ id: "r1" }]), true);
+    assert.equal(readShowsReminder("get_agenda", { todos: [{ id: "t" }], reminders: [] }), false);
+    assert.equal(readShowsReminder("get_agenda", { todos: [], reminders: [{ id: "r1" }] }), true);
+    assert.equal(todoWriteSetsReminder("create_todo", { title: "x", reminder_at: "2026-10-06T12:00:00Z" }, { reminder_at: "2026-10-06T12:00:00Z" }), true);
+    assert.equal(todoWriteSetsReminder("create_todo", { title: "x" }, { reminder_at: null }), false);
+    assert.equal(todoWriteSetsReminder("update_todo", { id: "t", patch: { title: "renamed" } }, { reminder_at: "2026-10-06T12:00:00Z" }), false, "a rename of a todo that had a reminder promised nothing");
+    assert.equal(todoWriteSetsReminder("update_todo", { id: "t", patch: { reminder_at: "2026-10-06T12:00:00Z" } }, { reminder_at: "2026-10-06T12:00:00Z" }), true);
+  });
+
+  it("holds a promise to text after a read that found no reminders", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    type Message = { id: string; role: string; parts: Array<{ type?: string; text?: string }> };
+    const requests: Message[][] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      requests.push((JSON.parse(String(init?.body)) as { messages: Message[] }).messages);
+      const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+      if (requests.length === 1) {
+        return reply([{
+          type: "tool-list_reminders", tool_call_id: "call_list", state: "input-available",
+          input: { from: "2026-10-06T00:00:00Z", to: "2026-10-07T00:00:00Z" },
+        }]);
+      }
+      if (requests.length === 2) return reply([{ type: "text", text: "Sure, I\u2019ll text you in 10 minutes." }]);
+      return reply([{ type: "text", text: "I can\u2019t set that yet. What is it for?" }]);
+    };
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "ping me in 10", undefined, { fetcher });
+    assert.equal(requests.length, 3, "an empty list is not a reminder");
+    assert.match(response.text, /What is it for/);
+  });
+
+  it("flattens markdown without turning prose into list items or eating code", () => {
+    assert.equal(plainText("**See** *https://example.com/a_b*."), "See https://example.com/a_b.");
+    assert.equal(plainText("Read **https://example.com/x**"), "Read https://example.com/x");
+    assert.equal(plainText("<https://example.com/x>"), "https://example.com/x");
+    assert.equal(plainText("Scores >3 and >= 5 are fine"), "Scores >3 and >= 5 are fine");
+    assert.equal(plainText("> a quoted line"), "a quoted line");
+    assert.equal(plainText("It is 2**3 and 2**4"), "It is 2**3 and 2**4");
+    assert.equal(plainText("open path/to/__init__.py now"), "open path/to/__init__.py now");
+    assert.equal(plainText("3. That was close"), "3. That was close", "one numbered line is a sentence");
+    assert.equal(plainText("1. one\n2. two"), "one\ntwo");
+    assert.equal(plainText("***both***"), "both");
+    for (const text of ["**bold *nested* bold**", "- - nested", "# **Title**", "a \uE000 b **c**"]) {
+      assert.equal(plainText(plainText(text)), plainText(text), `idempotent: ${text}`);
+    }
+    assert.equal(plainText("\uE0000\uE000 and https://x.test"), "0 and https://x.test", "a stray sentinel cannot swap in a link");
+  });
+
+  it("flattens a long reply of the wrong shape in linear time", () => {
+    const shapes = [
+      "[a](http://x".repeat(2500),
+      "**a ".repeat(6000),
+      "*a ".repeat(6000),
+      "__a ".repeat(6000),
+      `${" ".repeat(30_000)}x`,
+      "`a".repeat(12_000),
+      "```x\n".repeat(4000),
+      "> ".repeat(10_000),
+    ];
+    const started = Date.now();
+    for (const shape of shapes) plainText(shape);
+    for (const shape of ["\n".repeat(30_000), "a. ".repeat(10_000), " I\u2019ll ".repeat(5000)]) {
+      claimsSave(shape);
+      claimsReminder(shape);
+    }
+    assert.ok(Date.now() - started < 3000, `took ${Date.now() - started}ms`);
+  });
+
+  it("sends a text without markdown, and keeps the web chat's", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    const marked = "**Metis**:  \n\n- Check *status*\n- Fix the [YC bug](https://example.com/bug)";
+    const fetcher: typeof fetch = async () =>
+      new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: marked }] }), { status: 200 });
+
+    const text = await runSmsAgent(db, fakeSearch(db), "+17185551111", "break it down", undefined, { fetcher });
+    assert.equal(text.text, "Metis:\n\nCheck status\nFix the YC bug https://example.com/bug");
+    const archived = db.prepare("SELECT content FROM channel_messages WHERE role='assistant' AND direction='outbound'").get() as { content: string };
+    assert.equal(archived.content, text.text, "the archive holds what the phone shows");
+
+    const web = await runChannelAgent(db, fakeSearch(db), "web", "web", "break it down", undefined, { fetcher });
+    assert.equal(web.text, marked, "the web chat renders markdown, so it is left alone");
+  });
+
+  it("flattens markdown for a text and leaves plain prose and look-alikes alone", () => {
+    assert.equal(plainText("**Bold** and __also this__ and *lean*"), "Bold and also this and lean");
+    assert.equal(plainText("# Plan\n1. one\n2) two\n* three\n- four"), "Plan\none\ntwo\nthree\nfour");
+    assert.equal(plainText("```js\nlet a = 1\n```\nuse `npm test`"), "let a = 1\nuse npm test");
+    assert.equal(plainText("![cat](https://x.test/c.png) and [x](https://x.test)"), "cat https://x.test/c.png and x https://x.test");
+    assert.equal(plainText("Line one  \n\n\n\nLine two   "), "Line one\n\nLine two");
+    assert.equal(plainText("5*3 = 15, snake_case_name, 2026-10-06 at 2:41 PM, rate 4* hotel"), "5*3 = 15, snake_case_name, 2026-10-06 at 2:41 PM, rate 4* hotel");
+    assert.equal(plainText("https://example.com/a_b_c?x=*1*"), "https://example.com/a_b_c?x=*1*");
   });
 
   /*
@@ -7507,6 +7741,63 @@ describe("Sendblue provider", () => {
       assert.equal(got.attachments.length, 1);
     });
 
+    it("keeps a group's pictures only while its switch is on", async () => {
+      keepFilesInScratch();
+      const { db, api } = fixture();
+      const { area, context } = groupContext(db, "thread_pic_switch");
+      const fetcher: typeof fetch = async () => new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+      const stored = () => (db.prepare("SELECT count(*) n FROM attachments WHERE thread_id=?").get(context.threadId) as { n: number }).n;
+
+      assert.equal((await api.get("/api/life-areas").expect(200)).body.data.find((row: { id: string }) => row.id === area.id).keep_pictures, 1, "on by default");
+      await stageInboundPictures(db, context.address, "SB_on", [receipt], fetcher);
+      assert.equal(stored(), 1, "kept while the switch is on");
+
+      const off = (await api.patch(`/api/life-areas/${area.id}`).send({ keep_pictures: false }).expect(200)).body.data;
+      assert.equal(off.keep_pictures, 0);
+      await stageInboundPictures(db, context.address, "SB_off", [`${receipt}?two`], fetcher);
+      assert.equal(stored(), 1, "nothing more is stored once it is off");
+      assert.equal(readdirSync(scratch).length, 1, "and no file is written");
+
+      const back = (await api.patch(`/api/life-areas/${area.id}`).send({ keep_pictures: true }).expect(200)).body.data;
+      assert.equal(back.keep_pictures, 1);
+      await stageInboundPictures(db, context.address, "SB_back", [`${receipt}?three`], fetcher);
+      assert.equal(stored(), 2);
+
+      await api.patch("/api/life-areas/area_work").send({ keep_pictures: false }).expect(400);
+    });
+
+    it("still reads a picture in a group that keeps none, and says nothing is attached", () => withEnv({
+      OPENAI_API_KEY: "sk-test",
+      OPENAI_BASE_URL: undefined,
+      OPENAI_DOCUMENT_DETAIL: undefined,
+    }, async () => {
+      keepFilesInScratch();
+      const { db, api } = connectedFixture();
+      withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+      agentStudioEnv();
+      // The group's thread and area exist before its first picture, as they do once it has been talked in.
+      const { area } = groupContext(db, GROUP);
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`)
+        .send(groupMessage(WIFE, "", { media_url: receipt, message_handle: "SB_none" })).expect(200);
+      await api.patch(`/api/life-areas/${area.id}`).send({ keep_pictures: false }).expect(200);
+      const seen: string[] = [];
+      const vision: string[] = [];
+      const agent = agentCallingMany([
+        { tool: "create_memory", input: { title: "Corner Market", content: "Groceries, 42.17 USD on Oct 3.", kind: "note" } },
+      ], "Saved it.");
+      await runWorkerOnce(db, fakeSearch(db), workerFor(agent.fetcher, network(seen, vision)) as never);
+
+      assert.deepEqual(vision, ["glance", "detailed"], "the picture is still read");
+      const archived = db.prepare("SELECT content FROM channel_messages WHERE provider_message_id='SB_none'").get() as { content: string };
+      assert.match(archived.content, /invoice 4471/, "and what it says is archived");
+      assert.equal((db.prepare("SELECT count(*) n FROM attachments").get() as { n: number }).n, 0, "no picture is stored");
+      assert.equal(readdirSync(scratch).length, 0, "and no file is written");
+      const memory = db.prepare("SELECT id FROM memories").get() as { id: string };
+      assert.deepEqual(db.prepare("SELECT attachment_id FROM memory_attachments WHERE memory_id=?").all(memory.id), [], "the memory carries only the words");
+      const turnContext = ((agent.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+      assert.match(String(turnContext.groupPictures), /read but not kept/);
+    }));
+
     /** The owner's own chat: no group area, so what it files is the owner's private records. */
     function ownerContext(db: Db, threadId: string): ToolTurnContext {
       const stamp = new Date().toISOString();
@@ -8031,6 +8322,116 @@ describe("Sendblue provider", () => {
     const outputs = toolOutputs(db, address);
     assert.match(outputs.delete_todo.error ?? "", /^This turn is the app asking you to write the group morning; it uses no tools, so write the text instead$/);
     assert.match(outputs.send_message.error ?? "", /uses no tools/);
+  });
+
+  /*
+   * A scheduled message the owner told to "end with a GIF" had no way to: a
+   * check-in refused every tool, and a digest's sends went to its scratch thread.
+   */
+  it("sends the GIF a scheduled message picked with it, and refuses everything else a check-in could try", async () => {
+    const { db, api, area } = checkinFixture();
+    agentStudioEnv();
+    const address = `group:${GROUP}`;
+    const laundry = (await api.post("/api/todos").send({ title: "Laundry", life_area_id: area.id, due_at: "2030-01-19T21:00:00.000Z" }).expect(201)).body.data;
+    await api.patch(`/api/todos/${laundry.id}/status`).send({ status: "in_progress" }).expect(200);
+    await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30", checkin_copy_to_owner: true }).expect(200);
+    const gifUrl = "https://media2.giphy.com/media/abc123/giphy-downsized.gif";
+    const before = process.env.GIPHY_API_KEY;
+    process.env.GIPHY_API_KEY = "giphy_test_key";
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.host === "api.giphy.com") {
+        return Response.json({ data: [{ id: "abc123", title: "Happy Dance", images: { downsized: { url: `${gifUrl}?cid=tracking` } } }] });
+      }
+      if (url.host === "media2.giphy.com") return new Response(null, { headers: { "content-type": "image/gif", "content-length": "900000" } });
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    let round = 0;
+    const requests: Array<{ messages: Array<{ parts: Array<{ text?: string }> }> }> = [];
+    const composes: typeof fetch = async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      round += 1;
+      if (round === 1) {
+        return new Response(JSON.stringify({
+          role: "assistant",
+          parts: [
+            { type: "tool-find_gif", tool_call_id: "call_gif", state: "input-available", input: { query: "happy dance", limit: 3 } },
+            { type: "tool-send_image", tool_call_id: "call_img", state: "input-available", input: { url: gifUrl, caption: null } },
+            { type: "tool-web_search", tool_call_id: "call_web", state: "input-available", input: { query: "laundry", limit: 3 } },
+          ],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        role: "assistant",
+        parts: [{ type: "text", text: `Morning! Laundry is still going.\n\nGIF: ${gifUrl}` }],
+      }), { status: 200 });
+    };
+    const sends: Array<{ to: string; body: string; mediaUrl?: string; groupId?: string }> = [];
+    const restore = atUtcTime("09:00");
+    try {
+      await runWorkerOnce(db, fakeSearch(db), {
+        sendSms: async (_db: Db, to: string, body: string, options?: { groupId?: string; mediaUrl?: string }) => {
+          sends.push({ to, body, ...(options?.groupId ? { groupId: options.groupId } : {}), ...(options?.mediaUrl ? { mediaUrl: options.mediaUrl } : {}) });
+          return { sid: `SB_${sends.length}`, status: "queued" as const };
+        },
+        runSmsAgent: (...args: Parameters<typeof runSmsAgent>) =>
+          runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher: composes }),
+        pollGranola: async () => ({ fetched: 0, queued: 0 }),
+        startTypingIndicator: () => () => {},
+      });
+    } finally {
+      restore();
+      globalThis.fetch = realFetch;
+      if (before === undefined) delete process.env.GIPHY_API_KEY; else process.env.GIPHY_API_KEY = before;
+    }
+
+    assert.deepEqual(sends, [
+      { to: address, body: "Morning! Laundry is still going.", groupId: GROUP, mediaUrl: gifUrl },
+      { to: "+17185551111", body: "[Home] Morning! Laundry is still going.", mediaUrl: gifUrl },
+    ], "the GIF goes with the words, in the group and in the owner's copy, and the pick line is not part of the words");
+    assert.match(requests[0].messages.at(-1)?.parts[0]?.text ?? "", /find_gif is the one tool|The one tool this turn has is find_gif/);
+    const outputs = toolOutputs(db, address);
+    assert.equal(outputs.find_gif.error, undefined, "the check-in may look for a GIF");
+    assert.match(outputs.send_image.error ?? "", /uses no tools/, "the app sends the GIF, not the agent");
+    assert.match(outputs.web_search.error ?? "", /uses no tools/);
+    const note = db.prepare(`
+      SELECT m.content,m.metadata_json FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+      WHERE t.address=? AND m.role='assistant' AND m.direction='outbound'
+    `).get(address) as { content: string; metadata_json: string };
+    assert.equal(note.content, "Morning! Laundry is still going.");
+    assert.equal(JSON.parse(note.metadata_json).mediaUrl, gifUrl, "the archive shows the picture that went out");
+  });
+
+  it("takes a GIF line out of a digest and attaches only a link find_gif returned", async () => {
+    const { db } = fixture();
+    agentStudioEnv();
+    const ask = async (text: string, options: { gif?: boolean }) => {
+      const fetcher: typeof fetch = async () => new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text }] }), { status: 200 });
+      return runSmsAgent(db, fakeSearch(db), `digest:${RECIPIENT}`, "Send my digest", undefined, {
+        fetcher, internal: true, ...options, userMessageMetadata: { kind: "daily_digest", date: "2030-01-15" },
+      });
+    };
+    const invented = "https://evil.example.com/x.gif?records=everything";
+    const composed = await ask(`Good morning, two things today.\nGIF: ${invented}`, { gif: true });
+    assert.equal(composed.text, "Good morning, two things today.", "the pick line is never part of the words");
+    assert.equal(composed.mediaUrl, undefined, "a link no tool returned is one the model composed");
+    const off = await ask("Good morning.\nGIF: https://media2.giphy.com/media/abc123/giphy-downsized.gif", {});
+    assert.match(off.text, /GIF:/, "a turn that was not offered a GIF keeps its words as written");
+    assert.equal(off.mediaUrl, undefined);
+    assert.equal(
+      pullGifLine("A line.\nGIF: nothing today", new Set()).text,
+      "A line.\nGIF: nothing today",
+      "a line that says GIF with no link is words",
+    );
+    assert.match(composeDigestTurn(db, { date: "2030-01-15", timezone: "UTC", includeTodos: false, includeOverdue: false }), /`GIF: `/);
+    // A digest's agent can read and look for a GIF, but a mid-turn send would go to its scratch thread.
+    const digestTurn: ToolTurnContext = { channel: "sms", address: `digest:${RECIPIENT}`, threadId: "thread_digest", appTurn: "daily_digest" };
+    await assert.rejects(
+      executeAgentTool(db, { flushSoon() {} }, "send_message", { text: "hi" }, digestTurn),
+      /sends your reply itself/,
+    );
   });
 
   it("stays silent on a morning with nothing open, and is held by the switch and quiet hours", async () => {
@@ -9270,6 +9671,17 @@ describe("Sendblue provider", () => {
     const claim = agentCallingMany([{ tool: "send_message", input: { text: "Checked it off" } }], "Checked it off");
     await runSmsAgent(db, fakeSearch(db), address, "Fieldnote, laundry's done", "SB_storm_3", { ...options, fetcher: claim.fetcher });
     assert.match(JSON.stringify(claim.requests.at(-1)), /runtime check, not from the user/, "the claim earns the corrective round");
+
+    // What a tool sends is flattened before it is sent, archived, and compared with the closing line.
+    const flat = agentCallingMany([{ tool: "send_message", input: { text: "**Heads up**\n- bring a coat" } }], "Heads up\nbring a coat");
+    const flatTurn = await runSmsAgent(db, fakeSearch(db), address, "Fieldnote, anything else?", "SB_storm_4", { ...options, fetcher: flat.fetcher });
+    assert.equal(texted.at(-1), "Heads up\nbring a coat");
+    assert.equal(flatTurn.text, "", "the closing line repeats the flattened bubble");
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM channel_messages WHERE content LIKE '%**Heads up**%'").get() as { count: number }).count,
+      0,
+      "no markdown reaches the archive",
+    );
   });
 
   it("writes a said todo itself when its time comes, logs it done, and keeps it off the morning note", async () => {
