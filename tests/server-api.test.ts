@@ -67,6 +67,7 @@ async function withEnv<T>(vars: Record<string, string | undefined>, run: () => P
 
 // No test reaches real DNS: every host is public unless a test says otherwise.
 setHostResolver(async () => ["93.184.216.34"]);
+import { claimsReminder, claimsSave, readShowsReminder, todoWriteSetsReminder } from "../server/claims.ts";
 import { isInboundSenderAllowed, plainText, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { z } from "zod";
@@ -2018,7 +2019,7 @@ describe("SMS, reminders, and channel agent execution", () => {
       const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] };
       requests.push(messages);
       const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
-      if (requests.length === 1) return reply([{ type: "text", text: "Love that. I'll save this as today's entry: productive, 5/5." }]);
+      if (requests.length === 1) return reply([{ type: "text", text: "Love that. I\u2019ll save this as today\u2019s entry: productive, 5/5." }]);
       if (requests.length === 2) {
         return reply([{
           type: "tool-create_memory", tool_call_id: "call_save", state: "input-available",
@@ -2088,7 +2089,7 @@ describe("SMS, reminders, and channel agent execution", () => {
       const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] };
       requests.push(messages);
       const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
-      if (requests.length === 1) return reply([{ type: "text", text: "Nice. I'll text you in 10 minutes about the post office." }]);
+      if (requests.length === 1) return reply([{ type: "text", text: "Nice. I\u2019ll text you in 10 minutes about the post office." }]);
       if (requests.length === 2) {
         return reply([{
           type: "tool-create_todo", tool_call_id: "call_todo", state: "input-available",
@@ -2110,6 +2111,104 @@ describe("SMS, reminders, and channel agent execution", () => {
     );
   });
 
+  it("reads claims the way a phone types them, and only claims", () => {
+    for (const claim of [
+      "Nice. I\u2019ll text you in 10 minutes about the post office.",
+      "Love that. I\u2019ll save this as today\u2019s entry.",
+      "Got it, saved.",
+      "I\u2019ve logged it.",
+      "Reminder\u2019s set for 3pm.",
+      "I set a reminder for 5.",
+      "You\u2019ll get a text at 5:30.",
+    ]) assert.equal(claimsSave(claim) || claimsReminder(claim), true, claim);
+    for (const quiet of [
+      "Want me to save that?",
+      "I can save that if you\u2019d like.",
+      "I\u2019ll save you a seat.",
+      "I remember the day we met.",
+      "I\u2019ll text you the link.",
+      "Should I text you at 5?",
+      "Saved earlier: the gate code is 42.",
+      "You saved your gate code on Sunday.",
+      "Here\u2019s what I remembered: the code is on the fridge.",
+      "Nothing to remind you of today.",
+    ]) assert.equal(claimsSave(quiet) || claimsReminder(quiet), false, quiet);
+    assert.equal(claimsReminder("I\u2019ll text you the link."), false, "a promise needs a when");
+    assert.equal(claimsReminder("I'll text you when it's time."), true);
+  });
+
+  it("counts a read as backing only when it showed a reminder, and a todo write only when it set one", () => {
+    assert.equal(readShowsReminder("list_reminders", []), false);
+    assert.equal(readShowsReminder("list_reminders", [{ id: "r1" }]), true);
+    assert.equal(readShowsReminder("get_agenda", { todos: [{ id: "t" }], reminders: [] }), false);
+    assert.equal(readShowsReminder("get_agenda", { todos: [], reminders: [{ id: "r1" }] }), true);
+    assert.equal(todoWriteSetsReminder("create_todo", { title: "x", reminder_at: "2026-10-06T12:00:00Z" }, { reminder_at: "2026-10-06T12:00:00Z" }), true);
+    assert.equal(todoWriteSetsReminder("create_todo", { title: "x" }, { reminder_at: null }), false);
+    assert.equal(todoWriteSetsReminder("update_todo", { id: "t", patch: { title: "renamed" } }, { reminder_at: "2026-10-06T12:00:00Z" }), false, "a rename of a todo that had a reminder promised nothing");
+    assert.equal(todoWriteSetsReminder("update_todo", { id: "t", patch: { reminder_at: "2026-10-06T12:00:00Z" } }, { reminder_at: "2026-10-06T12:00:00Z" }), true);
+  });
+
+  it("holds a promise to text after a read that found no reminders", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    type Message = { id: string; role: string; parts: Array<{ type?: string; text?: string }> };
+    const requests: Message[][] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      requests.push((JSON.parse(String(init?.body)) as { messages: Message[] }).messages);
+      const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+      if (requests.length === 1) {
+        return reply([{
+          type: "tool-list_reminders", tool_call_id: "call_list", state: "input-available",
+          input: { from: "2026-10-06T00:00:00Z", to: "2026-10-07T00:00:00Z" },
+        }]);
+      }
+      if (requests.length === 2) return reply([{ type: "text", text: "Sure, I\u2019ll text you in 10 minutes." }]);
+      return reply([{ type: "text", text: "I can\u2019t set that yet. What is it for?" }]);
+    };
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "ping me in 10", undefined, { fetcher });
+    assert.equal(requests.length, 3, "an empty list is not a reminder");
+    assert.match(response.text, /What is it for/);
+  });
+
+  it("flattens markdown without turning prose into list items or eating code", () => {
+    assert.equal(plainText("**See** *https://example.com/a_b*."), "See https://example.com/a_b.");
+    assert.equal(plainText("Read **https://example.com/x**"), "Read https://example.com/x");
+    assert.equal(plainText("<https://example.com/x>"), "https://example.com/x");
+    assert.equal(plainText("Scores >3 and >= 5 are fine"), "Scores >3 and >= 5 are fine");
+    assert.equal(plainText("> a quoted line"), "a quoted line");
+    assert.equal(plainText("It is 2**3 and 2**4"), "It is 2**3 and 2**4");
+    assert.equal(plainText("open path/to/__init__.py now"), "open path/to/__init__.py now");
+    assert.equal(plainText("3. That was close"), "3. That was close", "one numbered line is a sentence");
+    assert.equal(plainText("1. one\n2. two"), "one\ntwo");
+    assert.equal(plainText("***both***"), "both");
+    for (const text of ["**bold *nested* bold**", "- - nested", "# **Title**", "a \uE000 b **c**"]) {
+      assert.equal(plainText(plainText(text)), plainText(text), `idempotent: ${text}`);
+    }
+    assert.equal(plainText("\uE0000\uE000 and https://x.test"), "0 and https://x.test", "a stray sentinel cannot swap in a link");
+  });
+
+  it("flattens a long reply of the wrong shape in linear time", () => {
+    const shapes = [
+      "[a](http://x".repeat(2500),
+      "**a ".repeat(6000),
+      "*a ".repeat(6000),
+      "__a ".repeat(6000),
+      `${" ".repeat(30_000)}x`,
+      "`a".repeat(12_000),
+      "```x\n".repeat(4000),
+      "> ".repeat(10_000),
+    ];
+    const started = Date.now();
+    for (const shape of shapes) plainText(shape);
+    for (const shape of ["\n".repeat(30_000), "a. ".repeat(10_000), " I\u2019ll ".repeat(5000)]) {
+      claimsSave(shape);
+      claimsReminder(shape);
+    }
+    assert.ok(Date.now() - started < 3000, `took ${Date.now() - started}ms`);
+  });
+
   it("sends a text without markdown, and keeps the web chat's", async () => {
     const { db } = fixture();
     process.env.ALGOLIA_APPLICATION_ID = "app";
@@ -2129,7 +2228,7 @@ describe("SMS, reminders, and channel agent execution", () => {
   });
 
   it("flattens markdown for a text and leaves plain prose and look-alikes alone", () => {
-    assert.equal(plainText("**Bold** and __also__ and *lean*"), "Bold and also and lean");
+    assert.equal(plainText("**Bold** and __also this__ and *lean*"), "Bold and also this and lean");
     assert.equal(plainText("# Plan\n1. one\n2) two\n* three\n- four"), "Plan\none\ntwo\nthree\nfour");
     assert.equal(plainText("```js\nlet a = 1\n```\nuse `npm test`"), "let a = 1\nuse npm test");
     assert.equal(plainText("![cat](https://x.test/c.png) and [x](https://x.test)"), "cat https://x.test/c.png and x https://x.test");
@@ -9462,6 +9561,17 @@ describe("Sendblue provider", () => {
     const claim = agentCallingMany([{ tool: "send_message", input: { text: "Checked it off" } }], "Checked it off");
     await runSmsAgent(db, fakeSearch(db), address, "Fieldnote, laundry's done", "SB_storm_3", { ...options, fetcher: claim.fetcher });
     assert.match(JSON.stringify(claim.requests.at(-1)), /runtime check, not from the user/, "the claim earns the corrective round");
+
+    // What a tool sends is flattened before it is sent, archived, and compared with the closing line.
+    const flat = agentCallingMany([{ tool: "send_message", input: { text: "**Heads up**\n- bring a coat" } }], "Heads up\nbring a coat");
+    const flatTurn = await runSmsAgent(db, fakeSearch(db), address, "Fieldnote, anything else?", "SB_storm_4", { ...options, fetcher: flat.fetcher });
+    assert.equal(texted.at(-1), "Heads up\nbring a coat");
+    assert.equal(flatTurn.text, "", "the closing line repeats the flattened bubble");
+    assert.equal(
+      (db.prepare("SELECT count(*) count FROM channel_messages WHERE content LIKE '%**Heads up**%'").get() as { count: number }).count,
+      0,
+      "no markdown reaches the archive",
+    );
   });
 
   it("writes a said todo itself when its time comes, logs it done, and keeps it off the morning note", async () => {

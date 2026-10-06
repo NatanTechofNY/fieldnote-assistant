@@ -23,7 +23,7 @@ import {
   PROFILE_REFRESH_TIME, PROFILE_REFRESH_UNTIL, profileState, setGroupProfile, setOwnerProfile,
 } from "./profile.ts";
 import { localParts } from "./local-time.ts";
-import { isSmsProviderConnected, sendSms, startTypingIndicator } from "./messaging.ts";
+import { isSmsProviderConnected, plainText, sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks, reopenStepsForNextOccurrence, syncOccurrenceCompletion } from "./todo-status.ts";
 import { isTransientFailure } from "./transient.ts";
 import { sendQueuedUnthreadedResends } from "./unthreaded-resend.ts";
@@ -629,7 +629,7 @@ async function deliverReminder(
       // The runner already archived the reply on the thread; this pins the provider's id to it.
       recordOutboundProviderMessage(db, said.turn.threadId, message.sid, message.status, undefined, said.turn.replyMessageId);
     } else {
-      const content = reminderBody(db, reminder, groupBound);
+      const content = plainText(reminderBody(db, reminder, groupBound));
       message = await send(db, target, content, groupBound ? { groupId } : {});
       recordOutboundChannelMessage(db, "sms", target, content, message.sid, message.status, {
         kind: "reminder",

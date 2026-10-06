@@ -24,7 +24,7 @@ import {
 } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
 import { localIsoWithOffset, zonedToInstant } from "./local-time.ts";
-import { sendSms, type SmsSender } from "./messaging.ts";
+import { plainText, sendSms, type SmsSender } from "./messaging.ts";
 import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
 import { SOUL_MAX, toolInput, type ToolName } from "./schemas.ts";
@@ -791,7 +791,8 @@ export async function executeAgentTool(
     // line that deserves to stand alone. Filed like a product card, so the
     // archive and the index carry it as a message the assistant sent.
     const turn = textingTurn(context);
-    const text = input.text as string;
+    // Flattened here, not only in sendSms: the archive and the dedupe against the closing reply must hold what was delivered.
+    const text = plainText(input.text as string) || (input.text as string);
     const send = turn.sendSms ?? sendSms;
     const delivered = await send(db, turn.address, text, turn.groupId ? { groupId: turn.groupId } : undefined);
     insertOutboundChannelMessage(db, turn.threadId, text, delivered.sid, delivered.status, { kind: "message" });
@@ -937,7 +938,7 @@ export async function executeAgentTool(
   }
   if (name === "send_to_group") {
     const { turn, group } = crossChatTurn(db, context, input.thread_id as string);
-    const text = typeof input.text === "string" ? input.text.trim() : "";
+    const text = typeof input.text === "string" ? plainText(input.text.trim()) : "";
     const imageUrl = typeof input.image_url === "string" && input.image_url ? input.image_url : undefined;
     if (imageUrl) {
       if (!turn.foundGifs?.has(imageUrl)) {
@@ -1081,7 +1082,7 @@ export async function executeAgentTool(
   }
   if (name === "send_image") {
     const url = input.url as string;
-    const caption = typeof input.caption === "string" && input.caption.trim() ? input.caption.trim() : "";
+    const caption = typeof input.caption === "string" && input.caption.trim() ? plainText(input.caption.trim()) : "";
     if (!isRememberedImage(context?.threadId ?? "web", url)) {
       throw new Error("Only a picture find_gif returned or one on a page read_web_page read can be sent; pass its URL exactly");
     }
@@ -1122,7 +1123,7 @@ export async function executeAgentTool(
   }
   if (name === "send_product_cards") {
     const productIds = input.product_ids as string[];
-    const note = typeof input.note === "string" && input.note.trim() ? input.note.trim() : null;
+    const note = typeof input.note === "string" && input.note.trim() ? plainText(input.note.trim()) : null;
     const found: StoreProductRow[] = [];
     const failed: Array<{ id: string; error: string }> = [];
     for (const productId of new Set(productIds)) {

@@ -52,33 +52,69 @@ export type SmsSender = (
   options?: SendOptions,
 ) => Promise<{ sid: string; status: string; replyTo?: string }>;
 
+/** A markdown numbered item: two or more in a row are a list, one is a sentence ("3. That was close"). */
+const NUMBERED_LINE = /^[ \t]*\d{1,2}[.)][ \t]+\S/;
+
+/** Characters a pasted link can pick up from the markdown around it, and are not part of the address. */
+const LINK_TAIL = /[*_>.,;:!?]+$/;
+
+function flatten(text: string): string {
+  // A link is carried through untouched: its `*` and `_` are part of the address.
+  const links: string[] = [];
+  const keepLink = (url: string) => `\uE000${links.push(url) - 1}\uE000`;
+  // Every quantifier below is bounded: these run on the one worker that also sends reminders,
+  // and an unbounded one turns a long reply of the wrong shape into seconds of CPU.
+  const flattened = text
+    .replace(/```[^\n]*\n?([\s\S]*?)\n?```/g, "$1")
+    .replace(/`([^`\n]{1,500})`/g, "$1")
+    .replace(/!\[([^\]\n]{0,300})\]\((https?:\/\/[^)\s]{1,2000})(?:\s[^)]{0,300})?\)/g, (_match, alt: string, url: string) => (alt.trim() ? `${alt.trim()} ${keepLink(url)}` : keepLink(url)))
+    .replace(/\[([^\]\n]{1,300})\]\((https?:\/\/[^)\s]{1,2000})(?:\s[^)]{0,300})?\)/g, (_match, label: string, url: string) => (label.trim() === url ? keepLink(url) : `${label.trim()} ${keepLink(url)}`))
+    .replace(/<(https?:\/\/[^\s>]{1,2000})>/g, "$1")
+    // Emphasis wrapped straight round an address: "*https://x.com*" is the address.
+    .replace(/(?<![\w*_])([*_]{1,3})(https?:\/\/\S{1,2000}?)\1(?=[\s.,;:!?)]|$)/g, "$2")
+    .replace(/https?:\/\/[^\s)]{1,2000}/g, match => {
+      const tail = LINK_TAIL.exec(match)?.[0] ?? "";
+      return keepLink(tail ? match.slice(0, -tail.length) : match) + tail;
+    });
+  const lines = flattened.split("\n");
+  const bare = lines
+    .map((line, index) => {
+      let out = line.replace(/^[ \t]{0,3}#{1,6}[ \t]+/, "").replace(/^[ \t]{0,3}>[ \t]+(?=\S)/, "");
+      if (/^[ \t]*[-*][ \t]+\S/.test(out)) out = out.replace(/^[ \t]*[-*][ \t]+/, "");
+      else if (NUMBERED_LINE.test(line) && (NUMBERED_LINE.test(lines[index - 1] ?? "") || NUMBERED_LINE.test(lines[index + 1] ?? ""))) {
+        out = out.replace(/^[ \t]*\d{1,2}[.)][ \t]+/, "");
+      }
+      return out.trimEnd();
+    })
+    .join("\n");
+  return bare
+    .replace(/(?<![\w*])\*\*(?=\S)([^\n]{0,500}?\S)\*\*(?![\w*])/g, "$1")
+    // `__init__.py` is code, not bold: only a phrase with a space in it is emphasis.
+    .replace(/(?<![\w/.])__(?=[^\s_][^\n_]{0,500}?\s)([^\n_]{1,500}?[^\s_])__(?![\w.(])/g, "$1")
+    .replace(/(?<![\w*])\*(?=[^\s*])([^*\n]{0,500}?[^\s*])\*(?![\w*])/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\uE000(\d+)\uE000/g, (_match, index: string) => links[Number(index)])
+    .trim();
+}
+
 /**
  * A text message has no markdown: Messages shows the asterisks and hyphens as
  * typed. The model reaches for bullets and bold anyway, so every outgoing text
  * is flattened here rather than trusted to the prompt. Line breaks stay;
- * a lone `*` ("5*") and underscores inside words or links are left alone.
+ * a lone `*` ("5*"), `2**3`, `__init__.py`, a quoted `>3`, a single "3. Sentence"
+ * line, and underscores inside words or links are left alone.
+ *
+ * Idempotent: the reply is flattened before it is archived and again as it is
+ * sent, and the two must agree, so nested markup is flattened until it settles.
  */
 export function plainText(text: string): string {
-  // A link is carried through untouched: its `*` and `_` are part of the address.
-  const links: string[] = [];
-  const keepLink = (url: string) => `\uE000${links.push(url) - 1}\uE000`;
-  return text
-    .replace(/\r\n/g, "\n")
-    .replace(/```[^\n]*\n?([\s\S]*?)\n?```/g, "$1")
-    .replace(/`([^`\n]+)`/g, "$1")
-    .replace(/!\[([^\]\n]*)\]\((https?:\/\/[^)\s]+)[^)]*\)/g, (_match, alt: string, url: string) => (alt.trim() ? `${alt.trim()} ${keepLink(url)}` : keepLink(url)))
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)[^)]*\)/g, (_match, label: string, url: string) => (label.trim() === url ? keepLink(url) : `${label.trim()} ${keepLink(url)}`))
-    .replace(/https?:\/\/[^\s)]+/g, keepLink)
-    .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, "")
-    .replace(/^[ \t]{0,3}>[ \t]?/gm, "")
-    .replace(/\*\*(?=\S)([^\n]*?\S)\*\*/g, "$1")
-    .replace(/(?<!\w)__(?=\S)([^\n]*?\S)__(?!\w)/g, "$1")
-    .replace(/(?<![\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])/g, "$1")
-    .replace(/^[ \t]*(?:[-*]|\d{1,2}[.)])[ \t]+/gm, "")
-    .replace(/[ \t]+$/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/\uE000(\d+)\uE000/g, (_match, index: string) => links[Number(index)])
-    .trim();
+  let out = text.replace(/\r\n/g, "\n").replaceAll("\uE000", "");
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = flatten(out);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 export function activeSmsProvider(db: Db): SmsProvider {
@@ -156,7 +192,8 @@ export async function sendSms(
   options: SendOptions = {},
 ): Promise<{ sid: string; status: string; replyTo?: string }> {
   const provider = options.groupId ? "sendblue" : activeSmsProvider(db);
-  return senders[provider](db, to, plainText(body), options);
+  // A body that is nothing but markup ("**") would flatten to nothing; send it as written rather than an empty text.
+  return senders[provider](db, to, plainText(body) || body, options);
 }
 
 const typingIndicators: Record<SmsProvider, (db: Db, to: string) => StopTypingIndicator> = {
