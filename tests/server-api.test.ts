@@ -264,7 +264,10 @@ describe("frontend API contract", () => {
       .send({ status: "done" }).expect(200)).body.data;
     assert.equal(typeof completed.completed_at, "string");
     const active = (await api.get("/api/todos?includeDone=false").expect(200)).body.data;
-    assert.ok(!active.some((todo: { id: string }) => todo.id === created.id));
+    assert.ok(
+      active.some((todo: { id: string }) => todo.id === created.id),
+      "a finished step stays listed while its parent is, so the parent's progress counts it",
+    );
     const all = (await api.get("/api/todos?includeDone=true").expect(200)).body.data;
     assert.ok(all.some((todo: { id: string }) => todo.id === created.id));
     assert.deepEqual((await api.delete(`/api/todos/${created.id}`).expect(200)).body, {
@@ -3790,6 +3793,27 @@ describe("todo and reminder REST edges", () => {
       !withoutChildren.some(todo => todo.title === "Nothing owed"),
       "a finished task that owes nothing still drops out of the view",
     );
+  });
+
+  it("keeps finished subtasks listed under a parent that is still listed", async () => {
+    const { api } = fixture();
+    const parent = (await api.post("/api/todos").send({
+      title: "Plan the offsite",
+      subtasks: [{ title: "Book venue" }, { title: "Send invites" }],
+    }).expect(201)).body.data;
+    const subtasks = (await api.get(`/api/todos/${parent.id}`).expect(200)).body.data.subtasks as Array<{ id: string }>;
+    await api.patch(`/api/todos/${subtasks[0].id}/status`).send({ status: "done" }).expect(200);
+
+    const listed = (await api.get("/api/todos?includeDone=false").expect(200)).body.data as Array<{ title: string }>;
+    assert.deepEqual(
+      listed.map(todo => todo.title).sort(),
+      ["Book venue", "Plan the offsite", "Send invites"],
+      "the done step stays so the card's progress counts it",
+    );
+
+    await api.post("/api/todos").send({ title: "Old chore", status: "done" }).expect(201);
+    const after = (await api.get("/api/todos?includeDone=false").expect(200)).body.data as Array<{ title: string }>;
+    assert.ok(!after.some(todo => todo.title === "Old chore"), "unrelated finished work still drops out");
   });
 
   it("patches a todo field by field and keeps reminders in step", async () => {

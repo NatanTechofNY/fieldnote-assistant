@@ -38,12 +38,20 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
      * A finished parent still holding open steps stays in the list. Only
      * top-level rows are drawn, so dropping it would take its unfinished
      * children off the board with it while they are still owed.
+     *
+     * A step that is itself done is kept whenever its parent is listed: the
+     * card's progress bar and "2/5 subtasks" count are worked out from the
+     * steps the page holds, so dropping the finished ones would show the bar
+     * empty and hide the work already ticked off.
      */
     if (query.includeDone === "false") {
-      clauses.push(`(t.status NOT IN ('done','cancelled') OR EXISTS (
+      const listed = (alias: string) => `(${alias}.status NOT IN ('done','cancelled') OR EXISTS (
         SELECT 1 FROM todos c
-        WHERE c.user_id=t.user_id AND c.parent_id=t.id AND c.status NOT IN ('done','cancelled')
-      ))`);
+        WHERE c.user_id=${alias}.user_id AND c.parent_id=${alias}.id AND c.status NOT IN ('done','cancelled')
+      ))`;
+      clauses.push(`(${listed("t")} OR (t.parent_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM todos p WHERE p.user_id=t.user_id AND p.id=t.parent_id AND ${listed("p")}
+      )))`);
     }
     for (const key of ["status", "priority", "category_id", "life_area_id", "parent_id"] as const) {
       if (query[key]) {
