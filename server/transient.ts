@@ -41,6 +41,12 @@ export function isTransientFailure(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && current instanceof Error; depth += 1) {
     if (current instanceof TransientFailure) return true;
+    // Sendblue answering "slow down" or failing on its side says nothing about
+    // the message; a 4xx other than 429 is the request being refused.
+    const status = (current as { status?: unknown }).status;
+    if (current.name === "SendblueRequestError" && typeof status === "number" && (status === 429 || status >= 500)) {
+      return true;
+    }
     // An aborted request is our own deadline firing, not a rejected request.
     if (current.name === "AbortError" || current.name === "TimeoutError") return true;
     const code = (current as { code?: unknown }).code;

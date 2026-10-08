@@ -16,6 +16,7 @@ import type {
   RouteContext,
   SearchService,
 } from "./routes/context.ts";
+import { registerActivityRoutes } from "./routes/activity.ts";
 import { registerAdminRoutes } from "./routes/admin.ts";
 import { registerAgentRoutes } from "./routes/agent.ts";
 import { registerAttachmentRoutes } from "./routes/attachments.ts";
@@ -67,6 +68,7 @@ const registerRoutes = [
   registerDigestBriefRoutes,
   registerCheckinRoutes,
   registerConversationRoutes,
+  registerActivityRoutes,
   registerSearchRoutes,
   registerAgentRoutes,
   registerAdminRoutes,

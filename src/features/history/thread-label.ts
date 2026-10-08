@@ -10,6 +10,17 @@ export function isGroupAddress(address: string): boolean {
 }
 
 /**
+ * Threads the app writes on for its own jobs: digest drafts, memory sweeps, and
+ * profile rewrites. None is a conversation, so none is listed as one; their
+ * results are on the Background work tab.
+ */
+const BACKGROUND_ADDRESS_PREFIXES = ["digest:", "sweep:", "profile:"];
+
+export function isBackgroundAddress(address: string): boolean {
+  return BACKGROUND_ADDRESS_PREFIXES.some(prefix => address.startsWith(prefix));
+}
+
+/**
  * `digest:` and `reflection:` threads hold app-composed drafts, not real chats;
  * a `group:` thread is a real chat with several people in it, titled by the
  * name the group was given rather than by an id nobody recognises.
@@ -51,7 +62,11 @@ export function threadTitle(
   thread: Pick<ChannelConversation, "address" | "channel"> & Partial<Pick<ChannelConversation, "displayName">>,
   formatAddress: (address: string) => string = address => address,
   webTitle = "Web agent",
+  ownerPhone?: string | null,
 ) {
-  return threadLabel(thread.address, thread.displayName)?.title
-    ?? (thread.channel === "sms" ? 'Text Messages (' + formatAddress(thread.address) + ')' : webTitle);
+  const label = threadLabel(thread.address, thread.displayName)?.title;
+  if (label) return label;
+  // The owner knows their own number; the thread with it is the one with them.
+  if (thread.channel === "sms" && ownerPhone && thread.address === ownerPhone) return "You";
+  return thread.channel === "sms" ? 'Text Messages (' + formatAddress(thread.address) + ')' : webTitle;
 }

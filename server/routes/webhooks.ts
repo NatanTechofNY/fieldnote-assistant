@@ -6,7 +6,7 @@ import { getNotificationPreferences, getSendblueSecret, getTwilioSecret, recordS
 import { isInboundSenderAllowed, ownerHasSpokenInGroup } from "../messaging.ts";
 import { normalizeSendblueStatus, readSendblueInbound, SENDBLUE_INBOUND_PATH, SENDBLUE_LINE_ASSIGNED_PATH, SENDBLUE_LINE_BLOCKED_PATH, SENDBLUE_STATUS_PATH, verifySendblueWebhook } from "../sendblue-service.ts";
 import { validateTwilioSignature } from "../twilio-service.ts";
-import { LOST_REPLY_TARGET, queueUnthreadedResend } from "../unthreaded-resend.ts";
+import { GATEWAY_DROP, LOST_REPLY_TARGET, queueDroppedResend, queueUnthreadedResend } from "../unthreaded-resend.ts";
 import { requestWorkerWake } from "../worker.ts";
 import type { Db } from "../types.ts";
 import type { RouteContext } from "./context.ts";
@@ -153,7 +153,10 @@ export function registerWebhookRoutes({ app, db }: RouteContext): void {
     const errorMessage = typeof payload.error_message === "string" ? payload.error_message : "";
     const status = normalizeSendblueStatus(providerStatus);
     applyDeliveryStatus(db, messageHandle, status, errorMessage || providerStatus || "Sendblue delivery failed");
-    if (status === "failed" && LOST_REPLY_TARGET.test(errorMessage) && queueUnthreadedResend(db, messageHandle)) {
+    if (status === "failed" && (
+      (LOST_REPLY_TARGET.test(errorMessage) && queueUnthreadedResend(db, messageHandle))
+      || (GATEWAY_DROP.test(errorMessage) && queueDroppedResend(db, messageHandle))
+    )) {
       requestWorkerWake();
     }
     return res.sendStatus(204);

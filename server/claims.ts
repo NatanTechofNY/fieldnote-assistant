@@ -78,6 +78,38 @@ export function claimsReminder(reply: string): boolean {
     (REMINDER_PROMISE.test(sentence) && WHEN.test(sentence)) || REMINDER_DONE.some(pattern => pattern.test(sentence)));
 }
 
+/*
+ * A reply that says a todo's time moved. "I'll treat it as tomorrow at 2 PM"
+ * went out after the owner answered a reminder with "will do that tomorrow
+ * around 2", from a turn that wrote nothing, and the todo kept its old due
+ * time and was followed up on the next morning as overdue. Like the others
+ * this needs a first-person report or promise, a move word, and a when.
+ */
+const DUE_WHEN = /\b(?:tomorrow|tonight|today|this (?:morning|afternoon|evening|week|weekend)|next \w+|(?:mon|tues|wednes|thurs|fri|satur|sun)day|noon|midnight|end of (?:the )?(?:day|week)|eod|at \d|\d\s?(?:am|pm)|\d+:\d\d|in (?:\d+|an?|one|two|three|four|five|six|seven|ten|a couple of|a few) (?:minutes?|hours?|days?|weeks?)|(?:january|february|march|april|may|june|july|august|september|october|november|december) \d|\d{4}-\d\d-\d\d)\b/i;
+
+const DUE_CLAIMS = [
+  // "I'll treat X as tomorrow at 2", "I'll move it to Monday", "I'll push that to Friday".
+  new RegExp(`\\bi(?:'ll| will|'m going to| am going to)\\s+(?:go ahead and\\s+)?(?:treat|count|move|push|bump|shift|reschedule)\\b[^.!?]{0,160}?\\b(?:as|to|for|until|at)\\b`, "i"),
+  // "I moved X to Monday at 2:00 PM", "I've rescheduled it for tomorrow".
+  new RegExp(`\\bi(?:'ve| have)?\\s+(?:just\\s+)?(?:moved|pushed|bumped|shifted|rescheduled)\\b(?!\\s+on\\b)[^.!?]{0,160}?\\b(?:to|for|until|at)\\b`, "i"),
+  // "Moved to Monday.", "Got it, pushed to 2 PM."
+  /^(?:(?:got it|done|okay|ok|sure|alright|yep|yes)[,.!\u2014\u2013-]*\s+)?(?:moved|pushed|bumped|rescheduled)\b[^.!?]{0,160}?\b(?:to|for|until|at)\b/i,
+  /\bi(?:'ve| have)?\s+(?:just\s+)?(?:updated|changed)\b[^.!?]{0,80}?\bdue (?:date|time)\b/i,
+];
+
+/** Whether the reply says, as a claim about this turn, that a todo's time was or will be changed. */
+export function claimsDueChange(reply: string): boolean {
+  return sentences(reply).some(sentence =>
+    DUE_CLAIMS.some(pattern => pattern.test(sentence)) && (DUE_WHEN.test(sentence) || /\bdue (?:date|time)\b/i.test(sentence)));
+}
+
+export const DUE_CLAIM_CHECK = [
+  "[runtime check, not from the user] Your reply says a todo's due time was or will be moved,",
+  "but no todo write or reminder change succeeded in this turn, so its due time is unchanged.",
+  "Call update_todo with the new due_at now (and move reminder_at if it sat on the old due time), then write your reply again.",
+  "If you were only offering, ask instead of confirming. If you were not changing a time, answer again without the claim.",
+].join(" ");
+
 /** A reply about a todo or a list: a todo write backs its claim of "added", a memory write does not need to. */
 const TODO_WORDS = /\b(?:todo|to-do|task|reminder|list|checklist|subtask|step|due)\b/i;
 
@@ -123,6 +155,20 @@ export function todoWriteSetsReminder(tool: string, input: unknown, data: unknow
   if (!SCHEDULING_FIELDS.some(field => present(fields[field]))) return false;
   const record = data as { reminder_at?: unknown; extra_reminders?: unknown; recurrence?: unknown };
   return present(record.reminder_at) || present(record.extra_reminders) || present(record.recurrence);
+}
+
+/**
+ * Whether a successful write moved a todo's time: a reminder call, or a todo
+ * write that asked for a schedule and returned a todo that carries one.
+ */
+export function writeChangesDue(tool: string, input: unknown, data: unknown): boolean {
+  if (REMINDER_WRITE_TOOLS.has(tool)) return true;
+  if (!TODO_REMINDER_TOOLS.has(tool) || !input || typeof input !== "object" || !data || typeof data !== "object") return false;
+  const sent = input as Record<string, unknown>;
+  const fields = (tool === "update_todo" && sent.patch && typeof sent.patch === "object" ? sent.patch : sent) as Record<string, unknown>;
+  if (!SCHEDULING_FIELDS.some(field => present(fields[field]))) return false;
+  const record = data as { due_at?: unknown; reminder_at?: unknown; extra_reminders?: unknown; recurrence?: unknown };
+  return present(record.due_at) || present(record.reminder_at) || present(record.extra_reminders) || present(record.recurrence);
 }
 
 /** Whether a read showed at least one reminder: an empty list backs nothing, so "I'll text you" after it is still unbacked. */

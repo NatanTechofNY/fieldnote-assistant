@@ -67,7 +67,7 @@ async function withEnv<T>(vars: Record<string, string | undefined>, run: () => P
 
 // No test reaches real DNS: every host is public unless a test says otherwise.
 setHostResolver(async () => ["93.184.216.34"]);
-import { claimsReminder, claimsSave, readShowsReminder, todoWriteSetsReminder } from "../server/claims.ts";
+import { claimsDueChange, claimsReminder, claimsSave, readShowsReminder, todoWriteSetsReminder, writeChangesDue } from "../server/claims.ts";
 import { isInboundSenderAllowed, plainText, sendSms } from "../server/messaging.ts";
 import { toolInput } from "../server/schemas.ts";
 import { z } from "zod";
@@ -2151,6 +2151,93 @@ describe("SMS, reminders, and channel agent execution", () => {
     assert.equal(todoWriteSetsReminder("update_todo", { id: "t", patch: { reminder_at: "2026-10-06T12:00:00Z" } }, { reminder_at: "2026-10-06T12:00:00Z" }), true);
   });
 
+  it("reads a confirmed new time as a claim, and an offer or a question as none", () => {
+    for (const claim of [
+      "Got it \u2014 I\u2019ll treat \u201creview retro results\u201d as tomorrow at 2 PM for that todo.",
+      "I moved \u201cReview retro results\u201d to Monday at 2:00 PM.",
+      "I\u2019ve rescheduled it for tomorrow.",
+      "I\u2019ll move it to Friday.",
+      "Got it, pushed to 2 PM.",
+      "I updated the due date.",
+    ]) assert.equal(claimsDueChange(claim), true, claim);
+    for (const quiet of [
+      "Want me to move it to Friday?",
+      "I can push that to tomorrow if you\u2019d like.",
+      "Should I move it to 2 PM?",
+      "You moved it to Friday.",
+      "I moved on to the next one.",
+      "Moved the couch to the garage.",
+      "I\u2019ll text you in 10 minutes.",
+      "Got it, saved.",
+    ]) assert.equal(claimsDueChange(quiet), false, quiet);
+    assert.equal(writeChangesDue("update_todo", { id: "t", patch: { due_at: "2026-10-09T14:00:00-04:00" } }, { due_at: "2026-10-09T14:00:00-04:00" }), true);
+    assert.equal(writeChangesDue("update_todo", { id: "t", patch: { title: "renamed" } }, { due_at: "2026-10-09T14:00:00-04:00" }), false, "a rename moved nothing");
+    assert.equal(writeChangesDue("update_reminder", { id: "r", reminder_at: "2026-10-09T14:00:00-04:00" }, {}), true);
+    assert.equal(writeChangesDue("get_todo", { id: "t" }, { due_at: "2026-10-09T14:00:00-04:00" }), false);
+  });
+
+  it("sends a reply that confirms a new time back until the todo is moved", async () => {
+    const { api, db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    const todo = (await api.post("/api/todos").send({
+      title: "Review retro results", due_at: "2026-10-07T17:00:00-04:00",
+    }).expect(201)).body.data as { id: string };
+    type Message = { id: string; role: string; parts: Array<{ type?: string; text?: string }> };
+    const requests: Message[][] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] };
+      requests.push(messages);
+      const reply = (parts: unknown[]) => new Response(JSON.stringify({ role: "assistant", parts }), { status: 200 });
+      if (requests.length === 1) return reply([{ type: "text", text: "Got it \u2014 I\u2019ll treat it as tomorrow at 2 PM." }]);
+      if (requests.length === 2) {
+        return reply([{
+          type: "tool-update_todo", tool_call_id: "call_due", state: "input-available",
+          input: { id: todo.id, patch: { due_at: "2030-10-08T14:00:00-04:00" } },
+        }]);
+      }
+      return reply([{ type: "text", text: "Moved it to tomorrow at 2 PM." }]);
+    };
+
+    const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "Will do that tomorrow around 2pm", undefined, { fetcher });
+
+    assert.equal(response.text, "Moved it to tomorrow at 2 PM.");
+    assert.match(requests[1][requests[1].length - 1].parts[0].text ?? "", /due time is unchanged/);
+    assert.match(
+      (db.prepare("SELECT due_at FROM todos WHERE id=?").get(todo.id) as { due_at: string }).due_at,
+      /^2030-10-08T14:00/,
+    );
+  });
+
+  it("tells the next turn which todo a replayed reminder was about", async () => {
+    const { db } = fixture();
+    process.env.ALGOLIA_APPLICATION_ID = "app";
+    process.env.ALGOLIA_SEARCH_API_KEY = "key";
+    process.env.ALGOLIA_AGENT_ID = "agent";
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_rem','${USER_ID}','sms','+17185551111','cnv_rem',?,?)
+    `).run(stamp, stamp);
+    db.prepare(`
+      INSERT INTO channel_messages(
+        id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at
+      ) VALUES('msg_rem','thread_rem','outbound','assistant','Reminder: Review retro results','SM_rem','delivered',?,?,?)
+    `).run(JSON.stringify({ kind: "reminder", reminderId: "reminder_1", todoId: "todo_retro" }), stamp, stamp);
+    type Message = { id: string; role: string; parts: Array<{ type?: string; text?: string }> };
+    const seen: Message[][] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      seen.push((JSON.parse(String(init?.body)) as { messages: Message[] }).messages);
+      return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "Ok." }] }), { status: 200 });
+    };
+
+    await runSmsAgent(db, fakeSearch(db), "+17185551111", "Will do that tomorrow around 2pm", undefined, { fetcher });
+
+    const replayed = seen[0].find(message => message.role === "assistant");
+    assert.match(replayed?.parts.map(part => part.text ?? "").join("") ?? "", /Reminder: Review retro results\n\[app note, not sent: .*todo_retro\]/);
+  });
+
   it("holds a promise to text after a read that found no reminders", async () => {
     const { db } = fixture();
     process.env.ALGOLIA_APPLICATION_ID = "app";
@@ -2506,10 +2593,10 @@ describe("SMS, reminders, and channel agent execution", () => {
 
   it("claims each due reminder once and records provider delivery IDs", async () => {
     const { db, api } = fixture();
-    await api.post("/api/todos").send({
+    const sendOnce = (await api.post("/api/todos").send({
       title: "Send only once",
       reminder_at: "2020-01-01T00:00:00.000Z",
-    }).expect(201);
+    }).expect(201)).body.data as { id: string };
     saveNotificationPreferences(db, {
       smsEnabled: true,
       recipientPhone: "+17185551111",
@@ -2553,8 +2640,8 @@ describe("SMS, reminders, and channel agent execution", () => {
     await runSmsAgent(db, fakeSearch(db), "+17185551111", "It's done", "SM_reply", { fetcher });
     assert.deepEqual(
       completionRequest?.messages.slice(0, 2).map(message => message.parts[0].text),
-      ["Reminder: Send only once", "It's done"],
-      "the Agent receives the reminder immediately before the reply",
+      [`Reminder: Send only once\n[app note, not sent: this text was the reminder for todo ${sendOnce.id}]`, "It's done"],
+      "the Agent receives the reminder, and which todo it was for, immediately before the reply",
     );
   });
 });
@@ -5638,6 +5725,57 @@ describe("Sendblue provider", () => {
     });
     const refused = db.prepare("SELECT json_extract(metadata_json,'$.unthreadedResend') resend FROM channel_messages WHERE id='msg_lost_2'").get() as { resend: string };
     assert.equal(JSON.parse(refused.resend).state, "gave_up");
+  });
+
+  it("sends a check-in again when Sendblue's gateway drops it, but not a stale one", async () => {
+    const { db, api } = connectedFixture();
+    const stamp = new Date().toISOString();
+    const old = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_sb_drop','${USER_ID}','sms','group:sb_group_drop','cnv_drop',?,?)
+    `).run(stamp, stamp);
+    const insert = (id: string, handle: string, createdAt: string) => db.prepare(`
+      INSERT INTO channel_messages(
+        id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at
+      ) VALUES(?,'thread_sb_drop','outbound','assistant','How was today, everyone?',?,'queued',?,?,?)
+    `).run(id, handle, JSON.stringify({ kind: "group_evening" }), createdAt, createdAt);
+    insert("msg_drop", "SB_drop", stamp);
+    insert("msg_drop_old", "SB_drop_old", old);
+    const receipt = (handle: string) => ({
+      message_handle: handle, status: "ERROR",
+      error_message: "Message was dropped by gateway, it did not get sent, please try again",
+    });
+    const state = (id: string) => (db.prepare(
+      "SELECT json_extract(metadata_json,'$.unthreadedResend') resend FROM channel_messages WHERE id=?",
+    ).get(id) as { resend: string | null }).resend;
+
+    await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt("SB_drop")).expect(204);
+    await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt("SB_drop_old")).expect(204);
+    assert.equal(JSON.parse(state("msg_drop") as string).state, "pending");
+    assert.equal(state("msg_drop_old"), null, "too late to be the news");
+
+    const sends: Array<{ to: string; body: string; options?: { groupId?: string } }> = [];
+    const worker = {
+      sendSms: async (_db: Db, to: string, body: string, options?: { groupId?: string }) => {
+        sends.push({ to, body, options });
+        return { sid: "SB_again", status: "queued" };
+      },
+      runSmsAgent: async () => ({ text: "", threadId: "unused" }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    };
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(sends, [{
+      to: "group:sb_group_drop", body: "How was today, everyone?", options: { groupId: "sb_group_drop" },
+    }]);
+    const row = db.prepare("SELECT provider_message_id,status FROM channel_messages WHERE id='msg_drop'")
+      .get() as { provider_message_id: string; status: string };
+    assert.deepEqual([row.provider_message_id, row.status], ["SB_again", "queued"]);
+
+    // A repeated receipt for the old handle finds nothing left to resend.
+    await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt("SB_drop")).expect(204);
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.equal(sends.length, 1);
   });
 
   it("requires a recipient before the connection test and can disconnect", async () => {
@@ -12827,5 +12965,75 @@ describe("the Soul and group settings", () => {
     const web = await api.post("/api/agent/tools/update_group_settings").send({ reply_mode: "normal", assistant_nickname: null }).expect(400);
     assert.equal(web.body.error, "This conversation is not a group chat");
     assert.equal((db.prepare("SELECT reply_mode FROM life_areas WHERE id=?").get(area.id) as { reply_mode: string }).reply_mode, "named_only");
+  });
+});
+
+describe("background activity", () => {
+  it("lays out each chat's sweeps, Soul and profile, and the digest drafts, without changing anything", async () => {
+    const { db, api } = fixture();
+    const RECIPIENT = "+17185551111";
+    const stamp = "2030-01-14T12:00:00.000Z";
+    const later = "2030-01-14T12:00:05.000Z";
+    saveNotificationPreferences(db, {
+      smsEnabled: true, recipientPhone: RECIPIENT, timezone: "UTC", dailyDigestEnabled: false, dailyDigestTime: "09:00",
+      quietHoursStart: null, quietHoursEnd: null,
+    });
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_goop',?,'sms','group:goop','cnv_goop',?,?)
+    `).run(USER_ID, stamp, stamp);
+    const area = ensureGroupLifeArea(db, "thread_goop", "Goopers");
+    db.prepare("UPDATE life_areas SET soul='- One line.',profile='People: Halo.' WHERE id=?").run(area.id);
+    db.prepare("UPDATE notification_preferences SET soul='- Dry humour.' WHERE user_id=?").run(USER_ID);
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_sweep_goop',?,'sms','sweep:thread_goop','cnv_sweep',?,?)
+    `).run(USER_ID, stamp, stamp);
+    db.prepare(`
+      INSERT INTO scheduled_dispatches(id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at)
+      VALUES('dispatch_sweep',?,'memory_sweep','memory_sweep:thread_goop:msg_1',?,'sent',1,?,?)
+    `).run(USER_ID, stamp, stamp, later);
+    const tool = (id: string, name: string, input: unknown, output: unknown) => db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES(?,'thread_sweep_goop','outbound','tool',?,'delivered',?,?,?)
+    `).run(id, name, JSON.stringify({ input, output, toolCallId: id }), stamp, stamp);
+    tool("tool_a", "create_memory", { kind: "fact", title: "Halo's birthday" }, { success: true, data: { id: "mem_1", title: "Halo's birthday" } });
+    tool("tool_b", "update_memory", { id: "mem_2", patch: { content: "x" } }, { success: true, data: { id: "mem_2", title: "Moved to Austin" } });
+    tool("tool_c", "create_memory", { kind: "fact", title: "Refused" }, { success: false, error: "No" });
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('say_a','thread_sweep_goop','outbound','assistant','Kept two facts.','delivered','{}',?,?)
+    `).run(stamp, stamp);
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_digest',?,'sms',?,'cnv_digest',?,?)
+    `).run(USER_ID, `digest:${RECIPIENT}`, stamp, stamp);
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('dig_user','thread_digest','inbound','user','Write the digest.','received',?,?,?),
+            ('dig_draft','thread_digest','outbound','assistant','Good morning.','received','{}',?,?)
+    `).run(JSON.stringify({ kind: "daily_digest", date: "2030-01-14" }), stamp, stamp, later, later);
+    const before = db.prepare("SELECT total_changes() n").get() as { n: number };
+
+    const body = (await api.get("/api/activity/background").expect(200)).body.data as {
+      chats: Array<{
+        id: string; kind: string; name: string; soul: string | null; profile: string | null; profileState: string;
+        sweeps: Array<{ status: string; summary: string | null; changes: Array<{ action: string; memoryId: string | null; title: string }> }>;
+      }>;
+      digests: Array<{ kind: string; label: string | null; draft: string | null }>;
+    };
+
+    assert.deepEqual(body.chats.map(chat => [chat.id, chat.kind, chat.name]), [["owner", "owner", "You"], [area.id, "group", "Goopers"]]);
+    assert.equal(body.chats[0].soul, "- Dry humour.");
+    const group = body.chats[1];
+    assert.deepEqual([group.soul, group.profile], ["- One line.", "People: Halo."]);
+    assert.equal(group.sweeps.length, 1);
+    assert.deepEqual(group.sweeps[0].changes, [
+      { action: "created", memoryId: "mem_1", title: "Halo's birthday" },
+      { action: "updated", memoryId: "mem_2", title: "Moved to Austin" },
+    ], "a refused write kept nothing");
+    assert.deepEqual([group.sweeps[0].status, group.sweeps[0].summary], ["sent", "Kept two facts."]);
+    assert.deepEqual(body.digests.map(({ kind, label, draft }) => [kind, label, draft]), [["daily_digest", "2030-01-14", "Good morning."]]);
+    assert.equal((db.prepare("SELECT total_changes() n").get() as { n: number }).n, before.n, "a read writes nothing");
   });
 });

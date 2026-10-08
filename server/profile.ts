@@ -191,6 +191,11 @@ export function profileState(db: Db, snapshot = ownerSnapshot(db)): ProfileState
   return state;
 }
 
+/** The owner's profile state without the tidying `profileState()` does, for a read that must change nothing. */
+export function ownerProfileStatus(db: Db): ProfileState {
+  return stateOf(storedOwner(db), ownerSnapshot(db));
+}
+
 export function composeProfileTurn(db: Db, snapshot = ownerSnapshot(db)): string {
   return composeTurn({
     ask: "Rewrite my profile: what my assistant should know about me before I say a word.",
@@ -280,6 +285,12 @@ export function groupProfileState(db: Db, areaId: string, snapshot = groupProfil
   const state = stateOf(stored, snapshot);
   if (state === "empty" && stored.profile) setGroupProfile(db, areaId, null, { snapshot });
   return state;
+}
+
+/** A group's profile state without the tidying `groupProfileState()` does, for a read that must change nothing. */
+export function groupProfileStatus(db: Db, areaId: string): ProfileState {
+  const snapshot = groupProfileSnapshot(db, areaId);
+  return snapshot ? stateOf(storedGroup(groupRow(db, areaId)), snapshot) : "empty";
 }
 
 export function composeGroupProfileTurn(db: Db, areaId: string, snapshot = groupProfileSnapshot(db, areaId)): string {

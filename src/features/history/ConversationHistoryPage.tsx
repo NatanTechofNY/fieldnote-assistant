@@ -13,7 +13,8 @@ import { PageHead } from "../../components/layout/PageHead";
 import { ErrorState, HighlightedText, Loading, MarkdownContent } from "../../components/ui";
 import { HistoryToolGroup } from "./HistoryToolTrace";
 import { historyTimeline } from "./tool-traces";
-import { isGroupAddress, threadLabel, threadTitle } from "./thread-label";
+import { BackgroundWorkPanel } from "./BackgroundWorkPanel";
+import { isBackgroundAddress, isGroupAddress, threadLabel, threadTitle } from "./thread-label";
 import { friendlyDate, historyTimestamp, useTimezone } from "../../lib/timezone";
 import { searchTerms, snippetAround } from "../../lib/highlight";
 import { useDebounced } from "../../lib/use-debounced";
@@ -50,6 +51,7 @@ const SCHEDULED_KINDS = new Map<string, string>([
   ["group_evening", "Group evening check-in"],
   ["checkin_ask_draft", "Check-in wording draft"],
   ["follow_up", "Follow-up"],
+  ["memory_sweep", "Memory sweep"],
   ["profile_refresh", "Profile rewrite"],
   ["group_profile_refresh", "Group profile rewrite"],
 ]);
@@ -136,7 +138,24 @@ function StartConversationButton() {
   </button>;
 }
 
+/** Conversations are the chats; Background work is what the assistant does on its own between them. */
+function HistoryTabs({ active }: { active: "conversations" | "background" }) {
+  const [, setSearchParams] = useSearchParams();
+  const tabs = [["conversations", "Conversations"], ["background", "Background work"]] as const;
+  return <div className="tabs" role="tablist" aria-label="History view">
+    {tabs.map(([value, label]) => <button
+      key={value}
+      type="button"
+      role="tab"
+      aria-selected={active === value}
+      className={`tab ${active === value ? "active" : ""}`}
+      onClick={() => setSearchParams(value === "background" ? { tab: "background" } : {})}
+    >{label}</button>)}
+  </div>;
+}
+
 export function ConversationHistoryPage() {
+  const [searchParams] = useSearchParams();
   const { data = [], isLoading, error } = useQuery({
     queryKey: ["channel-conversations"],
     queryFn: api.channelConversations,
@@ -144,8 +163,18 @@ export function ConversationHistoryPage() {
   });
   if (isLoading) return <Loading />;
   if (error) return <ErrorState error={error} />;
-  if (!data.length) return <div className="page">
+  // A link to a scratch thread (an old bookmark, a search hit) lands where its results now live.
+  const thread = searchParams.get("thread");
+  const linkedToBackground = Boolean(thread && data.some(item => item.id === thread && isBackgroundAddress(item.address)));
+  if (searchParams.get("tab") === "background" || linkedToBackground) return <div className="page">
+    <PageHead eyebrow="Conversation archive" title="Every message, in one place." description="What the assistant does on its own: what it learned from each chat, and the Soul and profile it works from." />
+    <HistoryTabs active="background" />
+    <BackgroundWorkPanel />
+  </div>;
+  const conversations = data.filter(item => !isBackgroundAddress(item.address));
+  if (!conversations.length) return <div className="page">
     <PageHead eyebrow="Conversation archive" title="Every message, in one place." description="Web and SMS conversations are retained in local SQLite while the agent receives only a bounded context window." />
+    <HistoryTabs active="conversations" />
     <section className="card archive-empty">
       <div className="archive-empty-copy">
         <div className="archive-empty-mark" aria-hidden="true"><BookOpen size={17}/></div>
@@ -159,7 +188,7 @@ export function ConversationHistoryPage() {
       </div>
     </section>
   </div>;
-  return <DeepLinkedHistoryContent conversations={data}/>;
+  return <DeepLinkedHistoryContent conversations={conversations}/>;
 }
 
 /**
@@ -208,6 +237,8 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
 }) {
   const timezone = useTimezone();
   const redact = useRedact();
+  const { data: integrations } = useQuery({ queryKey: ["integrations"], queryFn: api.integrations });
+  const ownerPhone = integrations?.notifications.recipientPhone ?? null;
   const [selectedId, setSelectedId] = useState(
     () => conversations.some(item => item.id === initialThreadId)
       ? initialThreadId as string
@@ -243,10 +274,12 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
   const searchGroups = useMemo(() => {
     const groups = new Map<string, ConversationSearchHit[]>();
     for (const hit of searchResult?.hits ?? []) {
+      // A hit on a scratch thread has no conversation here to open.
+      if (!conversations.some(item => item.id === hit.threadId)) continue;
       groups.set(hit.threadId, [...(groups.get(hit.threadId) || []), hit]);
     }
     return [...groups.entries()];
-  }, [searchResult]);
+  }, [searchResult, conversations]);
   const jumpKey = jump ? `${selected.id}|${jump.messageId}|${jump.nonce}` : null;
   // Pinning in a layout effect rather than an animation frame is what keeps an
   // opened thread from painting at its first message and then racing down.
@@ -281,6 +314,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
   };
   return <div className="page page-constrained history-page">
     <PageHead eyebrow="Conversation archive" title="Every message, in one place." description="Full web and SMS history is retained in SQLite. The SMS agent context uses only the latest 40 messages from the last 24 hours." />
+    <HistoryTabs active="conversations" />
     <section className="history-shell card">
       <aside className="history-threads">
         <div className="history-search"><Search size={14}/><input value={searchQuery} onChange={event => setSearchQuery(event.target.value)} placeholder="Search conversations…"/></div>
@@ -291,7 +325,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
           {searchGroups.map(([threadId, hits]) => {
             const thread = conversations.find(item => item.id === threadId);
             return <section className="history-result-group" key={threadId}>
-              <header>{thread?.channel === "sms" ? <Phone size={11}/> : <MessageSquareText size={11}/>}<span>{thread ? threadTitle(thread, redact.phone, "Web Agent") : "Web Agent"}</span></header>
+              <header>{thread?.channel === "sms" ? <Phone size={11}/> : <MessageSquareText size={11}/>}<span>{thread ? threadTitle(thread, redact.phone, "Web Agent", ownerPhone) : "Web Agent"}</span></header>
               {hits.map(hit => <button
                 key={hit.objectID}
                 className={jump?.messageId === hit.objectID ? "opened" : ""}
@@ -318,7 +352,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
                 {workflow && !isGroupAddress(thread.address) ? <Sparkles size={13}/> : thread.channel === "sms" ? <Phone size={13}/> : <MessageSquareText size={13}/>}
               </span>
               <span className="history-thread-copy">
-                <strong>{threadTitle(thread, address => `Phone Number: ${redact.phone(address)}`, "Web Agent")}</strong>
+                <strong>{threadTitle(thread, redact.phone, "Web Agent", ownerPhone)}</strong>
                 <small>{isGroupAddress(thread.address) ? (thread.lastMessage || "No messages") : (workflow?.subtitle ?? (thread.lastMessage || "No messages"))}</small>
               </span>
               <span className="history-count">{thread.messageCount}</span>
@@ -330,7 +364,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
         <header className="history-header">
           <div>
             <div className="eyebrow">{selectedWorkflow?.eyebrow ?? `${selected.channel} conversation`}</div>
-            <strong>{threadTitle(selected, redact.phone, "Fieldnote web agent")}</strong>
+            <strong>{threadTitle(selected, redact.phone, "Fieldnote web agent", ownerPhone)}</strong>
           </div>
           <span>{selected.messageCount} messages</span>
         </header>
@@ -355,7 +389,8 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
             // who: by name, or by redacted number for a participant the owner
             // never named, so two unnamed voices still read as two.
             const speakerName = selectedIsGroup && message.role === "user"
-              ? typeof message.metadata.speakerName === "string" ? message.metadata.speakerName
+              ? message.metadata.speakerIsOwner === true ? "You"
+                : typeof message.metadata.speakerName === "string" ? message.metadata.speakerName
                 : typeof message.metadata.speaker === "string" ? redact.phone(message.metadata.speaker)
                   : null
               : null;

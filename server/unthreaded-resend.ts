@@ -33,6 +33,33 @@ function worthRetrying(error: unknown): boolean {
 }
 
 /**
+ * Sendblue's gateway sometimes takes a message and then drops it, saying so in
+ * the receipt and asking for another try. Nothing was delivered, so the same
+ * words go out again.
+ */
+export const GATEWAY_DROP = /dropped by gateway|did not get sent, please try again/i;
+
+/** A dropped message is only worth sending again while it is still the news; a check-in must not arrive hours late. */
+export const DROPPED_RESEND_WINDOW_MS = 30 * 60_000;
+
+/**
+ * Files a resend for a message the gateway dropped, threaded or not. It uses the
+ * same queue as `queueUnthreadedResend()` and, like it, only once per row. A
+ * message older than the window is left failed.
+ */
+export function queueDroppedResend(db: Db, providerMessageId: string): boolean {
+  const state: ResendState = { state: "pending", attempts: 0, after: now() };
+  return db.prepare(`
+    UPDATE channel_messages SET metadata_json=json_set(COALESCE(NULLIF(metadata_json,''),'{}'),'$.unthreadedResend',json(?)),updated_at=?
+    WHERE provider_message_id=? AND role='assistant' AND status='failed'
+      AND created_at>=?
+      AND json_extract(metadata_json,'$.unthreadedResend') IS NULL
+  `).run(
+    JSON.stringify(state), now(), providerMessageId, new Date(Date.now() - DROPPED_RESEND_WINDOW_MS).toISOString(),
+  ).changes > 0;
+}
+
+/**
  * Files the resend on the assistant row the receipt was about. Only a threaded
  * reply qualifies, and only once: a repeated receipt, or one for a handle the
  * resend has since replaced, changes nothing.
