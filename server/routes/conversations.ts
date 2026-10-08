@@ -82,7 +82,9 @@ export function registerConversationRoutes({ app, db, search }: RouteContext): v
         CASE WHEN m.role='user' THEN json_extract(m.metadata_json,'$.speakerName') END speaker_name
       FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
       LEFT JOIN life_areas la ON la.thread_id=t.id
-      WHERE t.user_id=? AND m.role IN ('user','assistant') AND lower(m.content) LIKE lower(?) ESCAPE '\\'
+      WHERE t.user_id=? AND m.role IN ('user','assistant')
+        AND COALESCE(json_extract(m.metadata_json,'$.internal'),0)=0
+        AND lower(m.content) LIKE lower(?) ESCAPE '\\'
       ORDER BY m.created_at DESC,m.rowid DESC LIMIT ?
     `).all(USER_ID, likePattern(input.q), input.limit) as Array<Record<string, unknown>>;
     // The same shape as an Algolia hit: group fields only on group messages,

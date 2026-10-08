@@ -11,6 +11,7 @@
 
 import { now, queueIndexJob } from "./db.ts";
 import { groupIdOfAddress } from "./group-thread.ts";
+import { getNotificationPreferences } from "./integrations.ts";
 import type { SmsSender } from "./messaging.ts";
 import { isTransientFailure } from "./transient.ts";
 import type { Db } from "./types.ts";
@@ -24,6 +25,8 @@ type ResendState = {
   state: "pending" | "sent" | "gave_up";
   attempts: number;
   after?: string;
+  /** A dropped message is not sent after this, however the retries have gone. */
+  expires?: string;
   lastError?: string;
 };
 
@@ -48,7 +51,12 @@ export const DROPPED_RESEND_WINDOW_MS = 30 * 60_000;
  * message older than the window is left failed.
  */
 export function queueDroppedResend(db: Db, providerMessageId: string): boolean {
-  const state: ResendState = { state: "pending", attempts: 0, after: now() };
+  const row = db.prepare(`
+    SELECT created_at FROM channel_messages WHERE provider_message_id=? AND role='assistant' AND status='failed'
+  `).get(providerMessageId) as { created_at: string } | undefined;
+  if (!row) return false;
+  const expires = new Date(Date.parse(row.created_at) + DROPPED_RESEND_WINDOW_MS).toISOString();
+  const state: ResendState = { state: "pending", attempts: 0, after: now(), expires };
   return db.prepare(`
     UPDATE channel_messages SET metadata_json=json_set(COALESCE(NULLIF(metadata_json,''),'{}'),'$.unthreadedResend',json(?)),updated_at=?
     WHERE provider_message_id=? AND role='assistant' AND status='failed'
@@ -85,10 +93,22 @@ export async function sendQueuedUnthreadedResends(db: Db, send: SmsSender, limit
   const record = (id: string, state: ResendState) => db.prepare(`
     UPDATE channel_messages SET metadata_json=json_set(metadata_json,'$.unthreadedResend',json(?)),updated_at=? WHERE id=?
   `).run(JSON.stringify(state), now(), id);
+  // A resend is still a text to the owner: after STOP, or with texting turned
+  // off, it is dropped for good rather than held for a later START.
+  const preferences = getNotificationPreferences(db);
+  const silenced = !preferences.smsEnabled || Boolean(preferences.optedOutAt);
   let sentCount = 0;
   for (const row of rows) {
     const metadata = JSON.parse(row.metadata_json) as { mediaUrl?: unknown; unthreadedResend: ResendState };
     const attempts = metadata.unthreadedResend.attempts + 1;
+    if (silenced) {
+      record(row.id, { state: "gave_up", attempts: attempts - 1, lastError: "texting is off or the owner opted out" });
+      continue;
+    }
+    if (metadata.unthreadedResend.expires && metadata.unthreadedResend.expires < now()) {
+      record(row.id, { state: "gave_up", attempts: attempts - 1, lastError: "too old to send" });
+      continue;
+    }
     const mediaUrl = typeof metadata.mediaUrl === "string" ? metadata.mediaUrl : undefined;
     const groupId = groupIdOfAddress(row.address);
     try {

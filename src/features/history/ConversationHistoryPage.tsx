@@ -319,7 +319,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
       <aside className="history-threads">
         <div className="history-search"><Search size={14}/><input value={searchQuery} onChange={event => setSearchQuery(event.target.value)} placeholder="Search conversations…"/></div>
         {debouncedSearch.length >= 2 ? <>
-          <div className="history-section-title">Search results <span>{searchResult?.hits.length ?? 0}</span></div>
+          <div className="history-section-title">Search results <span>{searchGroups.reduce((total, [, hits]) => total + hits.length, 0)}</span></div>
           {isSearching && <div className="history-search-state"><LoaderCircle className="spin" size={14}/>Searching meaning…</div>}
           {!isSearching && !searchGroups.length && <div className="history-search-state">No matching conversations.</div>}
           {searchGroups.map(([threadId, hits]) => {

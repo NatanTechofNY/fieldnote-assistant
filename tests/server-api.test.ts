@@ -22,6 +22,7 @@ import {
   saveSearchPreferences,
   saveSendblueConfig,
   saveTwilioConfig,
+  setSmsOptOut,
   setSmsProvider,
 } from "../server/integrations.ts";
 import { composeDigestTurn } from "../server/daily-digest.ts";
@@ -2159,6 +2160,7 @@ describe("SMS, reminders, and channel agent execution", () => {
       "I\u2019ll move it to Friday.",
       "Got it, pushed to 2 PM.",
       "I updated the due date.",
+      "Done \u2014 pushed it to Friday.",
     ]) assert.equal(claimsDueChange(claim), true, claim);
     for (const quiet of [
       "Want me to move it to Friday?",
@@ -2170,10 +2172,17 @@ describe("SMS, reminders, and channel agent execution", () => {
       "Moved the couch to the garage.",
       "I\u2019ll text you in 10 minutes.",
       "Got it, saved.",
+      "I\u2019ll count that as done today.",
+      "Got it, I\u2019ll count that as done for tonight.",
+      "I\u2019ll treat tomorrow as a rest day.",
+      "I\u2019ll shift gears to the next one.",
+      "I\u2019ll push this to the repo tonight.",
+      "I pushed the fix to the repo today.",
     ]) assert.equal(claimsDueChange(quiet), false, quiet);
     assert.equal(writeChangesDue("update_todo", { id: "t", patch: { due_at: "2026-10-09T14:00:00-04:00" } }, { due_at: "2026-10-09T14:00:00-04:00" }), true);
     assert.equal(writeChangesDue("update_todo", { id: "t", patch: { title: "renamed" } }, { due_at: "2026-10-09T14:00:00-04:00" }), false, "a rename moved nothing");
-    assert.equal(writeChangesDue("update_reminder", { id: "r", reminder_at: "2026-10-09T14:00:00-04:00" }, {}), true);
+    assert.equal(writeChangesDue("update_reminder", { id: "r", reminder_at: "2026-10-09T14:00:00-04:00" }, {}), false, "a reminder leaves the due time where it was");
+    assert.equal(writeChangesDue("update_todo", { id: "t", patch: { reminder_at: "2026-10-09T14:00:00-04:00" } }, { due_at: "2026-10-08T14:00:00-04:00", reminder_at: "2026-10-09T14:00:00-04:00" }), false);
     assert.equal(writeChangesDue("get_todo", { id: "t" }, { due_at: "2026-10-09T14:00:00-04:00" }), false);
   });
 
@@ -5777,6 +5786,53 @@ describe("Sendblue provider", () => {
     await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt("SB_drop")).expect(204);
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.equal(sends.length, 1);
+  });
+
+  it("does not send a dropped check-in again after STOP, or once its window has passed", async () => {
+    const { db, api } = connectedFixture();
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_sb_stop','${USER_ID}','sms','group:sb_group_stop','cnv_stop',?,?)
+    `).run(stamp, stamp);
+    const insert = (id: string, handle: string) => db.prepare(`
+      INSERT INTO channel_messages(
+        id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at
+      ) VALUES(?,'thread_sb_stop','outbound','assistant','How was today, everyone?',?,'queued',?,?,?)
+    `).run(id, handle, JSON.stringify({ kind: "group_evening" }), stamp, stamp);
+    insert("msg_stop", "SB_stop");
+    insert("msg_late", "SB_late");
+    const receipt = (handle: string) => ({
+      message_handle: handle, status: "ERROR",
+      error_message: "Message was dropped by gateway, it did not get sent, please try again",
+    });
+    const resend = (id: string) => JSON.parse((db.prepare(
+      "SELECT json_extract(metadata_json,'$.unthreadedResend') resend FROM channel_messages WHERE id=?",
+    ).get(id) as { resend: string }).resend) as { state: string; lastError?: string };
+    const sends: string[] = [];
+    const worker = {
+      sendSms: async (_db: Db, to: string) => { sends.push(to); return { sid: "SB_again", status: "queued" }; },
+      runSmsAgent: async () => ({ text: "", threadId: "unused" }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    };
+
+    await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt("SB_stop")).expect(204);
+    setSmsOptOut(db, true);
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(sends, [], "STOP means no text, resend or not");
+    assert.equal(resend("msg_stop").state, "gave_up");
+    assert.match(resend("msg_stop").lastError ?? "", /opted out/);
+
+    setSmsOptOut(db, false);
+    await api.post(`/api/webhooks/sendblue/status?token=${SECRET}`).send(receipt("SB_late")).expect(204);
+    // An outage kept the retries going past the window.
+    db.prepare(`
+      UPDATE channel_messages SET metadata_json=json_set(metadata_json,'$.unthreadedResend.expires',?) WHERE id='msg_late'
+    `).run(new Date(Date.now() - 60_000).toISOString());
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(sends, [], "START does not release the held message, and a late one is not sent");
+    assert.equal(resend("msg_late").state, "gave_up");
+    assert.match(resend("msg_late").lastError ?? "", /too old/);
   });
 
   it("requires a recipient before the connection test and can disconnect", async () => {
@@ -12966,6 +13022,24 @@ describe("the Soul and group settings", () => {
     const web = await api.post("/api/agent/tools/update_group_settings").send({ reply_mode: "normal", assistant_nickname: null }).expect(400);
     assert.equal(web.body.error, "This conversation is not a group chat");
     assert.equal((db.prepare("SELECT reply_mode FROM life_areas WHERE id=?").get(area.id) as { reply_mode: string }).reply_mode, "named_only");
+  });
+});
+
+describe("search without Algolia", () => {
+  it("leaves out the app's own scratch-thread rows", async () => {
+    const { db, api } = fixture();
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_real',?,'sms','+17185550000','cnv_r',?,?),('thread_scratch',?,'sms','sweep:thread_real','cnv_s',?,?)
+    `).run(USER_ID, stamp, stamp, USER_ID, stamp, stamp);
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('m_real','thread_real','inbound','user','Pickles for the party','received','{}',?,?),
+            ('m_scratch','thread_scratch','inbound','user','Sweep these pickles transcripts','received','{"internal":true}',?,?)
+    `).run(stamp, stamp, stamp, stamp);
+    const hits = (await api.get("/api/conversations/search?q=pickles").expect(200)).body.data.hits as Array<{ objectID: string }>;
+    assert.deepEqual(hits.map(hit => hit.objectID), ["m_real"]);
   });
 });
 

@@ -87,13 +87,20 @@ export function claimsReminder(reply: string): boolean {
  */
 const DUE_WHEN = /\b(?:tomorrow|tonight|today|this (?:morning|afternoon|evening|week|weekend)|next \w+|(?:mon|tues|wednes|thurs|fri|satur|sun)day|noon|midnight|end of (?:the )?(?:day|week)|eod|at \d|\d\s?(?:am|pm)|\d+:\d\d|in (?:\d+|an?|one|two|three|four|five|six|seven|ten|a couple of|a few) (?:minutes?|hours?|days?|weeks?)|(?:january|february|march|april|may|june|july|august|september|october|november|december) \d|\d{4}-\d\d-\d\d)\b/i;
 
+/**
+ * The time word has to come straight after the connector: "push this to the
+ * repo tonight" and "count that as done today" carry a time word but move no
+ * todo. A bare "next" does not count, so "shift gears to the next one" is quiet.
+ */
+const THEN_WHEN = "(?:the\\s+)?(?:tomorrow|tonight|today|this (?:morning|afternoon|evening|week|weekend)|next (?:day|week|month|weekend|morning|afternoon|evening|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:mon|tues|wednes|thurs|fri|satur|sun)day|noon|midnight|end of (?:the )?(?:day|week)|eod|\\d|(?:january|february|march|april|may|june|july|august|september|october|november|december)\\b)";
+
 const DUE_CLAIMS = [
   // "I'll treat X as tomorrow at 2", "I'll move it to Monday", "I'll push that to Friday".
-  new RegExp(`\\bi(?:'ll| will|'m going to| am going to)\\s+(?:go ahead and\\s+)?(?:treat|count|move|push|bump|shift|reschedule)\\b(?!\\s+on\\b)[^.!?]{0,160}?\\b(?:as|to|for|until|at)\\b`, "i"),
+  new RegExp(`\\bi(?:'ll| will|'m going to| am going to)\\s+(?:go ahead and\\s+)?(?:(?:treat|count)\\b[^.!?]{0,160}?\\bas|(?:move|push|bump|shift|reschedule)\\b(?!\\s+on\\b)[^.!?]{0,160}?\\b(?:to|for|until|at))\\s+${THEN_WHEN}`, "i"),
   // "I moved X to Monday at 2:00 PM", "I've rescheduled it for tomorrow".
-  new RegExp(`\\bi(?:'ve| have)?\\s+(?:just\\s+)?(?:moved|pushed|bumped|shifted|rescheduled)\\b(?!\\s+on\\b)[^.!?]{0,160}?\\b(?:to|for|until|at)\\b`, "i"),
-  // "Moved to Monday.", "Got it, pushed to 2 PM."
-  /^(?:(?:got it|done|okay|ok|sure|alright|yep|yes)[,.!\u2014\u2013-]*\s+)?(?:moved|pushed|bumped|rescheduled)\b[^.!?]{0,160}?\b(?:to|for|until|at)\b/i,
+  new RegExp(`\\bi(?:'ve| have)?\\s+(?:just\\s+)?(?:moved|pushed|bumped|shifted|rescheduled)\\b(?!\\s+on\\b)[^.!?]{0,160}?\\b(?:to|for|until|at)\\s+${THEN_WHEN}`, "i"),
+  // "Moved to Monday.", "Got it, pushed to 2 PM.", "Done \u2014 pushed it to Friday."
+  new RegExp(`^(?:(?:got it|done|okay|ok|sure|alright|yep|yes)(?:[,.!]|\\s*[\\u2014\\u2013-]+)*\\s+)?(?:moved|pushed|bumped|rescheduled)\\b[^.!?]{0,160}?\\b(?:to|for|until|at)\\s+${THEN_WHEN}`, "i"),
   /\bi(?:'ve| have)?\s+(?:just\s+)?(?:updated|changed)\b[^.!?]{0,80}?\bdue (?:date|time)\b/i,
 ];
 
@@ -158,17 +165,15 @@ export function todoWriteSetsReminder(tool: string, input: unknown, data: unknow
 }
 
 /**
- * Whether a successful write moved a todo's time: a reminder call, or a todo
- * write that asked for a schedule and returned a todo that carries one.
+ * Whether a successful write moved a todo's due time: a todo write that asked
+ * for a due_at and returned a todo that carries one. A reminder call only moves
+ * reminder_at, so the todo would still be overdue at its old time.
  */
 export function writeChangesDue(tool: string, input: unknown, data: unknown): boolean {
-  if (REMINDER_WRITE_TOOLS.has(tool)) return true;
   if (!TODO_REMINDER_TOOLS.has(tool) || !input || typeof input !== "object" || !data || typeof data !== "object") return false;
   const sent = input as Record<string, unknown>;
   const fields = (tool === "update_todo" && sent.patch && typeof sent.patch === "object" ? sent.patch : sent) as Record<string, unknown>;
-  if (!SCHEDULING_FIELDS.some(field => present(fields[field]))) return false;
-  const record = data as { due_at?: unknown; reminder_at?: unknown; extra_reminders?: unknown; recurrence?: unknown };
-  return present(record.due_at) || present(record.reminder_at) || present(record.extra_reminders) || present(record.recurrence);
+  return present(fields.due_at) && present((data as { due_at?: unknown }).due_at);
 }
 
 /** Whether a read showed at least one reminder: an empty list backs nothing, so "I'll text you" after it is still unbacked. */

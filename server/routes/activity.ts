@@ -165,7 +165,8 @@ function digestDrafts(db: Db): DigestDraft[] {
   let pending: string | null = null;
   for (const row of rows) {
     if (row.role === "assistant") {
-      pending = row.content === NO_TEXT ? null : row.content;
+      // Several assistant rows can precede one instruction (a retry); the newest, seen first, is the draft.
+      pending ??= row.content === NO_TEXT ? null : row.content;
       continue;
     }
     const metadata = parse(row.metadata_json);
