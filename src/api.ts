@@ -1,5 +1,5 @@
 import type {
-  AgentTurnMemory, AttachmentPage, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
+  AgentTurnMemory, AttachmentPage, BackgroundActivity, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
   ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoCompletion, TodoStatus,
   UniversalSearchResult,
@@ -339,6 +339,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }, WEB_TOOLS.has(name) ? WEB_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS),
+  backgroundActivity: () => request<BackgroundActivity>("/activity/background"),
   channelConversations: () => request<ChannelConversation[]>("/conversations/channels"),
   channelMessages: (threadId: string) =>
     request<ChannelMessage[]>(`/conversations/channels/${encodeURIComponent(threadId)}/messages`),

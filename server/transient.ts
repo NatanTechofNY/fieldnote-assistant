@@ -41,6 +41,12 @@ export function isTransientFailure(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && current instanceof Error; depth += 1) {
     if (current instanceof TransientFailure) return true;
+    // Sendblue answering "slow down" refused the request, so nothing was queued
+    // and trying again cannot text twice. A 5xx is not the same: the gateway may
+    // have queued the message before it failed (see sendblue-service.ts), and a
+    // retry re-runs the whole turn or dispatch.
+    const status = (current as { status?: unknown }).status;
+    if (current.name === "SendblueRequestError" && status === 429) return true;
     // An aborted request is our own deadline firing, not a rejected request.
     if (current.name === "AbortError" || current.name === "TimeoutError") return true;
     const code = (current as { code?: unknown }).code;

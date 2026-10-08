@@ -12,6 +12,12 @@ import { useAgentPanel } from "../../lib/agent-panel";
 import { useRedact } from "../../lib/demo-mode";
 import { threadTitle } from "../history/thread-label";
 
+/** The owner's own number, so their thread can be called "You" rather than shown as a number. */
+function useOwnerPhone(): string | null {
+  const { data } = useQuery({ queryKey: ["integrations"], queryFn: api.integrations });
+  return data?.notifications.recipientPhone ?? null;
+}
+
 /**
  * The archive, in the panel, at the width of a phone: a thread list and a plain
  * transcript, the way a messages app does it.
@@ -22,6 +28,7 @@ import { threadTitle } from "../history/thread-label";
 export function PanelConversations() {
   const redact = useRedact();
   const panel = useAgentPanel();
+  const ownerPhone = useOwnerPhone();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const { data: threads = [], isLoading } = useQuery({
     queryKey: ["channel-conversations"],
@@ -37,7 +44,7 @@ export function PanelConversations() {
         </button>
         : <span className="agent-panel-mark"><MessagesSquare size={13}/></span>}
       <div>
-        <strong>{selected ? threadTitle(selected, redact.phone) : "Conversations"}</strong>
+        <strong>{selected ? threadTitle(selected, redact.phone, undefined, ownerPhone) : "Conversations"}</strong>
         <div className="eyebrow">{selected
           ? `${selected.messageCount} message${selected.messageCount === 1 ? "" : "s"}`
           : "Web and SMS, kept on this machine"}</div>
@@ -61,11 +68,12 @@ export function PanelConversations() {
 function ThreadList({ threads, onSelect }: { threads: ChannelConversation[]; onSelect: (id: string) => void }) {
   const timezone = useTimezone();
   const redact = useRedact();
+  const ownerPhone = useOwnerPhone();
   return <div className="panel-thread-list">
     {threads.map(thread => <button key={thread.id} type="button" className="panel-thread" onClick={() => onSelect(thread.id)}>
       <span className="panel-thread-mark">{thread.channel === "sms" ? <Phone size={13}/> : <Bot size={13}/>}</span>
       <span className="panel-thread-body">
-        <strong>{threadTitle(thread, redact.phone)}</strong>
+        <strong>{threadTitle(thread, redact.phone, undefined, ownerPhone)}</strong>
         <small>{thread.lastMessage || "No messages yet"}</small>
       </span>
       <span className="panel-thread-meta">

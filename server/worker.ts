@@ -1003,6 +1003,7 @@ export async function sweepQuietConversation(
         turnBudgetMs: SWEEP_BUDGET_MS,
         userMessageMetadata: {
           kind: "memory_sweep",
+          dispatchId,
           threadId: candidate.threadId,
           ...(candidate.lifeAreaId ? { lifeAreaId: candidate.lifeAreaId } : {}),
         },

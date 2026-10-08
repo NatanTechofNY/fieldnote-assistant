@@ -16,10 +16,13 @@ import {
   MAX_CLAIM_SCAN,
   mentionsTodo,
   readShowsReminder,
+  DUE_CLAIM_CHECK,
   REMINDER_CLAIM_CHECK,
   REMINDER_WRITE_TOOLS,
   SAVE_CLAIM_CHECK,
   todoWriteSetsReminder,
+  writeChangesDue,
+  claimsDueChange,
 } from "./claims.ts";
 import { plainText, type SmsSender } from "./messaging.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
@@ -341,7 +344,25 @@ function assistantParts(content: string, metadataJson: string): AgentPart[] {
     // error would be the same mistake in the opposite direction.
     && (part.output as { success?: boolean } | null | undefined)?.success === true,
   );
-  return [...writes, { type: "text", text: content }];
+  return [...writes, { type: "text", text: reminderNote(content, metadataJson) }];
+}
+
+/**
+ * A reminder the app texted is an assistant row with no turn behind it, so the
+ * owner's "will do that tomorrow around 2" answered it with nothing saying which
+ * todo it was about, and the reply confirmed a new time without changing one.
+ * The todo id rides along on the replayed row so the answer can be acted on.
+ */
+function reminderNote(content: string, metadataJson: string): string {
+  try {
+    const metadata = JSON.parse(metadataJson) as { kind?: unknown; todoId?: unknown };
+    if (metadata.kind === "reminder" && typeof metadata.todoId === "string") {
+      return `${content}\n[app note, not sent: this text was the reminder for todo ${metadata.todoId}]`;
+    }
+  } catch {
+    // A row with unreadable metadata is replayed as plain text.
+  }
+  return content;
 }
 
 /**
@@ -1709,6 +1730,9 @@ export async function runChannelAgent(
     return REMINDER_WRITE_TOOLS.has(tool)
       || todoWriteSetsReminder(tool, part.input, (part.output as { data?: unknown } | undefined)?.data);
   });
+  // A time moved is backed by a write that moved one.
+  let movedDue = priorWrites.some(part =>
+    writeChangesDue(String(part.type).slice(5), part.input, (part.output as { data?: unknown } | undefined)?.data));
   // Each kind of unbacked claim is sent back once per turn, so a model that insists cannot loop the turn out of its budget.
   const checkedClaims = new Set<string>();
   let lookedUp = false;
@@ -1819,6 +1843,7 @@ export async function runChannelAgent(
           // A memory write backs a save; a todo write backs it only for a reply that is about a todo or a list.
           { name: "save", claimed: () => claimsSave(kept), backed: savedMemory || (changedRecord && mentionsTodo(kept)) || Boolean(options.internal), check: SAVE_CLAIM_CHECK },
           { name: "reminder", claimed: () => claimsReminder(kept), backed: reminderBacked || Boolean(options.internal), check: REMINDER_CLAIM_CHECK },
+          { name: "due", claimed: () => claimsDueChange(kept), backed: movedDue || Boolean(options.internal), check: DUE_CLAIM_CHECK },
         ].find(claim => !claim.backed && !checkedClaims.has(claim.name) && claim.claimed());
         // Near the end of the budget there is no round left to answer a check in: the reply goes as written.
         const roomForCheck = iteration < (options.maxRounds ?? MAX_TOOL_ITERATIONS) - 2 && Date.now() < deadline - CLAIM_CHECK_MARGIN_MS;
@@ -1917,6 +1942,7 @@ export async function runChannelAgent(
           if (toolName === "set_todo_status") changedStatus = true;
           if (REMINDER_WRITE_TOOLS.has(toolName) || readShowsReminder(toolName, data)
             || todoWriteSetsReminder(toolName, part.input, data)) reminderBacked = true;
+          if (writeChangesDue(toolName, part.input, data)) movedDue = true;
           if (MEMORY_WRITE_TOOLS.has(toolName)) savedMemory = true;
           if (SOUL_WRITE_TOOLS.has(toolName)) changedSoul = true;
         } catch (error) {

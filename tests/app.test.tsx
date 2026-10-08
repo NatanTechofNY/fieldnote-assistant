@@ -692,6 +692,26 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       }],
     },
   }));
+  if (url.endsWith("/api/activity/background")) return new Response(JSON.stringify({
+    success: true,
+    data: {
+      chats: [{
+        id: "owner", kind: "owner", name: "You", soul: "- Dry humour.", profile: "People: wife Sarah.",
+        profileUpdatedAt: "2026-07-28T09:00:00.000Z", profileState: "stale", lastProfileRun: null,
+        sweeps: [{
+          id: "sweep_1", at: "2026-07-28T10:00:00.000Z", status: "sent", error: null, summary: "Kept one fact.",
+          changes: [{ action: "created", memoryId: "memory_1", title: "Sarah's birthday" }],
+        }],
+      }, {
+        id: "area_group", kind: "group", name: "Sarah & me", soul: null, profile: null, profileUpdatedAt: null,
+        profileState: "empty", lastProfileRun: null, sweeps: [],
+      }],
+      digests: [{
+        id: "message_brief_request", kind: "digest_brief", label: "Morning Jira sweep", at: "2026-07-28T11:00:00.000Z",
+        draft: "OPS-12 moved to In Review.",
+      }],
+    },
+  }));
   if (url.endsWith("/api/conversations/channels")) return new Response(JSON.stringify({
     success: true,
     data: [{
@@ -2058,6 +2078,71 @@ it("explains searchable conversations and the core feature loops", async () => {
   expect(screen.getByText(/Web or SMS conversation text/)).toBeInTheDocument();
 });
 
+it("shows what the assistant does on its own under Background work", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/history"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  await userEvent.click(await screen.findByRole("tab", { name: "Background work" }));
+
+  const owner = await screen.findByRole("article", { name: "You" });
+  expect(within(owner).getByText(/Last read .* · kept 1 new fact/)).toBeInTheDocument();
+  expect(within(owner).getByRole("link", { name: "Sarah's birthday" })).toBeInTheDocument();
+  expect(within(owner).getByText("Dry humour.")).toBeInTheDocument();
+  expect(within(owner).getByText("Rewrite due")).toBeInTheDocument();
+  expect(within(owner).getByRole("button", { name: /Refresh profile/ })).toBeEnabled();
+  const group = screen.getByRole("article", { name: "Sarah & me" });
+  expect(within(group).getByText("Not read yet")).toBeInTheDocument();
+  expect(within(group).getByRole("button", { name: /Refresh profile/ })).toBeDisabled();
+
+  const drafts = screen.getByRole("region", { name: "Digest drafts" });
+  expect(within(drafts).getByText("Morning Jira sweep")).toBeInTheDocument();
+  expect(within(drafts).getByText("OPS-12 moved to In Review.")).toBeInTheDocument();
+});
+
+it("keeps the History tabs reachable by keyboard, and Background work open when the chat list fails", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/history"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  const conversations = await screen.findByRole("tab", { name: "Conversations" });
+  const background = screen.getByRole("tab", { name: "Background work" });
+  expect(conversations).toHaveAttribute("tabindex", "0");
+  expect(background).toHaveAttribute("tabindex", "-1");
+  expect(conversations).toHaveAttribute("aria-controls", "history-panel-conversations");
+  expect(document.getElementById("history-panel-conversations")).toHaveAttribute("role", "tabpanel");
+  conversations.focus();
+  await userEvent.keyboard("{ArrowRight}");
+  expect(await screen.findByRole("tab", { name: "Background work", selected: true })).toBeInTheDocument();
+  expect(await screen.findByRole("article", { name: "You" })).toBeInTheDocument();
+  expect(document.getElementById("history-panel-background")).toHaveAttribute("aria-labelledby", "history-tab-background");
+});
+
+it("opens Background work from a link even when the conversation list cannot load", async () => {
+  const real = globalThis.fetch;
+  const failing = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.endsWith("/api/conversations/channels")) return new Response(JSON.stringify({ error: "down" }), { status: 500 });
+    return real(input, init);
+  });
+  vi.stubGlobal("fetch", failing);
+  try {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/history?tab=background"]}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByRole("article", { name: "You" })).toBeInTheDocument();
+  } finally {
+    vi.stubGlobal("fetch", real);
+  }
+});
+
 it("renders complete channel conversation history", async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -2067,7 +2152,7 @@ it("renders complete channel conversation history", async () => {
   );
   expect(await screen.findByText("Every message, in one place.")).toBeInTheDocument();
   expect((await screen.findAllByText("Web Agent")).length).toBeGreaterThan(0);
-  expect((await screen.findAllByText("Text Messages (Phone Number: +17185551111)")).length).toBeGreaterThan(0);
+  expect((await screen.findAllByText("Text Messages (+17185551111)")).length).toBeGreaterThan(0);
   expect((await screen.findAllByText("Web conversation message 35")).length).toBeGreaterThan(0);
   const search = screen.getByPlaceholderText("Search conversations…");
   await userEvent.type(search, "launch plan");
@@ -2088,20 +2173,12 @@ it("renders complete channel conversation history", async () => {
   expect(screen.getByRole("heading", { name: "Highlights" })).toBeInTheDocument();
   expect(screen.queryByText(/Call get_reflection_evidence with internal arguments/)).not.toBeInTheDocument();
 
-  // A digest thread is a drafting workspace, not a conversation, and the turn the
-  // app composed leads with the instruction rather than the board catalog.
-  await userEvent.click((await screen.findAllByText("Digest drafts"))[0]);
-  expect(await screen.findByText("Morning Jira sweep")).toBeInTheDocument();
-  expect(screen.getByText("Digest brief")).toBeInTheDocument();
-  expect(screen.getByText("Check the Operations Delivery board for ticket updates in the last 24 hours")).toBeInTheDocument();
-  expect(screen.getByText("OPS-12 moved to In Review.")).toBeInTheDocument();
-  expect(screen.getByText(/board_id 1002/)).not.toBeVisible();
-  await userEvent.click(screen.getByText("What the app sent the agent"));
-  expect(screen.getByText(/board_id 1002/)).toBeVisible();
+  // A digest thread is a drafting workspace, not a conversation, so it is not listed here.
+  expect(screen.queryByText("Digest drafts")).not.toBeInTheDocument();
 
   // A tool call is persisted twice, so the archive has to show it once, beside
   // the step that ran it rather than repeated under the reply that followed.
-  await userEvent.click((await screen.findAllByText("Text Messages (Phone Number: +17185551111)"))[0]);
+  await userEvent.click((await screen.findAllByText("Text Messages (+17185551111)"))[0]);
   expect(await screen.findByText("create_memory")).toBeInTheDocument();
   expect(screen.getAllByText("create_memory")).toHaveLength(1);
   const traced = document.querySelector(".history-message.role-tool");

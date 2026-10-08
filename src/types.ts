@@ -394,6 +394,41 @@ export interface ChannelConversation {
   updatedAt: string;
 }
 
+/** One read of a chat by the memory sweep: what it kept or changed. */
+export interface SweepRun {
+  id: string;
+  at: string;
+  status: "pending" | "processing" | "sent" | "failed";
+  error: string | null;
+  summary: string | null;
+  changes: Array<{ action: "created" | "updated"; memoryId: string | null; title: string }>;
+}
+
+export interface BackgroundChat {
+  id: string;
+  kind: "owner" | "group";
+  name: string;
+  soul: string | null;
+  profile: string | null;
+  profileUpdatedAt: string | null;
+  profileState: "current" | "stale" | "empty";
+  lastProfileRun: { at: string; status: string; note: string | null } | null;
+  sweeps: SweepRun[];
+}
+
+export interface DigestDraft {
+  id: string;
+  kind: string;
+  label: string | null;
+  at: string;
+  draft: string | null;
+}
+
+export interface BackgroundActivity {
+  chats: BackgroundChat[];
+  digests: DigestDraft[];
+}
+
 export interface ChannelMessage {
   id: string;
   direction: "inbound" | "outbound";
