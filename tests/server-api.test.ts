@@ -13111,4 +13111,38 @@ describe("background activity", () => {
     assert.deepEqual(body.digests.map(({ kind, label, draft }) => [kind, label, draft]), [["daily_digest", "2030-01-14", "Good morning."]]);
     assert.equal((db.prepare("SELECT total_changes() n").get() as { n: number }).n, before.n, "a read writes nothing");
   });
+
+  it("gives each sweep the rows of its own run, even when their windows overlap", async () => {
+    const { db, api } = fixture();
+    const t0 = "2030-01-14T12:00:00.000Z";
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_o',?,'sms','group:o','cnv_o',?,?),('thread_sweep_o',?,'sms','sweep:thread_o','cnv_so',?,?)
+    `).run(USER_ID, t0, t0, USER_ID, t0, t0);
+    ensureGroupLifeArea(db, "thread_o", "Overlap");
+    // The first run waited out a retry, so its window spans the second run.
+    db.prepare(`
+      INSERT INTO scheduled_dispatches(id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at)
+      VALUES('d1',?,'memory_sweep','memory_sweep:thread_o:m1','2030-01-14T12:00:00.000Z','sent',2,'2030-01-14T12:00:00.000Z','2030-01-14T12:30:00.000Z'),
+            ('d2',?,'memory_sweep','memory_sweep:thread_o:m2','2030-01-14T12:10:00.000Z','sent',1,'2030-01-14T12:10:00.000Z','2030-01-14T12:11:00.000Z')
+    `).run(USER_ID, USER_ID);
+    const row = (id: string, role: string, content: string, metadata: unknown, at: string) => db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES(?,'thread_sweep_o','outbound',?,?,'delivered',?,?,?)
+    `).run(id, role, content, JSON.stringify(metadata), at, at);
+    const memory = (title: string) => ({ output: { success: true, data: { id: `mem_${title}`, title } }, input: {} });
+    row("u1", "user", "sweep one", { dispatchId: "d1" }, "2030-01-14T12:00:01.000Z");
+    row("a1", "tool", "create_memory", memory("First"), "2030-01-14T12:00:02.000Z");
+    row("s1", "assistant", "First run.", {}, "2030-01-14T12:00:03.000Z");
+    row("u2", "user", "sweep two", { dispatchId: "d2" }, "2030-01-14T12:10:01.000Z");
+    row("a2", "tool", "create_memory", memory("Second"), "2030-01-14T12:10:02.000Z");
+    row("s2", "assistant", "Second run.", {}, "2030-01-14T12:10:03.000Z");
+
+    const body = (await api.get("/api/activity/background").expect(200)).body.data as {
+      chats: Array<{ kind: string; sweeps: Array<{ id: string; summary: string | null; changes: Array<{ title: string }> }> }>;
+    };
+    const sweeps = body.chats.find(chat => chat.kind === "group")!.sweeps;
+    const byId = Object.fromEntries(sweeps.map(sweep => [sweep.id, [sweep.summary, sweep.changes.map(change => change.title)]]));
+    assert.deepEqual(byId, { d1: ["First run.", ["First"]], d2: ["Second run.", ["Second"]] });
+  });
 });

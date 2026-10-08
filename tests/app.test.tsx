@@ -2102,6 +2102,47 @@ it("shows what the assistant does on its own under Background work", async () =>
   expect(within(drafts).getByText("OPS-12 moved to In Review.")).toBeInTheDocument();
 });
 
+it("keeps the History tabs reachable by keyboard, and Background work open when the chat list fails", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/history"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  const conversations = await screen.findByRole("tab", { name: "Conversations" });
+  const background = screen.getByRole("tab", { name: "Background work" });
+  expect(conversations).toHaveAttribute("tabindex", "0");
+  expect(background).toHaveAttribute("tabindex", "-1");
+  expect(conversations).toHaveAttribute("aria-controls", "history-panel-conversations");
+  expect(document.getElementById("history-panel-conversations")).toHaveAttribute("role", "tabpanel");
+  conversations.focus();
+  await userEvent.keyboard("{ArrowRight}");
+  expect(await screen.findByRole("tab", { name: "Background work", selected: true })).toBeInTheDocument();
+  expect(await screen.findByRole("article", { name: "You" })).toBeInTheDocument();
+  expect(document.getElementById("history-panel-background")).toHaveAttribute("aria-labelledby", "history-tab-background");
+});
+
+it("opens Background work from a link even when the conversation list cannot load", async () => {
+  const real = globalThis.fetch;
+  const failing = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.endsWith("/api/conversations/channels")) return new Response(JSON.stringify({ error: "down" }), { status: 500 });
+    return real(input, init);
+  });
+  vi.stubGlobal("fetch", failing);
+  try {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/history?tab=background"]}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByRole("article", { name: "You" })).toBeInTheDocument();
+  } finally {
+    vi.stubGlobal("fetch", real);
+  }
+});
+
 it("renders complete channel conversation history", async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { NavLink, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -139,17 +139,35 @@ function StartConversationButton() {
 }
 
 /** Conversations are the chats; Background work is what the assistant does on its own between them. */
-function HistoryTabs({ active }: { active: "conversations" | "background" }) {
+const HISTORY_TABS = [["conversations", "Conversations"], ["background", "Background work"]] as const;
+type HistoryTab = typeof HISTORY_TABS[number][0];
+const tabPanelProps = (tab: HistoryTab) => ({ role: "tabpanel", id: `history-panel-${tab}`, "aria-labelledby": `history-tab-${tab}` }) as const;
+
+function HistoryTabs({ active }: { active: HistoryTab }) {
   const [, setSearchParams] = useSearchParams();
-  const tabs = [["conversations", "Conversations"], ["background", "Background work"]] as const;
+  const open = (value: HistoryTab) => setSearchParams(value === "background" ? { tab: "background" } : {});
+  // Arrow keys move between tabs and only the open one is in the tab order.
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
+    event.preventDefault();
+    const index = HISTORY_TABS.findIndex(([value]) => value === active);
+    const next = HISTORY_TABS[(index + step + HISTORY_TABS.length) % HISTORY_TABS.length][0];
+    open(next);
+    window.requestAnimationFrame(() => document.getElementById(`history-tab-${next}`)?.focus());
+  };
   return <div className="tabs" role="tablist" aria-label="History view">
-    {tabs.map(([value, label]) => <button
+    {HISTORY_TABS.map(([value, label]) => <button
       key={value}
+      id={`history-tab-${value}`}
       type="button"
       role="tab"
       aria-selected={active === value}
+      aria-controls={`history-panel-${value}`}
+      tabIndex={active === value ? 0 : -1}
       className={`tab ${active === value ? "active" : ""}`}
-      onClick={() => setSearchParams(value === "background" ? { tab: "background" } : {})}
+      onClick={() => open(value)}
+      onKeyDown={onKeyDown}
     >{label}</button>)}
   </div>;
 }
@@ -161,21 +179,24 @@ export function ConversationHistoryPage() {
     queryFn: api.channelConversations,
     refetchInterval: 15_000,
   });
+  const backgroundPage = <div className="page">
+    <PageHead eyebrow="Conversation archive" title="Every message, in one place." description="What the assistant does on its own: what it learned from each chat, and the Soul and profile it works from." />
+    <HistoryTabs active="background" />
+    <div {...tabPanelProps("background")}><BackgroundWorkPanel /></div>
+  </div>;
+  // The tab does not need the conversation list, so a failed list does not hide it.
+  if (searchParams.get("tab") === "background") return backgroundPage;
   if (isLoading) return <Loading />;
   if (error) return <ErrorState error={error} />;
   // A link to a scratch thread (an old bookmark, a search hit) lands where its results now live.
   const thread = searchParams.get("thread");
   const linkedToBackground = Boolean(thread && data.some(item => item.id === thread && isBackgroundAddress(item.address)));
-  if (searchParams.get("tab") === "background" || linkedToBackground) return <div className="page">
-    <PageHead eyebrow="Conversation archive" title="Every message, in one place." description="What the assistant does on its own: what it learned from each chat, and the Soul and profile it works from." />
-    <HistoryTabs active="background" />
-    <BackgroundWorkPanel />
-  </div>;
+  if (linkedToBackground) return backgroundPage;
   const conversations = data.filter(item => !isBackgroundAddress(item.address));
   if (!conversations.length) return <div className="page">
     <PageHead eyebrow="Conversation archive" title="Every message, in one place." description="Web and SMS conversations are retained in local SQLite while the agent receives only a bounded context window." />
     <HistoryTabs active="conversations" />
-    <section className="card archive-empty">
+    <section className="card archive-empty" {...tabPanelProps("conversations")}>
       <div className="archive-empty-copy">
         <div className="archive-empty-mark" aria-hidden="true"><BookOpen size={17}/></div>
         <h2>The first page is yours to write.</h2>
@@ -315,7 +336,7 @@ function ConversationHistoryContent({ conversations, initialThreadId, initialMes
   return <div className="page page-constrained history-page">
     <PageHead eyebrow="Conversation archive" title="Every message, in one place." description="Full web and SMS history is retained in SQLite. The SMS agent context uses only the latest 40 messages from the last 24 hours." />
     <HistoryTabs active="conversations" />
-    <section className="history-shell card">
+    <section className="history-shell card" {...tabPanelProps("conversations")}>
       <aside className="history-threads">
         <div className="history-search"><Search size={14}/><input value={searchQuery} onChange={event => setSearchQuery(event.target.value)} placeholder="Search conversations…"/></div>
         {debouncedSearch.length >= 2 ? <>

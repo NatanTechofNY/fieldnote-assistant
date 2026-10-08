@@ -94,13 +94,30 @@ function sweepRuns(db: Db, threadId: string): SweepRun[] {
     WHERE thread_id=? AND role IN ('assistant','tool') AND created_at>=? AND created_at<=?
     ORDER BY created_at,rowid
   `);
+  // A sweep's instruction row names its dispatch; what the run filed follows it, up to the next instruction.
+  const instruction = db.prepare(`
+    SELECT rowid id FROM channel_messages
+    WHERE thread_id=? AND role='user' AND json_extract(metadata_json,'$.dispatchId')=?
+  `);
+  const rowsAfter = db.prepare(`
+    SELECT role,content,metadata_json FROM channel_messages
+    WHERE thread_id=? AND role IN ('assistant','tool') AND rowid>?
+      AND rowid<COALESCE((SELECT min(rowid) FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>?),9223372036854775807)
+    ORDER BY rowid
+  `);
   return dispatches.map(dispatch => {
     const changes: SweepChange[] = [];
     let summary: string | null = null;
     if (sweepThread) {
-      // Sweeps run one at a time, so the rows filed while a dispatch was open are its own.
-      const end = new Date(Date.parse(dispatch.updated_at) + (dispatch.status === "processing" ? 5 * 60_000 : 2_000)).toISOString();
-      const rows = rowsBetween.all(sweepThread.id, dispatch.created_at, end) as Array<{ role: string; content: string; metadata_json: string }>;
+      const start = instruction.get(sweepThread.id, dispatch.id) as { id: number } | undefined;
+      let rows: Array<{ role: string; content: string; metadata_json: string }>;
+      if (start) {
+        rows = rowsAfter.all(sweepThread.id, start.id, sweepThread.id, start.id) as typeof rows;
+      } else {
+        // A sweep from before the instruction carried its dispatch: the rows filed while it was open are its own.
+        const end = new Date(Date.parse(dispatch.updated_at) + (dispatch.status === "processing" ? 5 * 60_000 : 2_000)).toISOString();
+        rows = rowsBetween.all(sweepThread.id, dispatch.created_at, end) as typeof rows;
+      }
       for (const row of rows) {
         if (row.role === "tool") {
           const change = changeOf(row.content, row.metadata_json);
@@ -153,34 +170,41 @@ export type DigestDraft = {
 };
 
 function digestDrafts(db: Db): DigestDraft[] {
-  const rows = db.prepare(`
-    SELECT m.id,m.role,m.content,m.metadata_json,m.created_at FROM channel_messages m
-    JOIN channel_threads t ON t.id=m.thread_id
-    WHERE t.user_id=? AND t.channel='sms' AND t.address LIKE 'digest:%' AND m.role IN ('user','assistant')
-      AND m.status<>'failed'
-    ORDER BY m.created_at DESC,m.rowid DESC LIMIT ?
-  `).all(USER_ID, DIGEST_DRAFTS * 3) as Array<{ id: string; role: string; content: string; metadata_json: string; created_at: string }>;
+  // The threads first, then each one's newest rows by the (thread, time) index; a LIKE join would read every digest message ever kept.
+  const threads = db.prepare(`
+    SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address>='digest:' AND address<'digest;'
+  `).all(USER_ID) as Array<{ id: string }>;
+  const newest = db.prepare(`
+    SELECT id,role,content,metadata_json,created_at FROM channel_messages
+    WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
+    ORDER BY created_at DESC,rowid DESC LIMIT ?
+  `);
   const drafts: DigestDraft[] = [];
-  // Newest first: an assistant row is the draft of the instruction just before it in time, which comes next in the list.
-  let pending: string | null = null;
-  for (const row of rows) {
-    if (row.role === "assistant") {
-      // Several assistant rows can precede one instruction (a retry); the newest, seen first, is the draft.
-      pending ??= row.content === NO_TEXT ? null : row.content;
-      continue;
+  for (const { id: threadId } of threads) {
+    const rows = newest.all(threadId, DIGEST_DRAFTS * 3) as Array<{ id: string; role: string; content: string; metadata_json: string; created_at: string }>;
+    // Newest first: an assistant row is the draft of the instruction just before it in time, which comes next in the list.
+    let pending: string | null = null;
+    let kept = 0;
+    for (const row of rows) {
+      if (row.role === "assistant") {
+        // Several assistant rows can precede one instruction (a retry); the newest, seen first, is the draft.
+        pending ??= row.content === NO_TEXT ? null : row.content;
+        continue;
+      }
+      const metadata = parse(row.metadata_json);
+      drafts.push({
+        id: row.id,
+        kind: text(metadata.kind) ?? "digest",
+        label: text(metadata.briefName) ?? text(metadata.date),
+        at: row.created_at,
+        draft: pending,
+      });
+      pending = null;
+      kept += 1;
+      if (kept >= DIGEST_DRAFTS) break;
     }
-    const metadata = parse(row.metadata_json);
-    drafts.push({
-      id: row.id,
-      kind: text(metadata.kind) ?? "digest",
-      label: text(metadata.briefName) ?? text(metadata.date),
-      at: row.created_at,
-      draft: pending,
-    });
-    pending = null;
-    if (drafts.length >= DIGEST_DRAFTS) break;
   }
-  return drafts;
+  return drafts.sort((a, b) => b.at.localeCompare(a.at)).slice(0, DIGEST_DRAFTS);
 }
 
 export function registerActivityRoutes({ app, db }: RouteContext): void {
