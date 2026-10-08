@@ -89,7 +89,7 @@ const DUE_WHEN = /\b(?:tomorrow|tonight|today|this (?:morning|afternoon|evening|
 
 const DUE_CLAIMS = [
   // "I'll treat X as tomorrow at 2", "I'll move it to Monday", "I'll push that to Friday".
-  new RegExp(`\\bi(?:'ll| will|'m going to| am going to)\\s+(?:go ahead and\\s+)?(?:treat|count|move|push|bump|shift|reschedule)\\b[^.!?]{0,160}?\\b(?:as|to|for|until|at)\\b`, "i"),
+  new RegExp(`\\bi(?:'ll| will|'m going to| am going to)\\s+(?:go ahead and\\s+)?(?:treat|count|move|push|bump|shift|reschedule)\\b(?!\\s+on\\b)[^.!?]{0,160}?\\b(?:as|to|for|until|at)\\b`, "i"),
   // "I moved X to Monday at 2:00 PM", "I've rescheduled it for tomorrow".
   new RegExp(`\\bi(?:'ve| have)?\\s+(?:just\\s+)?(?:moved|pushed|bumped|shifted|rescheduled)\\b(?!\\s+on\\b)[^.!?]{0,160}?\\b(?:to|for|until|at)\\b`, "i"),
   // "Moved to Monday.", "Got it, pushed to 2 PM."

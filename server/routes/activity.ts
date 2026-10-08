@@ -157,6 +157,7 @@ function digestDrafts(db: Db): DigestDraft[] {
     SELECT m.id,m.role,m.content,m.metadata_json,m.created_at FROM channel_messages m
     JOIN channel_threads t ON t.id=m.thread_id
     WHERE t.user_id=? AND t.channel='sms' AND t.address LIKE 'digest:%' AND m.role IN ('user','assistant')
+      AND m.status<>'failed'
     ORDER BY m.created_at DESC,m.rowid DESC LIMIT ?
   `).all(USER_ID, DIGEST_DRAFTS * 3) as Array<{ id: string; role: string; content: string; metadata_json: string; created_at: string }>;
   const drafts: DigestDraft[] = [];

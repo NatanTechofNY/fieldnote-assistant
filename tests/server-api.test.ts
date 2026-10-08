@@ -2166,6 +2166,7 @@ describe("SMS, reminders, and channel agent execution", () => {
       "Should I move it to 2 PM?",
       "You moved it to Friday.",
       "I moved on to the next one.",
+      "I\u2019ll move on to the next one tomorrow.",
       "Moved the couch to the garage.",
       "I\u2019ll text you in 10 minutes.",
       "Got it, saved.",
