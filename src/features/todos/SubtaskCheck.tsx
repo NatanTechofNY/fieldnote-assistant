@@ -1,4 +1,4 @@
-import { Square, SquareCheck, SquarePause, SquarePlay, SquareX } from "lucide-react";
+import { Play, Square, SquareCheck, SquarePause, SquarePlay, SquareX } from "lucide-react";
 import { statusMeta } from "../../lib/todo-meta";
 import type { Todo, TodoStatus } from "../../types";
 
@@ -35,6 +35,26 @@ export function SubtaskCheck({ todo, onToggle, disabled }: { todo: Todo; onToggl
     disabled={disabled}
     onClick={onToggle}
   ><Box size={14} style={marked ? { color: statusMeta[todo.status].color } : undefined}/></button>;
+}
+
+/**
+ * Marks a step as started, or sends it back to to do. Only the two states it
+ * moves between get the control: a finished, blocked, or cancelled step is not
+ * one the owner is about to start, and the checkbox and menu already reach them.
+ */
+export function SubtaskStart({ todo, onToggle, disabled }: { todo: Todo; onToggle: () => void; disabled?: boolean }) {
+  if (todo.status !== "pending" && todo.status !== "in_progress") return null;
+  const going = todo.status === "in_progress";
+  // One fixed name with `aria-pressed` carrying the state, so a screen reader says it once.
+  return <button
+    type="button"
+    aria-pressed={going}
+    aria-label={`In progress: subtask ${todo.title}`}
+    title={going ? "In progress: click to move back to to do" : "Mark in progress"}
+    className="subtask-start"
+    disabled={disabled}
+    onClick={onToggle}
+  ><Play size={12}/></button>;
 }
 
 /**

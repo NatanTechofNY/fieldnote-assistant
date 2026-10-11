@@ -11,7 +11,7 @@ import { friendlyDate, friendlyDueDate, toZonedDateTimeLocal, useTimezone, zoned
 import { boardStatuses, statusMeta } from "../../lib/todo-meta";
 import { invalidateContent } from "../../lib/invalidate";
 import { CompleteParentDialog } from "./CompleteParentDialog";
-import { SubtaskCheck, SubtaskProgress, SubtaskState } from "./SubtaskCheck";
+import { SubtaskCheck, SubtaskProgress, SubtaskStart, SubtaskState } from "./SubtaskCheck";
 
 type RepeatMode = "never" | "daily" | "interval" | "weekly";
 
@@ -219,6 +219,11 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
             />
             <span className="subtask-name">{subtask.title}</span>
             <SubtaskState todo={subtask}/>
+            <SubtaskStart
+              todo={subtask}
+              disabled={setSubtaskStatus.isPending}
+              onToggle={() => setSubtaskStatus.mutate({ id: subtask.id, status: subtask.status === "in_progress" ? "pending" : "in_progress" })}
+            />
             {subtask.due_at && <span className="subtask-due">{friendlyDueDate(subtask.due_at, timezone)}</span>}
             <button type="button" className="button icon ghost" aria-label={`Delete subtask ${subtask.title}`} onClick={() => removeSubtask.mutate(subtask.id)}><Trash2 size={13}/></button>
           </li>)}</ul>}

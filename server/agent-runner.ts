@@ -63,6 +63,8 @@ const CONTEXT_WINDOW_MS = 24 * 60 * 60_000;
  * by the next text in the thread.
  */
 const MAX_TOOL_ITERATIONS = 16;
+/** Rounds a turn may spend showing the model a call Agent Studio refused. */
+const MAX_REFUSED_ROUNDS = 2;
 /** A claim check costs a model round; with less than this left in the budget the reply goes out as written. */
 const CLAIM_CHECK_MARGIN_MS = 60_000;
 
@@ -274,12 +276,14 @@ const CLOSING_REACTIONS = { soul: "👻", memory: "🧠", changed: "✅", answer
 const MEMORY_WRITE_TOOLS = new Set(["create_memory", "update_memory", "remember_group_member"]);
 const SOUL_WRITE_TOOLS = new Set(["update_soul"]);
 
-/** The reply with the marks of what the turn kept, each once, soul first. */
-function withWriteMarks(text: string, marks: { soul: boolean; memory: boolean }): string {
-  const tail = [marks.soul ? CLOSING_REACTIONS.soul : "", marks.memory ? CLOSING_REACTIONS.memory : ""]
-    .filter(mark => mark && !text.includes(mark));
-  return tail.length ? `${text} ${tail.join(" ")}` : text;
-}
+/**
+ * The marks used to be appended to the reply's text as well. Every answer to an
+ * evening check-in saves to the journal, so every reply in the group ended in
+ * 🧠 and the model began adding it unprompted. The mark is a tapback only now;
+ * rows an earlier version wrote still end in it, so replay strips it rather than
+ * let history keep teaching the habit.
+ */
+const TRAILING_WRITE_MARKS = /(?:\s*(?:🧠|👻))+\s*$/u;
 /** Every tapback the runtime places, progress or closing: what a retry may find already on the message. */
 const RUNTIME_MARKS = new Set<string>([...PROGRESS_MARKS, ...Object.values(CLOSING_REACTIONS)]);
 
@@ -344,7 +348,7 @@ function assistantParts(content: string, metadataJson: string): AgentPart[] {
     // error would be the same mistake in the opposite direction.
     && (part.output as { success?: boolean } | null | undefined)?.success === true,
   );
-  return [...writes, { type: "text", text: reminderNote(content, metadataJson) }];
+  return [...writes, { type: "text", text: reminderNote(content.replace(TRAILING_WRITE_MARKS, "") || content, metadataJson) }];
 }
 
 /**
@@ -786,8 +790,10 @@ const PROMPTED_ANSWER_WINDOW_MS = 2 * 60 * 60_000;
  * all. Two exceptions, both the app asking the room something: answers to the
  * evening question are the day's shared journal entry, which only the
  * assistant writes, so for a few hours after it went out every message still
- * reaches the agent; and when the last thing the assistant said was a reminder
- * or the morning note, "done" or "push it to Monday" is an answer to it.
+ * reaches the agent (which decides whether it is an answer); and when the last
+ * thing the assistant said was a reminder or the morning note, "done" or "push
+ * it to Monday" is an answer to it. Someone telling the assistant to stop after
+ * either went out ends that exception.
  */
 export function holdUntilNamed(
   db: Db,
@@ -808,19 +814,30 @@ export function holdUntilNamed(
   if (burst.some(row => row.forAssistant(db, thread.id, voice.assistantNickname))) return false;
   const since = new Date(Date.now() - EVENING_ANSWER_WINDOW_MS).toISOString();
   const eveningAsked = db.prepare(`
-    SELECT 1 found FROM channel_messages
+    SELECT created_at FROM channel_messages
     WHERE thread_id=? AND role='assistant' AND status<>'failed'
       AND json_extract(metadata_json,'$.kind')='group_evening' AND created_at>=?
+    ORDER BY created_at DESC,rowid DESC LIMIT 1
+  `).get(thread.id, since) as { created_at: string } | undefined;
+  // "Stop talking" said after the app asked the room something beats the open
+  // window: the room has said what it wants, and a message that names the
+  // assistant still reaches it.
+  const stoppedAfter = (at: string) => Boolean(db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role='tool' AND content='update_group_settings' AND created_at>=?
+      AND json_extract(metadata_json,'$.input.reply_mode')='named_only'
+      AND json_extract(metadata_json,'$.output.success')=1
     LIMIT 1
-  `).get(thread.id, since);
-  if (eveningAsked) return false;
+  `).get(thread.id, at));
+  if (eveningAsked && !stoppedAfter(eveningAsked.created_at)) return false;
   const lastSaid = db.prepare(`
     SELECT json_extract(metadata_json,'$.kind') kind,created_at FROM channel_messages
     WHERE thread_id=? AND role='assistant' AND status<>'failed'
     ORDER BY created_at DESC,rowid DESC LIMIT 1
   `).get(thread.id) as { kind: string | null; created_at: string } | undefined;
   if (lastSaid && ["reminder", "group_morning"].includes(lastSaid.kind ?? "")
-    && Date.now() - Date.parse(lastSaid.created_at) < PROMPTED_ANSWER_WINDOW_MS) {
+    && Date.now() - Date.parse(lastSaid.created_at) < PROMPTED_ANSWER_WINDOW_MS
+    && !stoppedAfter(lastSaid.created_at)) {
     return false;
   }
   saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, heldUntilNamed: true });
@@ -1795,6 +1812,7 @@ export async function runChannelAgent(
   };
   const budgetMs = options.turnBudgetMs ?? TURN_BUDGET_MS;
   const deadline = Date.now() + budgetMs;
+  let refusedRounds = 0;
   try {
     for (let iteration = 0; iteration < (options.maxRounds ?? MAX_TOOL_ITERATIONS); iteration += 1) {
       if (Date.now() >= deadline) {
@@ -1802,6 +1820,26 @@ export async function runChannelAgent(
       }
       const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch, searchParameters);
       response.id ||= `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
+      /*
+       * Agent Studio checks a tool call's input against the tool's schema before
+       * it reaches us, and a call it refuses comes back as `output-error` with
+       * the reason and no output, never as an `input-available` part. It was
+       * invisible here: a mood score of 0 failed that way, the turn had no tool
+       * to run and no text, and "I completed that request, but did not receive a
+       * text response" went into the group. It is a failed tool result like any
+       * other, so the model is shown the reason and gets another round.
+       */
+      let rejectedCalls = 0;
+      for (const part of response.parts) {
+        if (typeof part.type !== "string" || !part.type.startsWith("tool-") || part.state !== "output-error") continue;
+        const rejected = part as AgentPart & { raw_input?: unknown; rawInput?: unknown; error_text?: unknown; errorText?: unknown };
+        part.input ??= (rejected.raw_input ?? rejected.rawInput ?? {}) as Record<string, unknown>;
+        const reason = rejected.error_text ?? rejected.errorText;
+        part.output = { success: false, error: typeof reason === "string" && reason ? `The call was refused: ${reason}` : "The call was refused" };
+        part.state = "output-available";
+        delete rejected.raw_input; delete rejected.rawInput; delete rejected.error_text; delete rejected.errorText;
+        rejectedCalls += 1;
+      }
       for (const part of response.parts.filter(part =>
         typeof part.type === "string"
         && part.type.startsWith("tool-")
@@ -1821,6 +1859,12 @@ export async function runChannelAgent(
         && (part.toolCallId || part.tool_call_id),
       );
       if (!toolParts.length) {
+        // The only thing this round produced was refused calls: show the model why and let it fix them, a couple of times at most.
+        if (rejectedCalls && refusedRounds < MAX_REFUSED_ROUNDS && !response.parts.some(part => part.type === "text" && typeof part.text === "string" && part.text.trim())) {
+          refusedRounds += 1;
+          appendResponse(messages, response);
+          continue;
+        }
         const written = response.parts
           .filter(part => part.type === "text" && typeof part.text === "string")
           .map(part => part.text)
@@ -1887,12 +1931,23 @@ export async function runChannelAgent(
           search.flushSoon();
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
         }
-        // An app-composed turn's text is a profile or a draft, not a message to mark.
         // A text message shows markdown as typed, so what is archived is what the phone shows.
         const spoken = channel === "sms" ? plainText(text) : text;
-        const finalText = spoken
-          ? options.internal ? spoken : withWriteMarks(spoken, { soul: changedSoul, memory: savedMemory })
-          : NO_TEXT_FALLBACK;
+        /*
+         * The fallback is for a person who would otherwise hear nothing back from
+         * a message to the assistant. In a group it only ever read as noise ("I
+         * completed that request…" after a journal save), and an app-composed
+         * turn would send it as the check-in itself, so a group turn with
+         * nothing to say says nothing, or at most a tapback.
+         */
+        if (!spoken && group) {
+          // A message that was for the assistant is never left looking ignored:
+          // with nothing else said or done, it gets the plain "got it" tapback.
+          if (forAssistant && !options.internal) await setMark(CLOSING_REACTIONS.answered);
+          search.flushSoon();
+          return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
+        }
+        const finalText = spoken || NO_TEXT_FALLBACK;
         // The reply is marked internal with the instruction on a scratch thread,
         // where the real message is recorded elsewhere once sent; on a real
         // thread the caller keeps it public, since it is the message.

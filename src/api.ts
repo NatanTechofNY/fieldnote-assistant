@@ -14,8 +14,10 @@ const TOOL_TIMEOUT_MS = 20_000;
 /**
  * A Google search through Bright Data takes 14–16s by itself, so the web tools
  * get longer; the server gives up at 30s (`server/web-service.ts`) and answers first.
+ * A search that timed out is tried once more (`web_search` in the tool executor),
+ * so the deadline covers two of those plus a margin.
  */
-const WEB_TOOL_TIMEOUT_MS = 35_000;
+const WEB_TOOL_TIMEOUT_MS = 70_000;
 const WEB_TOOLS = new Set(["web_search", "read_web_page", "find_gif", "send_image"]);
 
 async function request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {

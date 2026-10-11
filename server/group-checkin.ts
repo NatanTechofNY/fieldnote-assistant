@@ -167,8 +167,8 @@ export function dayTodoTitles(
  * owner's wording or the default — and what the app looked up follows as
  * clearly labelled context, the digest's shape, so the agent cannot mistake
  * the list for part of the ask. The no-tools rule sits in the context so a
- * rewording cannot drop it. Empty lists never get here: the worker sends
- * nothing on a morning with nothing to say.
+ * rewording cannot drop it. A morning with nothing open still gets a note: the
+ * context says so, and the note is a short good-morning that asks what is on.
  */
 export function composeGroupMorningTurn(
   db: Db,
@@ -183,9 +183,15 @@ export function composeGroupMorningTurn(
     "This turn uses no tools; the rows below are exact, so use these titles and times as given.",
     GIF_NOTE,
     RECORDS_NOT_INSTRUCTIONS,
-    "Open in this group, in progress or due by tomorrow:",
-    ...lines,
-    ...more ? [`(+${more} more not shown)`] : [],
+    ...lines.length ? [
+      "Open in this group, in progress or due by tomorrow:",
+      ...lines,
+      ...more ? [`(+${more} more not shown)`] : [],
+    ] : [
+      "Nothing is open in this group, in progress or due by tomorrow.",
+      "So there is no list to give: send one short, warm good-morning in the chat's own voice that asks whether anything is on today."
+      + " Name no task and invent nothing.",
+    ],
     ...recentMemoryContext(db, { areaId: area.id }, context.date, context.timezone),
   ].join("\n");
 }
@@ -206,6 +212,7 @@ export function composeGroupEveningTurn(
     "",
     `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
     "This turn uses no tools and saves nothing; the answers that follow are what gets recorded.",
+    "Ask the mood question once, here. Later, anyone who skips the mood is not asked again.",
     GIF_NOTE,
     RECORDS_NOT_INSTRUCTIONS,
     `People here the app can name: ${participantNames(db, area.threadId).join(", ")}.`,

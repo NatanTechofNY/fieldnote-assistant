@@ -753,6 +753,9 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
   text-align:left; color:var(--text-secondary); font-size:12px;
 }
 .subtask-title:hover { color:var(--accent); }
+.subtask-start { flex:none; display:grid; place-items:center; padding:3px; border-radius:var(--radius-xs); color:var(--text-tertiary); opacity:.55; }
+.subtask-start:hover:not(:disabled), .subtask-start:focus-visible { opacity:1; color:var(--status-progress); background:var(--surface-hover); }
+.subtask-start[aria-pressed="true"] { opacity:1; color:var(--status-progress); }
 .subtask-state { flex:none; font-size:10.5px; font-weight:500; }
 .subtask-going { color:var(--status-progress); }
 .subtask-check[aria-checked="true"] + .subtask-title,

@@ -2921,6 +2921,36 @@ describe("agent tools over /api/agent/tools/:name", () => {
     assert.match(missing.error, /Todo not found\. Never guess or reuse a todo id: search the todo index/);
   });
 
+  it("starts a pending parent when a step is finished while others are still open", async () => {
+    const { api } = fixture();
+    const stepsOf = async (id: string) => (await api.get(`/api/todos/${id}`).expect(200)).body.data.subtasks as Array<{ id: string }>;
+    const parentRow = (await api.post("/api/todos").send({
+      title: "Farm ore", subtasks: [{ title: "Iron" }, { title: "Coal" }, { title: "Addy" }],
+    }).expect(201)).body.data as { id: string };
+    const created = { id: parentRow.id, subtasks: await stepsOf(parentRow.id) };
+    const parentStatus = async () => (await api.get(`/api/todos/${created.id}`).expect(200)).body.data.todo.status as string;
+    assert.equal(await parentStatus(), "pending");
+    await api.patch(`/api/todos/${created.subtasks[0].id}/status`).send({ status: "done" }).expect(200);
+    assert.equal(await parentStatus(), "in_progress", "one of three done is a task under way");
+
+    // Reopened and re-done, a parent the owner parked as blocked stays as they left it.
+    await api.patch(`/api/todos/${created.id}/status`).send({ status: "blocked" }).expect(200);
+    await api.patch(`/api/todos/${created.subtasks[1].id}/status`).send({ status: "done" }).expect(200);
+    assert.equal(await parentStatus(), "blocked", "only a pending parent is started");
+
+    // The last step is not "still open": with nothing left it is the auto-complete setting that decides.
+    const loneRow = (await api.post("/api/todos").send({ title: "One step", subtasks: [{ title: "Only" }] }).expect(201)).body.data as { id: string };
+    const lone = { id: loneRow.id, subtasks: await stepsOf(loneRow.id) };
+    await api.patch(`/api/todos/${lone.subtasks[0].id}/status`).send({ status: "done" }).expect(200);
+    const loneStatus = (await api.get(`/api/todos/${lone.id}`).expect(200)).body.data.todo.status;
+    assert.equal(loneStatus, "pending", "finishing the only step starts nothing");
+
+    // Saving a step that was already done is not news: a parent reset to pending stays there.
+    await api.patch(`/api/todos/${created.id}/status`).send({ status: "pending" }).expect(200);
+    await api.patch(`/api/todos/${created.subtasks[0].id}`).send({ title: "Iron, renamed" }).expect(200);
+    assert.equal(await parentStatus(), "pending", "renaming a finished step leaves the parent alone");
+  });
+
   /**
    * The agent is instructed to send RFC 3339 with an explicit offset, while a
    * reminder row is stored in UTC. Every reminder tool used to match the two as
@@ -3001,6 +3031,8 @@ describe("web tools", () => {
     statusBody?: string;
     /** Never answer this step, only give up when the caller aborts. */
     hang?: "notification" | "call";
+    /** Stall only this many tool calls, then answer normally. */
+    hangFirst?: number;
     /** What the tool returns instead of the default search JSON or page. */
     text?: (tool: string, args: Record<string, string>) => string;
     extraResults?: Array<{ title: string; link: string; description: string }>;
@@ -3034,7 +3066,7 @@ describe("web tools", () => {
       const tool = message.params?.name ?? "";
       const args = message.params?.arguments ?? {};
       seen.push({ token: url.searchParams.get("token"), tool, args });
-      if (options.hang === "call") return stall(init?.signal);
+      if (options.hang === "call" || (options.hangFirst && seen.length <= options.hangFirst)) return stall(init?.signal);
       if (options.toolError) return reply({ isError: true, content: [{ type: "text", text: options.toolError }] });
       const text = options.text ? options.text(tool, args) : tool === "search_engine"
         ? JSON.stringify({
@@ -3400,8 +3432,9 @@ describe("web tools", () => {
   it("gives up on the whole call at one deadline, including a stalled initialized notification", async () => {
     process.env.BRIGHTDATA_API_TOKEN = "bd_test_token";
     process.env.BRIGHTDATA_TIMEOUT_MS = "300";
-    process.env.BRIGHTDATA_DAILY_LIMIT = "2";
+    process.env.BRIGHTDATA_DAILY_LIMIT = "4";
     const { api } = fixture();
+    // A timed-out search is tried once more, so each stalled call spends two of the day's lookups.
     for (const hang of ["notification", "call"] as const) {
       const stub = stubBrightData({ hang });
       try {
@@ -3416,7 +3449,22 @@ describe("web tools", () => {
     const stub = stubBrightData();
     try {
       const capped = await api.post("/api/agent/tools/web_search").send({ query: "weather" }).expect(429);
-      assert.match(capped.body.error, /limit of 2/, "a timed-out call may have been billed, so it keeps its place in the count");
+      assert.match(capped.body.error, /limit of 4/, "a timed-out call may have been billed, so it keeps its place in the count");
+    } finally {
+      stub.restore();
+    }
+  });
+
+  it("tries a search that timed out once more before giving up", async () => {
+    process.env.BRIGHTDATA_API_TOKEN = "bd_test_token";
+    process.env.BRIGHTDATA_TIMEOUT_MS = "300";
+    process.env.BRIGHTDATA_DAILY_LIMIT = "5";
+    const stub = stubBrightData({ hangFirst: 1 });
+    try {
+      const { api } = fixture();
+      const result = (await api.post("/api/agent/tools/web_search").send({ query: "Dragonwilds Valerius item" }).expect(200)).body.data;
+      assert.ok(result.results.length > 0, "the second try answered");
+      assert.equal(stub.seen.filter(call => call.tool === "search_engine").length, 2);
     } finally {
       stub.restore();
     }
@@ -3851,10 +3899,11 @@ describe("todo and reminder REST edges", () => {
     const subtasks = (await api.get(`/api/todos/${parent.id}`).expect(200)).body.data.subtasks;
 
     await api.patch(`/api/todos/${subtasks[0].id}/status`).send({ status: "done" }).expect(200);
+    assert.equal((await api.get(`/api/todos/${parent.id}`).expect(200)).body.data.todo.status, "in_progress", "one step done with another to go is a task under way");
     await api.patch(`/api/todos/${subtasks[1].id}/status`).send({ status: "done" }).expect(200);
     assert.equal(
       (await api.get(`/api/todos/${parent.id}`).expect(200)).body.data.todo.status,
-      "pending",
+      "in_progress",
       "a parent stays open by default, because it can carry work of its own",
     );
 
@@ -4954,7 +5003,7 @@ describe("Sendblue provider", () => {
     assert.deepEqual(JSON.parse(inbound.metadata_json).reactions, ["✅"]);
   });
 
-  it("marks a kept memory 🧠 and a Soul change 👻, on the message and after the reply", async () => {
+  it("marks a kept memory 🧠 and a Soul change 👻 with a tapback, never in the reply's words", async () => {
     const { db } = connectedFixture();
     agentStudioEnv();
     const closing = () => stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction).at(-1);
@@ -4964,7 +5013,7 @@ describe("Sendblue provider", () => {
         fetcher: agentCalling("create_memory", { kind: "fact", title: "Biscuit", content: "Biscuit is our dog." }, "a dog, love that"),
         inbound: { provider: "sendblue" },
       });
-      assert.equal(remembered.text, "a dog, love that 🧠");
+      assert.equal(remembered.text, "a dog, love that", "the mark is the tapback alone");
       assert.equal(closing(), "🧠");
     } finally { stub.restore(); }
 
@@ -4974,9 +5023,34 @@ describe("Sendblue provider", () => {
         fetcher: agentCalling("update_soul", { soul: "- No emojis." }, "got it"),
         inbound: { provider: "sendblue" },
       });
-      assert.equal(adjusted.text, "got it 👻");
+      assert.equal(adjusted.text, "got it");
       assert.equal(closing(), "👻");
     } finally { stub.restore(); }
+  });
+
+  it("replays an earlier reply without the mark an older version appended to it", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_marks',?,'sms',?,'cnv_marks',?,?)
+    `).run(USER_ID, RECIPIENT, stamp, stamp);
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('m1','thread_marks','inbound','user','we got a dog','received','{}',?,?),
+            ('m2','thread_marks','outbound','assistant','love that \u{1F9E0}','sent','{}',?,?)
+    `).run(stamp, stamp, stamp, stamp);
+    let body = "";
+    await runSmsAgent(db, fakeSearch(db), RECIPIENT, "and a cat", "SB_cat", {
+      fetcher: async (_input, init) => {
+        body = String(init?.body);
+        return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text: "nice" }] }), { status: 200 });
+      },
+      inbound: { provider: "sendblue" },
+    });
+    assert.match(body, /love that/);
+    assert.doesNotMatch(body, /\u{1F9E0}|🧠/u, "history does not teach the habit");
   });
 
   it("does not confirm a write that was refused", async () => {
@@ -6365,6 +6439,8 @@ describe("Sendblue provider", () => {
     const fetcher: typeof fetch = async (_input, init) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       round += 1;
+      // With no tool to call there is no first round to spend: the text is the answer.
+      if (!calls.length) return new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text }] }), { status: 200 });
       return new Response(JSON.stringify(round === 1
         ? {
           role: "assistant",
@@ -7281,6 +7357,18 @@ describe("Sendblue provider", () => {
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.deepEqual(answered.at(-1), "tired, 3");
 
+    // "Goop stop talking" said after the question beats the window: chatter is held, the name still gets through.
+    const stopped = new Date(Date.now() + 500).toISOString();
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('msg_stop','thread_named','outbound','tool','update_group_settings','delivered',?,?,?)
+    `).run(JSON.stringify({ input: { reply_mode: "named_only" }, output: { success: true, data: { reply_mode: "named_only" } } }), stopped, stopped);
+    const before = answered.length;
+    await post("we should book the 150 option", "SB_after_stop");
+    await post("goop which one?", "SB_named_after_stop");
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(answered.slice(before), ["goop which one?"], "after a stop only the name reaches the agent, evening window or not");
+
     // A reminder the app just sent into the chat is answered with a bare "done".
     db.prepare("UPDATE channel_messages SET created_at=? WHERE id='msg_evening'").run(new Date(Date.now() - 7 * 3600_000).toISOString());
     const later = new Date(Date.now() + 1000).toISOString();
@@ -7291,6 +7379,17 @@ describe("Sendblue provider", () => {
     await post("done", "SB_reminder_done");
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.deepEqual(answered.at(-1), "done");
+
+    // A stop said after the reminder ends that open window too.
+    const stoppedAgain = new Date(Date.now() + 2000).toISOString();
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('msg_stop_two','thread_named','outbound','tool','update_group_settings','delivered',?,?,?)
+    `).run(JSON.stringify({ input: { reply_mode: "named_only" }, output: { success: true, data: {} } }), stoppedAgain, stoppedAgain);
+    const beforeStop = answered.length;
+    await post("push it to monday", "SB_after_second_stop");
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.equal(answered.length, beforeStop, "after a stop, a reminder's open window no longer lets chatter through");
 
     assert.equal(addressesAssistant("Goop, stop", "goop"), true);
     assert.equal(addressesAssistant("goopy mood", "goop"), false, "a word that merely contains the nickname is not the name");
@@ -8653,14 +8752,27 @@ describe("Sendblue provider", () => {
     );
   });
 
-  it("stays silent on a morning with nothing open, and is held by the switch and quiet hours", async () => {
+  it("sends a light good-morning when nothing is open, to every group that turned the check-in on, and is held by the switch and quiet hours", async () => {
     const { db, api, area } = checkinFixture();
+    const timestamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_checkin_busy',?,'sms','group:sb_group_busy','cnv_busy',?,?)
+    `).run(USER_ID, timestamp, timestamp);
+    const busy = ensureGroupLifeArea(db, "thread_checkin_busy", "Busy");
+    await api.post("/api/todos").send({ title: "Laundry", life_area_id: busy.id, due_at: "2030-01-15T18:00:00.000Z" }).expect(201);
     await api.patch(`/api/life-areas/${area.id}`).send({ morning_checkin_time: "08:30" }).expect(200);
+    await api.patch(`/api/life-areas/${busy.id}`).send({ morning_checkin_time: "08:30" }).expect(200);
     const sends: string[] = [];
+    const prompts: Record<string, string> = {};
     let agentRuns = 0;
     const worker = {
       sendSms: async (_db: Db, _to: string, body: string) => { sends.push(body); return { sid: "SB_x", status: "queued" as const }; },
-      runSmsAgent: async () => { agentRuns += 1; return { text: "note", threadId: "t" }; },
+      runSmsAgent: async (_db: Db, _search: unknown, address: string, prompt: string) => {
+        agentRuns += 1;
+        prompts[address] = prompt;
+        return { text: "note", threadId: "t" };
+      },
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
       startTypingIndicator: () => () => {},
     };
@@ -8669,10 +8781,16 @@ describe("Sendblue provider", () => {
       await runWorkerOnce(db, fakeSearch(db), worker);
       await runWorkerOnce(db, fakeSearch(db), worker);
     } finally { restore(); }
-    assert.deepEqual(sends, []);
-    assert.equal(agentRuns, 0, "no agent turn for nothing to say");
-    const dispatch = db.prepare("SELECT status,last_error FROM scheduled_dispatches").get() as { status: string; last_error: string };
-    assert.deepEqual(dispatch, { status: "sent", last_error: "Nothing open to mention" }, "the slot is taken so the tick does not recompute all day");
+    assert.equal(agentRuns, 2, "both groups hear from the check-in, once each, however many ticks");
+    assert.deepEqual(sends, ["note", "note"]);
+    assert.match(prompts[`group:${GROUP}`], /Nothing is open in this group/);
+    assert.match(prompts[`group:${GROUP}`], /asks whether anything is on today/);
+    assert.doesNotMatch(prompts[`group:${GROUP}`], /Open in this group, in progress or due by tomorrow/);
+    assert.match(prompts["group:sb_group_busy"], /Open in this group, in progress or due by tomorrow/);
+    assert.match(prompts["group:sb_group_busy"], /"Laundry"/);
+    await api.patch(`/api/life-areas/${busy.id}`).send({ morning_checkin_time: null }).expect(200);
+    agentRuns = 0;
+    sends.length = 0;
 
     // With something open but the switch off, nothing; inside quiet hours, nothing yet.
     await api.post("/api/todos").send({ title: "Shopping", life_area_id: area.id, due_at: "2030-01-16T12:00:00.000Z" }).expect(201);
@@ -8961,6 +9079,7 @@ describe("Sendblue provider", () => {
     );
     assert.match(evening, /^Ask Home for a high and a low from today, and a mood 1–5\.\n\n--- Context/);
     assert.match(evening, /This turn uses no tools and saves nothing/);
+    assert.match(evening, /Ask the mood question once, here/, "a skipped mood is not chased all evening");
     assert.match(evening, /People here the app can name: the owner\./, "nobody has written here yet, so only the owner is named");
 
     // The worker reads the wording off the area.
@@ -9790,6 +9909,64 @@ describe("Sendblue provider", () => {
       ], "").fetcher));
       assert.equal(bystander.text, "");
       assert.equal(stub.calls.filter(call => call.url.pathname === "/api/send-reaction").at(-1)?.body.reaction, "🧠", "the save is its answer, quiet or not");
+    } finally { stub.restore(); }
+  });
+
+  it("shows the model a call Agent Studio refused instead of sending the fallback sentence", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    const requests: string[] = [];
+    let round = 0;
+    const refused: typeof fetch = async (_input, init) => {
+      requests.push(String(init?.body));
+      round += 1;
+      return new Response(JSON.stringify(round === 1
+        ? {
+          role: "assistant",
+          id: "alg_msg_refused",
+          parts: [{
+            type: "tool-update_memory", tool_call_id: "call_refused", state: "output-error",
+            raw_input: { id: "memory_x", patch: { moods: [{ name: "Natella", label: "unspecified", score: 0 }] } },
+            error_text: "0 is less than the minimum of 1",
+          }],
+        }
+        : { role: "assistant", id: "alg_msg_refused", parts: [{ type: "text", text: "kept that, no mood needed" }] }), { status: 200 });
+    };
+    try {
+      const turn = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "o. m. f. g.", "SB_refused", {
+        fetcher: refused,
+        inbound: { provider: "sendblue" },
+      });
+      assert.equal(turn.text, "kept that, no mood needed", "the model got another round and answered");
+      assert.equal(requests.length, 2);
+      assert.match(requests[1], /The call was refused: 0 is less than the minimum of 1/, "the second round saw why");
+      assert.doesNotMatch(requests[1], /output-error/);
+      const trace = db.prepare("SELECT json_extract(metadata_json,'$.output.success') ok FROM channel_messages WHERE role='tool' AND content='update_memory'").get() as { ok: number };
+      assert.equal(trace.ok, 0, "archived as a failed call, not as one with no result");
+    } finally { stub.restore(); }
+  });
+
+  it("sends nothing to a group when the turn ends with no words, but keeps the fallback for a 1:1 message", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+    try {
+      const address = `group:${GROUP}`;
+      await runSmsAgent(db, fakeSearch(db), address, "hello", "SB_hello_empty", groupTurnOptions(answering("Hi!"), RECIPIENT, "the owner"));
+      const silent = await runSmsAgent(db, fakeSearch(db), address, "goop log that", "SB_empty_group", groupTurnOptions(answering(""), RECIPIENT, "the owner"));
+      assert.equal(silent.text, "", "the group is not told the request completed");
+      assert.equal(
+        stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction).at(-1),
+        "like",
+        "but a message that was for the assistant does not look ignored",
+      );
+      const direct = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "log that", "SB_empty_direct", {
+        fetcher: answering(""),
+        inbound: { provider: "sendblue" },
+      });
+      assert.equal(direct.text, NO_TEXT_FALLBACK, "a person texting the assistant alone still hears back");
     } finally { stub.restore(); }
   });
 

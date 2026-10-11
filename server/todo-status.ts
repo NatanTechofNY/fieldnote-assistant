@@ -97,15 +97,27 @@ export function completeParentIfSettled(db: Db, child: TodoRow, lifeAreaId?: str
 
 /**
  * A task whose first step is underway is underway too, so starting a step starts
- * a parent that has not been started. Nothing else about the parent moves: a
- * blocked or finished parent keeps its status. `lifeAreaId` fences a group turn
- * as in `completeParentIfSettled()`.
+ * a parent that has not been started. So does finishing a step while others are
+ * still open: one of three ticked is a task in progress, not one nobody has
+ * touched. The last step is left to `completeParentIfSettled()`. Nothing else
+ * about the parent moves: a blocked or finished parent keeps its status.
+ * `lifeAreaId` fences a group turn as in `completeParentIfSettled()`.
  */
-export function startParentIfPending(db: Db, child: TodoRow, lifeAreaId?: string): TodoRow | null {
-  if (!child.parent_id || child.status !== "in_progress") return null;
+export function startParentIfPending(db: Db, child: TodoRow, lifeAreaId?: string, previous?: TodoRow["status"]): TodoRow | null {
+  if (!child.parent_id || (child.status !== "in_progress" && child.status !== "done")) return null;
+  // Saving a step that was already finished again (a rename, a priority) is not news
+  // to its parent: a parent the owner set back to pending stays where they put it.
+  if (child.status === "done" && previous === "done") return null;
   const parent = getTodo(db, child.parent_id);
   if (!parent || parent.status !== "pending") return null;
   if (lifeAreaId && parent.life_area_id !== lifeAreaId) return null;
+  if (child.status === "done") {
+    const remaining = db.prepare(`
+      SELECT count(*) open FROM todos
+      WHERE user_id=? AND parent_id=? AND status NOT IN ('done','cancelled')
+    `).get(USER_ID, parent.id) as { open: number };
+    if (!remaining.open) return null;
+  }
   const timestamp = now();
   db.prepare(`
     UPDATE todos SET status='in_progress',started_at=COALESCE(started_at,?),updated_at=?
