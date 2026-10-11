@@ -13,7 +13,7 @@ import { areaFilterParams, inAreaFilter } from "../../lib/area-filter";
 import { useAreaFilter } from "../../lib/use-area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { CompleteParentDialog } from "./CompleteParentDialog";
-import { SubtaskCheck, SubtaskProgress, SubtaskState } from "./SubtaskCheck";
+import { SubtaskCheck, SubtaskProgress, SubtaskStart, SubtaskState } from "./SubtaskCheck";
 import { TodoModal } from "./TodoModal";
 import { CalendarView } from "./calendar/CalendarView";
 import { describeRecurrence } from "../../lib/recurrence";
@@ -485,6 +485,7 @@ function DraggableTodo({ todo, subtasks, onOpen, onStatus }: { todo: Todo; subta
         <SubtaskCheck todo={subtask} onToggle={() => onStatus(subtask.id, subtask.status === "done" ? "pending" : "done")}/>
         <button type="button" className="subtask-title" onClick={() => onOpen(subtask)}>{subtask.title}</button>
         <SubtaskState todo={subtask}/>
+        <SubtaskStart todo={subtask} onToggle={() => onStatus(subtask.id, subtask.status === "in_progress" ? "pending" : "in_progress")}/>
         <AttachButton item={todoAttachment(subtask, [], todo.title)} size={11}/>
       </li>)}</ul>}
     </div>}

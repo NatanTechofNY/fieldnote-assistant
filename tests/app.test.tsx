@@ -2579,6 +2579,7 @@ it("shows which of a card's subtasks are in progress", async () => {
     const check = within(card).getByRole("checkbox", { name: "Complete subtask Send the recap (in progress)" });
     expect(check).not.toBeChecked();
     expect(check).toHaveAttribute("data-status", "in_progress");
+    expect(within(card).getByRole("button", { name: "Stop work on subtask Send the recap" })).toHaveAttribute("aria-pressed", "true");
     expect(within(card).getByText("In progress")).toBeInTheDocument();
     expect(within(card).getByText("· 1 in progress")).toBeInTheDocument();
     const bar = within(card).getByRole("progressbar", { name: "0 of 1 subtasks done" });
@@ -2586,6 +2587,19 @@ it("shows which of a card's subtasks are in progress", async () => {
   } finally {
     step.status = "pending";
   }
+});
+
+/** Starting a step is one click on its row; the same button takes it back to to do. */
+it("marks a subtask in progress from its board card", async () => {
+  renderAt("/todos");
+  expect(await screen.findByText("The board.")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Board" }));
+
+  const card = (await screen.findByText("Wrap the sprint")).closest("article") as HTMLElement;
+  const writes = todoWrites.length;
+  await userEvent.click(within(card).getByRole("button", { name: "Start subtask Send the recap" }));
+  await waitFor(() => expect(todoWrites.length).toBe(writes + 1));
+  expect(todoWrites.at(-1)).toMatchObject({ method: "PATCH", body: { status: "in_progress" } });
 });
 
 it("manages a task's subtasks from the editor", async () => {
