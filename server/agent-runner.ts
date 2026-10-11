@@ -790,7 +790,8 @@ const PROMPTED_ANSWER_WINDOW_MS = 2 * 60 * 60_000;
  * all. Two exceptions, both the app asking the room something: answers to the
  * evening question are the day's shared journal entry, which only the
  * assistant writes, so for a few hours after it went out every message still
- * reaches the agent; and when the last thing the assistant said was a reminder
+ * reaches the agent (which decides whether it is an answer), unless someone
+ * told the assistant to stop after the question went out; and when the last thing the assistant said was a reminder
  * or the morning note, "done" or "push it to Monday" is an answer to it.
  */
 export function holdUntilNamed(
@@ -812,12 +813,21 @@ export function holdUntilNamed(
   if (burst.some(row => row.forAssistant(db, thread.id, voice.assistantNickname))) return false;
   const since = new Date(Date.now() - EVENING_ANSWER_WINDOW_MS).toISOString();
   const eveningAsked = db.prepare(`
-    SELECT 1 found FROM channel_messages
+    SELECT created_at FROM channel_messages
     WHERE thread_id=? AND role='assistant' AND status<>'failed'
       AND json_extract(metadata_json,'$.kind')='group_evening' AND created_at>=?
+    ORDER BY created_at DESC,rowid DESC LIMIT 1
+  `).get(thread.id, since) as { created_at: string } | undefined;
+  // "Stop talking" said after the question beats the window: the room has said
+  // what it wants, and an answer that names the assistant still reaches it.
+  const stoppedSince = eveningAsked && db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role='tool' AND content='update_group_settings' AND created_at>=?
+      AND json_extract(metadata_json,'$.input.reply_mode')='named_only'
+      AND json_extract(metadata_json,'$.output.success')=1
     LIMIT 1
-  `).get(thread.id, since);
-  if (eveningAsked) return false;
+  `).get(thread.id, eveningAsked.created_at);
+  if (eveningAsked && !stoppedSince) return false;
   const lastSaid = db.prepare(`
     SELECT json_extract(metadata_json,'$.kind') kind,created_at FROM channel_messages
     WHERE thread_id=? AND role='assistant' AND status<>'failed'

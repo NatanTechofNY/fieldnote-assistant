@@ -7352,6 +7352,18 @@ describe("Sendblue provider", () => {
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.deepEqual(answered.at(-1), "tired, 3");
 
+    // "Goop stop talking" said after the question beats the window: chatter is held, the name still gets through.
+    const stopped = new Date(Date.now() + 500).toISOString();
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('msg_stop','thread_named','outbound','tool','update_group_settings','delivered',?,?,?)
+    `).run(JSON.stringify({ input: { reply_mode: "named_only" }, output: { success: true, data: { reply_mode: "named_only" } } }), stopped, stopped);
+    const before = answered.length;
+    await post("we should book the 150 option", "SB_after_stop");
+    await post("goop which one?", "SB_named_after_stop");
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.deepEqual(answered.slice(before), ["goop which one?"], "after a stop only the name reaches the agent, evening window or not");
+
     // A reminder the app just sent into the chat is answered with a bare "done".
     db.prepare("UPDATE channel_messages SET created_at=? WHERE id='msg_evening'").run(new Date(Date.now() - 7 * 3600_000).toISOString());
     const later = new Date(Date.now() + 1000).toISOString();
