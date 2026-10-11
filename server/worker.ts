@@ -9,7 +9,7 @@ import {
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
-import { composeAssistantSayTurn, composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "./group-checkin.ts";
+import { composeAssistantSayTurn, composeGroupEveningTurn, composeGroupMorningTurn } from "./group-checkin.ts";
 import {
   claimExternalEvents, completeExternalEvent, deferExternalEvent, nextExternalEventAvailableAt, pollGranola,
   pruneSettledExternalEvents, STALE_CLAIM_MS, unsettledExternalEventsBefore,
@@ -1133,8 +1133,8 @@ function checkinAreas(db: Db): CheckinAreaRow[] {
  * retry would read its own undelivered note and the archive would show a
  * message nobody received. One dispatch per group per kind per local day,
  * keyed on the group rather than its area (an area can be removed and made
- * again); a morning with nothing to say takes its slot without sending, so the
- * tick does not recompute all day.
+ * again). A morning with nothing open still sends: a short good-morning that
+ * asks whether anything is on, so a group that enabled the check-in hears from it.
  */
 async function deliverGroupCheckin(
   db: Db,
@@ -1153,12 +1153,6 @@ async function deliverGroupCheckin(
   if (!dispatchId) return;
   const metaKind = kind === "morning" ? "group_morning" : "group_evening";
   try {
-    if (kind === "morning" && !groupCheckinItems(db, area.id, local.date, timezone).lines.length) {
-      db.prepare(`
-        UPDATE scheduled_dispatches SET status='sent',last_error='Nothing open to mention',updated_at=? WHERE id=?
-      `).run(now(), dispatchId);
-      return;
-    }
     const checkinArea = {
       id: area.id, name: area.name, groupId, threadId: area.thread_id,
       morningAsk: area.morning_checkin_prompt, eveningAsk: area.evening_checkin_prompt,

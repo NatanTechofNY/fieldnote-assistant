@@ -551,7 +551,7 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 5,
-                  "description": "Their score from 1 to 5"
+                  "description": "Their score from 1 to 5, as they gave it. Never 0 and never a guess: when a person gave no mood, leave them out of moods"
                 }
               },
               "required": ["name", "label", "score"],
@@ -656,7 +656,7 @@
                       "type": "integer",
                       "minimum": 1,
                       "maximum": 5,
-                      "description": "Their score from 1 to 5"
+                      "description": "Their score from 1 to 5, as they gave it. Never 0 and never a guess: when a person gave no mood, leave them out of moods"
                     }
                   },
                   "required": ["name", "label", "score"],
@@ -1488,7 +1488,7 @@
     "type": "function",
     "function": {
       "name": "web_search",
-      "description": "Searches the public web for current public facts: hours, news, prices, how-tos. Returns titles, URLs, and snippets. Never put the user's personal details in the query.",
+      "description": "Searches the public web: hours, news, prices, how-tos, games, shows, apps, products, releases. Search rather than guess at a title. Returns titles, URLs, snippets. No personal details in the query.",
       "strict": true,
       "parameters": {
         "type": "object",

@@ -1047,14 +1047,27 @@ export async function executeAgentTool(
   if (name === "web_search") {
     webConfig();
     const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 8);
-    const results = await countedWebCall(db, context, () => searchWeb(input.query as string, limit));
+    const lookup = () => countedWebCall(db, context, () => searchWeb(input.query as string, limit));
+    let results: Awaited<ReturnType<typeof searchWeb>>;
+    try {
+      results = await lookup();
+    } catch (error) {
+      // A timeout is the one failure that says nothing about the query: it is tried once more, counted
+      // like any lookup. Without the retry the model gave up on a game it had never heard of.
+      if (!(error instanceof WebServiceError && error.timedOut)) throw error;
+      try {
+        results = await lookup();
+      } catch (again) {
+        throw again instanceof WebServiceError ? again : error;
+      }
+    }
     rememberResults(context?.threadId ?? "web", results);
     markReadWeb(context);
     if (context) context.readPages = true;
     // Google answers "weather tomorrow" with its own widget and no organic
     // results at all, while "weather" alone returns the forecast sites.
     const hint = results.length ? undefined
-      : "No results. Search again once with fewer words and no relative dates such as today or tomorrow, e.g. \"Blooming Grove NY weather\"";
+      : "No results. Search again once with fewer or different words (the full title plus the one thing you want) and no relative dates such as today or tomorrow, e.g. \"Blooming Grove NY weather\"";
     return { source: "web", untrusted: true, results, ...(hint ? { hint } : {}) };
   }
   if (name === "read_web_page") {
