@@ -103,8 +103,11 @@ export function completeParentIfSettled(db: Db, child: TodoRow, lifeAreaId?: str
  * about the parent moves: a blocked or finished parent keeps its status.
  * `lifeAreaId` fences a group turn as in `completeParentIfSettled()`.
  */
-export function startParentIfPending(db: Db, child: TodoRow, lifeAreaId?: string): TodoRow | null {
+export function startParentIfPending(db: Db, child: TodoRow, lifeAreaId?: string, previous?: TodoRow["status"]): TodoRow | null {
   if (!child.parent_id || (child.status !== "in_progress" && child.status !== "done")) return null;
+  // Saving a step that was already finished again (a rename, a priority) is not news
+  // to its parent: a parent the owner set back to pending stays where they put it.
+  if (child.status === "done" && previous === "done") return null;
   const parent = getTodo(db, child.parent_id);
   if (!parent || parent.status !== "pending") return null;
   if (lifeAreaId && parent.life_area_id !== lifeAreaId) return null;

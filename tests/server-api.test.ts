@@ -2944,6 +2944,11 @@ describe("agent tools over /api/agent/tools/:name", () => {
     await api.patch(`/api/todos/${lone.subtasks[0].id}/status`).send({ status: "done" }).expect(200);
     const loneStatus = (await api.get(`/api/todos/${lone.id}`).expect(200)).body.data.todo.status;
     assert.equal(loneStatus, "pending", "finishing the only step starts nothing");
+
+    // Saving a step that was already done is not news: a parent reset to pending stays there.
+    await api.patch(`/api/todos/${created.id}/status`).send({ status: "pending" }).expect(200);
+    await api.patch(`/api/todos/${created.subtasks[0].id}`).send({ title: "Iron, renamed" }).expect(200);
+    assert.equal(await parentStatus(), "pending", "renaming a finished step leaves the parent alone");
   });
 
   /**
@@ -7375,6 +7380,17 @@ describe("Sendblue provider", () => {
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.deepEqual(answered.at(-1), "done");
 
+    // A stop said after the reminder ends that open window too.
+    const stoppedAgain = new Date(Date.now() + 2000).toISOString();
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('msg_stop_two','thread_named','outbound','tool','update_group_settings','delivered',?,?,?)
+    `).run(JSON.stringify({ input: { reply_mode: "named_only" }, output: { success: true, data: {} } }), stoppedAgain, stoppedAgain);
+    const beforeStop = answered.length;
+    await post("push it to monday", "SB_after_second_stop");
+    await runWorkerOnce(db, fakeSearch(db), worker);
+    assert.equal(answered.length, beforeStop, "after a stop, a reminder's open window no longer lets chatter through");
+
     assert.equal(addressesAssistant("Goop, stop", "goop"), true);
     assert.equal(addressesAssistant("goopy mood", "goop"), false, "a word that merely contains the nickname is not the name");
     assert.equal(addressesAssistant("fieldnote?", "goop"), true, "its own name still counts");
@@ -9941,6 +9957,11 @@ describe("Sendblue provider", () => {
       await runSmsAgent(db, fakeSearch(db), address, "hello", "SB_hello_empty", groupTurnOptions(answering("Hi!"), RECIPIENT, "the owner"));
       const silent = await runSmsAgent(db, fakeSearch(db), address, "goop log that", "SB_empty_group", groupTurnOptions(answering(""), RECIPIENT, "the owner"));
       assert.equal(silent.text, "", "the group is not told the request completed");
+      assert.equal(
+        stub.calls.filter(call => call.url.pathname === "/api/send-reaction").map(call => call.body.reaction).at(-1),
+        "like",
+        "but a message that was for the assistant does not look ignored",
+      );
       const direct = await runSmsAgent(db, fakeSearch(db), RECIPIENT, "log that", "SB_empty_direct", {
         fetcher: answering(""),
         inbound: { provider: "sendblue" },

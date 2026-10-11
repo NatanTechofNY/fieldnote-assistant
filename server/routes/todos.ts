@@ -209,7 +209,7 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
         syncTodoReminders(db, todo);
         syncOccurrenceCompletion(db, todo);
         completeParentIfSettled(db, todo);
-        startParentIfPending(db, todo);
+        startParentIfPending(db, todo, undefined, current.status);
       }
       queueIndexJob(db, "todo", current.id);
     })();
@@ -230,7 +230,7 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
         syncTodoReminders(db, todo);
         syncOccurrenceCompletion(db, todo);
         completeParentIfSettled(db, todo);
-        startParentIfPending(db, todo);
+        startParentIfPending(db, todo, undefined, current.status);
       }
       queueIndexJob(db, "todo", current.id);
     })();

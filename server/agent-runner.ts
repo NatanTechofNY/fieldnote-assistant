@@ -790,9 +790,10 @@ const PROMPTED_ANSWER_WINDOW_MS = 2 * 60 * 60_000;
  * all. Two exceptions, both the app asking the room something: answers to the
  * evening question are the day's shared journal entry, which only the
  * assistant writes, so for a few hours after it went out every message still
- * reaches the agent (which decides whether it is an answer), unless someone
- * told the assistant to stop after the question went out; and when the last thing the assistant said was a reminder
- * or the morning note, "done" or "push it to Monday" is an answer to it.
+ * reaches the agent (which decides whether it is an answer); and when the last
+ * thing the assistant said was a reminder or the morning note, "done" or "push
+ * it to Monday" is an answer to it. Someone telling the assistant to stop after
+ * either went out ends that exception.
  */
 export function holdUntilNamed(
   db: Db,
@@ -818,23 +819,25 @@ export function holdUntilNamed(
       AND json_extract(metadata_json,'$.kind')='group_evening' AND created_at>=?
     ORDER BY created_at DESC,rowid DESC LIMIT 1
   `).get(thread.id, since) as { created_at: string } | undefined;
-  // "Stop talking" said after the question beats the window: the room has said
-  // what it wants, and an answer that names the assistant still reaches it.
-  const stoppedSince = eveningAsked && db.prepare(`
+  // "Stop talking" said after the app asked the room something beats the open
+  // window: the room has said what it wants, and a message that names the
+  // assistant still reaches it.
+  const stoppedAfter = (at: string) => Boolean(db.prepare(`
     SELECT 1 found FROM channel_messages
     WHERE thread_id=? AND role='tool' AND content='update_group_settings' AND created_at>=?
       AND json_extract(metadata_json,'$.input.reply_mode')='named_only'
       AND json_extract(metadata_json,'$.output.success')=1
     LIMIT 1
-  `).get(thread.id, eveningAsked.created_at);
-  if (eveningAsked && !stoppedSince) return false;
+  `).get(thread.id, at));
+  if (eveningAsked && !stoppedAfter(eveningAsked.created_at)) return false;
   const lastSaid = db.prepare(`
     SELECT json_extract(metadata_json,'$.kind') kind,created_at FROM channel_messages
     WHERE thread_id=? AND role='assistant' AND status<>'failed'
     ORDER BY created_at DESC,rowid DESC LIMIT 1
   `).get(thread.id) as { kind: string | null; created_at: string } | undefined;
   if (lastSaid && ["reminder", "group_morning"].includes(lastSaid.kind ?? "")
-    && Date.now() - Date.parse(lastSaid.created_at) < PROMPTED_ANSWER_WINDOW_MS) {
+    && Date.now() - Date.parse(lastSaid.created_at) < PROMPTED_ANSWER_WINDOW_MS
+    && !stoppedAfter(lastSaid.created_at)) {
     return false;
   }
   saveInboundMessage(db, thread.id, body, providerMessageId, { ...metadata, heldUntilNamed: true });
@@ -1935,9 +1938,12 @@ export async function runChannelAgent(
          * a message to the assistant. In a group it only ever read as noise ("I
          * completed that request…" after a journal save), and an app-composed
          * turn would send it as the check-in itself, so a group turn with
-         * nothing to say says nothing; the closing tapback is already on the message.
+         * nothing to say says nothing, or at most a tapback.
          */
         if (!spoken && group) {
+          // A message that was for the assistant is never left looking ignored:
+          // with nothing else said or done, it gets the plain "got it" tapback.
+          if (forAssistant && !options.internal) await setMark(CLOSING_REACTIONS.answered);
           search.flushSoon();
           return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
         }

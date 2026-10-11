@@ -1,4 +1,4 @@
-import { Square, SquareCheck, SquarePause, SquarePlay, SquareX } from "lucide-react";
+import { Play, Square, SquareCheck, SquarePause, SquarePlay, SquareX } from "lucide-react";
 import { statusMeta } from "../../lib/todo-meta";
 import type { Todo, TodoStatus } from "../../types";
 
@@ -45,15 +45,16 @@ export function SubtaskCheck({ todo, onToggle, disabled }: { todo: Todo; onToggl
 export function SubtaskStart({ todo, onToggle, disabled }: { todo: Todo; onToggle: () => void; disabled?: boolean }) {
   if (todo.status !== "pending" && todo.status !== "in_progress") return null;
   const going = todo.status === "in_progress";
+  // One fixed name with `aria-pressed` carrying the state, so a screen reader says it once.
   return <button
     type="button"
     aria-pressed={going}
-    aria-label={`${going ? "Stop work on" : "Start"} subtask ${todo.title}`}
+    aria-label={`In progress: subtask ${todo.title}`}
     title={going ? "In progress: click to move back to to do" : "Mark in progress"}
     className="subtask-start"
     disabled={disabled}
     onClick={onToggle}
-  ><SquarePlay size={13}/></button>;
+  ><Play size={12}/></button>;
 }
 
 /**

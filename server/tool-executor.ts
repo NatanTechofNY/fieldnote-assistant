@@ -1547,7 +1547,7 @@ export async function executeAgentTool(
       syncTodoReminders(db, row);
       syncOccurrenceCompletion(db, row);
       completeParentIfSettled(db, row, scope?.lifeAreaId);
-      startParentIfPending(db, row, scope?.lifeAreaId);
+      startParentIfPending(db, row, scope?.lifeAreaId, current.status);
       queueIndexJob(db, "todo", todoId);
       // Re-read: logging an occurrence stamps last_completed_at on the row.
       return getTodo(db, todoId) as TodoRow;

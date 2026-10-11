@@ -25,7 +25,7 @@ import {
 import { localParts } from "./local-time.ts";
 import { isSmsProviderConnected, plainText, sendSms, startTypingIndicator } from "./messaging.ts";
 import { openSubtasks, reopenStepsForNextOccurrence, syncOccurrenceCompletion } from "./todo-status.ts";
-import { isTransientFailure } from "./transient.ts";
+import { isTransientFailure, TransientFailure } from "./transient.ts";
 import { sendQueuedUnthreadedResends } from "./unthreaded-resend.ts";
 import { composeMemorySweepTurn, sweepCandidates } from "./memory-sweep.ts";
 import { speakerNameInGroup } from "./group-members.ts";
@@ -1169,7 +1169,11 @@ async function deliverGroupCheckin(
       assistantMetadata: { kind: metaKind, date: local.date },
       sendSms: send,
     });
-    if (!response.text) throw new Error(`The ${kind} check-in came back empty`);
+    if (!response.text) {
+      // An empty answer says nothing about the day: the next tick composes it again, within the attempt limit.
+      failAgentTurn(db, response);
+      throw new TransientFailure(`The ${kind} check-in came back empty`);
+    }
     let sent: Awaited<ReturnType<typeof send>>;
     try {
       sent = await send(db, area.address, response.text, { groupId, ...withGif(response) });

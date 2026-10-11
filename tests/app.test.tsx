@@ -2579,7 +2579,7 @@ it("shows which of a card's subtasks are in progress", async () => {
     const check = within(card).getByRole("checkbox", { name: "Complete subtask Send the recap (in progress)" });
     expect(check).not.toBeChecked();
     expect(check).toHaveAttribute("data-status", "in_progress");
-    expect(within(card).getByRole("button", { name: "Stop work on subtask Send the recap" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(card).getByRole("button", { name: "In progress: subtask Send the recap", pressed: true })).toBeInTheDocument();
     expect(within(card).getByText("In progress")).toBeInTheDocument();
     expect(within(card).getByText("· 1 in progress")).toBeInTheDocument();
     const bar = within(card).getByRole("progressbar", { name: "0 of 1 subtasks done" });
@@ -2597,7 +2597,7 @@ it("marks a subtask in progress from its board card", async () => {
 
   const card = (await screen.findByText("Wrap the sprint")).closest("article") as HTMLElement;
   const writes = todoWrites.length;
-  await userEvent.click(within(card).getByRole("button", { name: "Start subtask Send the recap" }));
+  await userEvent.click(within(card).getByRole("button", { name: "In progress: subtask Send the recap", pressed: false }));
   await waitFor(() => expect(todoWrites.length).toBe(writes + 1));
   expect(todoWrites.at(-1)).toMatchObject({ method: "PATCH", body: { status: "in_progress" } });
 });
