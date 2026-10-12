@@ -192,6 +192,18 @@ export function getReflectionEvidence(
       ORDER BY t.completed_at DESC
     `).all(USER_ID, period.start, period.endExclusive) as TodoRow[]
     : [];
+  // The owner's own check-ins leave group chats' memories out, but a task they
+  // finished for a group is still something they did today. List those, and
+  // only those: done, completed in the window, filed under a group's area.
+  const groupTodosDone = filters.ownAreasOnly && sources.includes("todos")
+    ? db.prepare(`
+      SELECT t.*,c.name category_name,la.name life_area_name,la.slug life_area_slug
+      FROM todos t LEFT JOIN categories c ON c.id=t.category_id
+      JOIN life_areas la ON la.id=t.life_area_id AND la.thread_id IS NOT NULL
+      WHERE t.user_id=? AND t.status='done' AND t.completed_at>=? AND t.completed_at<?
+      ORDER BY t.completed_at DESC
+    `).all(USER_ID, period.start, period.endExclusive) as TodoRow[]
+    : [];
   const scopeKey = reflectionScopeKey(period, { lifeAreaIds, categoryIds, sources });
   const selections = db.prepare(`
     SELECT entity_type,entity_id FROM reflection_selections
@@ -224,6 +236,7 @@ export function getReflectionEvidence(
     todos: todos.map(todoJson),
     memory_candidates: memoryCandidates.filter(inScope).map(row => memoryJson(row)),
     todo_candidates: todoCandidates.filter(inScope).map(todoJson),
+    ...(filters.ownAreasOnly ? { group_todos_done: groupTodosDone.filter(inScope).map(todoJson) } : {}),
     selected: selections.map(item => ({ type: item.entity_type, id: item.entity_id })),
     draft: draft ? memoryJson(draft) : null,
   };
@@ -247,13 +260,20 @@ const AGENT_CANDIDATE_LIMIT = 25;
 function agentEvidence<T extends {
   memory_candidates: unknown[];
   todo_candidates: unknown[];
+  /** Present only on the owner's own turns: tasks finished for a group chat. */
+  group_todos_done?: unknown[];
 }>(evidence: T) {
-  const { memory_candidates: memories, todo_candidates: todos, ...rest } = evidence;
+  const { memory_candidates: memories, todo_candidates: todos, group_todos_done: groupDone, ...rest } = evidence;
   return {
     ...rest,
     memory_candidates: memories.slice(0, AGENT_CANDIDATE_LIMIT),
     todo_candidates: todos.slice(0, AGENT_CANDIDATE_LIMIT),
-    candidate_totals: { memories: memories.length, todos: todos.length },
+    ...(groupDone ? { group_todos_done: groupDone.slice(0, AGENT_CANDIDATE_LIMIT) } : {}),
+    candidate_totals: {
+      memories: memories.length,
+      todos: todos.length,
+      ...(groupDone ? { group_todos_done: groupDone.length } : {}),
+    },
   };
 }
 
@@ -1207,6 +1227,8 @@ export async function executeAgentTool(
         WHERE t.user_id=? AND t.parent_id=? ${scope ? "AND t.life_area_id=?" : ""} ORDER BY t.created_at
       `).all(...(scope ? [USER_ID, todo.id, scope.lifeAreaId] : [USER_ID, todo.id])) as TodoRow[]).map(todoJson),
       reminders: getReminders(db, todo.id),
+      // Oldest first, as the log reads; what was said about the task so far.
+      comments: getTodoComments(db, todo.id).map(commentJson),
       ...(stats ? {
         completions: stats.completions.map(row => ({ occurrence_at: row.occurrence_at, completed_at: row.completed_at })),
         completion_count: stats.completion_count,
@@ -1227,8 +1249,6 @@ export async function executeAgentTool(
     const threadId = input.thread_id as string;
     const thread = db.prepare(`
       SELECT t.id,t.channel,t.address,${GROUP_NAME_SQL} group_name FROM channel_threads t
-      // Oldest first, as the log reads; what was said about the task so far.
-      comments: getTodoComments(db, todo.id).map(commentJson),
       LEFT JOIN life_areas la ON la.thread_id=t.id
       WHERE t.id=? AND t.user_id=?
     `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; address: string; group_name: string | null } | undefined;
@@ -1558,6 +1578,19 @@ export async function executeAgentTool(
     search.flushSoon();
     return todoJson(updated);
   }
+  if (name === "add_todo_comment") {
+    const todoId = input.id as string;
+    // The same fence as every by-id read: from a group, another area's todo does not exist.
+    if (!scopedTodo(db, todoId, scope)) throw new Error(TODO_NOT_FOUND);
+    const comment = insertTodoComment(db, {
+      todoId,
+      body: input.body as string,
+      author: "agent",
+      authorName: scope ? context?.speakerName ?? null : null,
+    });
+    search.flushSoon();
+    return commentJson(comment);
+  }
   if (name === "delete_todo") {
     if (input.confirmed !== true) throw new Error("Explicit confirmation is required");
     const todoId = input.id as string;
@@ -1578,19 +1611,6 @@ export async function executeAgentTool(
     // not act on it as the owner's word (see `assertOwnWords`).
     if (context && found.attachments?.some(picture => picture.description)) {
       context.readUntrusted = true;
-  if (name === "add_todo_comment") {
-    const todoId = input.id as string;
-    // The same fence as every by-id read: from a group, another area's todo does not exist.
-    if (!scopedTodo(db, todoId, scope)) throw new Error(TODO_NOT_FOUND);
-    const comment = insertTodoComment(db, {
-      todoId,
-      body: input.body as string,
-      author: "agent",
-      authorName: scope ? context?.speakerName ?? null : null,
-    });
-    search.flushSoon();
-    return commentJson(comment);
-  }
     }
     return found;
   }

@@ -140,6 +140,7 @@ export function composeMemorySweepTurn(db: Db, candidate: SweepCandidate): strin
     `Read this stretch of ${where} and keep what is worth remembering.`,
     "Save each durable fact it establishes with create_memory (kind fact, a short title naming the person), or update_memory when a fact below or one you find already holds it and something changed: signs, birthdays, relationships, pets and who they are, jobs, schools, upcoming events with a day (an interview tomorrow is a date), likes and dislikes, how someone wants things done, a running joke that keeps coming back.",
     "Search memories before each create so nothing is kept twice. Never save a guess, a tease, a hypothetical, a mood of the moment, or a one-off errand; when two readings are plausible, keep neither.",
+    "Never save a fact about how the owner uses the assistant itself: their check-ins, reflections, briefs, reminders, or routines with it are product usage, not a fact about their life.",
     "Use no other tool. Your reply goes to no one: answer with one line naming what you kept, or \"nothing new\".",
     "",
     known.length ? "Already kept:" : "Nothing is kept about these people yet.",
