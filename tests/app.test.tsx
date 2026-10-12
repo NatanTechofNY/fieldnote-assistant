@@ -28,6 +28,7 @@ beforeEach(() => {
   servedLifeAreas = lifeAreas;
   todoNotes = [];
   noteWrites.length = 0;
+  failNoteWrites = false;
   deletedAttachments.length = 0;
   attachmentDeleteFails = false;
 });
@@ -201,6 +202,7 @@ const todoWrites: Array<{ method: string; body: Record<string, unknown> }> = [];
 
 /** The notes the mock server holds on a task, so one posted in the editor reads back the way the API returns it. */
 let todoNotes: Array<Record<string, unknown>> = [];
+let failNoteWrites = false;
 const noteWrites: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
 
 /** Lets a test stand in for an Algolia plan without NeuralSearch, or an unreachable one. */
@@ -329,6 +331,7 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     const method = init?.method || "GET";
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     noteWrites.push({ method, url, body });
+    if (failNoteWrites) return new Response(JSON.stringify({ success: false, error: "The note was not saved" }), { status: 500 });
     if (method === "DELETE") {
       todoNotes = todoNotes.filter(note => note.id !== noteRoute[2]);
       return new Response(JSON.stringify({ success: true, data: { id: noteRoute[2] } }));
@@ -2688,9 +2691,39 @@ it("keeps a log of timestamped notes on a task, written by you or the assistant"
 
   const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
   try {
-    await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getAllByRole("button", { name: "Delete note" })[0]);
+    await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getAllByRole("button", { name: /^Delete note from Assistant, Today, / })[0]);
     await waitFor(() => expect(noteWrites.at(-1)).toMatchObject({ method: "DELETE", url: "/api/todos/todo_1/comments/comment_seed" }));
     await waitFor(() => expect(within(dialog).queryByText("Venue confirmed Thursday")).not.toBeInTheDocument());
+  } finally {
+    confirmSpy.mockRestore();
+  }
+});
+
+it("keeps a note you wrote when saving fails, and leaves a note when you decline to delete it", async () => {
+  todoNotes = [{
+    id: "comment_seed", todo_id: "todo_1", body: "Venue confirmed Thursday", author: "agent", author_name: "Sarah",
+    created_at: "2026-07-24T15:30:00.000Z",
+  }];
+  renderAt("/todos");
+  await userEvent.click(await screen.findByRole("button", { name: "Prepare the DevCon demo" }));
+  const dialog = await screen.findByRole("dialog");
+  const note = within(dialog).getByLabelText("New note");
+
+  failNoteWrites = true;
+  await userEvent.type(note, "Call the caterer");
+  await userEvent.click(within(dialog).getByRole("button", { name: /Post/ }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("The note was not saved");
+  expect(note).toHaveValue("Call the caterer");
+  await userEvent.type(note, "!");
+  await waitFor(() => expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument());
+
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  try {
+    const writes = noteWrites.length;
+    await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getByRole("button", { name: /^Delete note/ }));
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(noteWrites.length).toBe(writes);
+    expect(within(dialog).getByText("Venue confirmed Thursday")).toBeInTheDocument();
   } finally {
     confirmSpy.mockRestore();
   }

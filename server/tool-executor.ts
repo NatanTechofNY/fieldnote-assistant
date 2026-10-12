@@ -6,7 +6,7 @@ import {
 } from "./atlassian-service.ts";
 import { productCaption, productJson, searchStoreProductsLocally, STORE_NAME } from "./catalog.ts";
 import {
-  getMemory, getReminders, getStoreProduct, getTodo, getTodoComments, GROUP_NAME_SQL, id, insertOutboundChannelMessage,
+  getMemory, getReminders, getStoreProduct, countTodoComments, getTodo, getTodoComments, GROUP_NAME_SQL, id, insertOutboundChannelMessage,
   insertTodoComment, instant, now, OWN_AREA_CLAUSE, queueIndexJob, recordMessageReaction, renameLifeArea, syncTodoReminders, USER_ID, userTimezone,
 } from "./db.ts";
 import {
@@ -236,7 +236,18 @@ export function getReflectionEvidence(
     todos: todos.map(todoJson),
     memory_candidates: memoryCandidates.filter(inScope).map(row => memoryJson(row)),
     todo_candidates: todoCandidates.filter(inScope).map(todoJson),
-    ...(filters.ownAreasOnly ? { group_todos_done: groupTodosDone.filter(inScope).map(todoJson) } : {}),
+    // Only what a sentence about the day needs. A group member wrote these
+    // titles, and this payload goes to a turn that can write, so neither their
+    // notes nor more than a short title is passed along as text to follow.
+    ...(filters.ownAreasOnly ? {
+      group_todos_done: groupTodosDone.filter(inScope).map(row => ({
+        id: row.id,
+        title: row.title.slice(0, GROUP_DONE_TITLE_MAX),
+        completed_at: row.completed_at,
+        life_area_id: row.life_area_id,
+        life_area_name: row.life_area_name ?? null,
+      })),
+    } : {}),
     selected: selections.map(item => ({ type: item.entity_type, id: item.entity_id })),
     draft: draft ? memoryJson(draft) : null,
   };
@@ -249,6 +260,14 @@ export function getReflectionEvidence(
  * still be described honestly.
  */
 const AGENT_CANDIDATE_LIMIT = 25;
+
+/** How many of a todo's newest notes `get_todo` returns; `comment_total` says how many there are. */
+const TODO_COMMENTS_RETURNED = 50;
+/** The longest title of a task finished in a group that an owner-only turn is handed. */
+const GROUP_DONE_TITLE_MAX = 120;
+/** Who a group note is for when the speaker has no name yet, and the longest name kept. */
+const GROUP_NOTE_AUTHOR = "Someone in the group";
+const NOTE_AUTHOR_MAX = 80;
 
 /**
  * Evidence as the agent sees it. `memories` and `todos` stay the curated set a
@@ -1227,8 +1246,11 @@ export async function executeAgentTool(
         WHERE t.user_id=? AND t.parent_id=? ${scope ? "AND t.life_area_id=?" : ""} ORDER BY t.created_at
       `).all(...(scope ? [USER_ID, todo.id, scope.lifeAreaId] : [USER_ID, todo.id])) as TodoRow[]).map(todoJson),
       reminders: getReminders(db, todo.id),
-      // Oldest first, as the log reads; what was said about the task so far.
-      comments: getTodoComments(db, todo.id).map(commentJson),
+      // Oldest first, as the log reads; what was said about the task so far, the
+      // newest few when there are many. A group sees only the notes written for
+      // a group: the owner's own notes on a group's task stay theirs.
+      comments: getTodoComments(db, todo.id, { newest: TODO_COMMENTS_RETURNED, groupVisibleOnly: Boolean(scope) }).map(commentJson),
+      comment_total: countTodoComments(db, todo.id, { groupVisibleOnly: Boolean(scope) }).total,
       ...(stats ? {
         completions: stats.completions.map(row => ({ occurrence_at: row.occurrence_at, completed_at: row.completed_at })),
         completion_count: stats.completion_count,
@@ -1586,7 +1608,9 @@ export async function executeAgentTool(
       todoId,
       body: input.body as string,
       author: "agent",
-      authorName: scope ? context?.speakerName ?? null : null,
+      // A group's note always names who it was written for: that name is what
+      // marks it as one the group may read back.
+      authorName: scope ? (context?.speakerName?.trim() || GROUP_NOTE_AUTHOR).slice(0, NOTE_AUTHOR_MAX) : null,
     });
     search.flushSoon();
     return commentJson(comment);

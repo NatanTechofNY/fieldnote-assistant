@@ -7,7 +7,7 @@ import { invalidateContent } from "../../lib/invalidate";
 import { friendlyDate, useTimezone } from "../../lib/timezone";
 
 const fullTime = (value: string, timezone: string) => new Intl.DateTimeFormat("en-US", {
-  timeZone: timezone, dateStyle: "medium", timeStyle: "short",
+  timeZone: timezone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
 }).format(new Date(value));
 
 /**
@@ -27,7 +27,8 @@ export function TodoNotes({ todoId }: { todoId: string }) {
   const comments: TodoComment[] = data?.comments ?? [];
   const add = useMutation({
     mutationFn: (body: string) => api.addTodoComment(todoId, body),
-    onSuccess: () => { setDraft(""); invalidateContent(queryClient); },
+    // Words typed while the post was in flight are the next note, not this one.
+    onSuccess: (_note, body) => { setDraft(current => current.trim() === body ? "" : current); invalidateContent(queryClient); },
   });
   const remove = useMutation({
     mutationFn: (commentId: string) => api.deleteTodoComment(todoId, commentId),
@@ -38,7 +39,7 @@ export function TodoNotes({ todoId }: { todoId: string }) {
     if (body && !add.isPending) add.mutate(body);
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); }
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.repeat) { event.preventDefault(); submit(); }
   };
   return <div className="subtask-editor task-notes">
     <div className="subtask-editor-head">
@@ -55,7 +56,7 @@ export function TodoNotes({ todoId }: { todoId: string }) {
         <button
           type="button"
           className="button icon ghost"
-          aria-label="Delete note"
+          aria-label={`Delete note from ${comment.author === "agent" ? "Assistant" : "You"}, ${friendlyDate(comment.created_at, timezone)}`}
           disabled={remove.isPending}
           onClick={() => confirm("Delete this note?") && remove.mutate(comment.id)}
         ><Trash2 size={13}/></button>
@@ -70,14 +71,14 @@ export function TodoNotes({ todoId }: { todoId: string }) {
         maxLength={4000}
         placeholder="Add a note (Cmd/Ctrl+Enter to post)"
         value={draft}
-        onChange={event => setDraft(event.target.value)}
+        onChange={event => { setDraft(event.target.value); if (add.error) add.reset(); }}
         onKeyDown={onKeyDown}
       />
       <button type="button" className="button ghost" disabled={!draft.trim() || add.isPending} onClick={submit}>
         {add.isPending ? <LoaderCircle className="spin" size={13}/> : <Send size={13}/>}Post
       </button>
     </div>
-    {add.error && <div className="inline-error"><TriangleAlert size={14}/><span>{add.error.message}</span></div>}
-    {remove.error && <div className="inline-error"><TriangleAlert size={14}/><span>{remove.error.message}</span></div>}
+    {add.error && <div className="inline-error" role="alert"><TriangleAlert size={14}/><span>{add.error.message}</span></div>}
+    {remove.error && <div className="inline-error" role="alert"><TriangleAlert size={14}/><span>{remove.error.message}</span></div>}
   </div>;
 }

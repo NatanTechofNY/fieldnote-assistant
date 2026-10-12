@@ -1342,11 +1342,53 @@ export function getRecentCompletions(db: Db, sinceIso: string, limit = 500): Tod
   `).all(USER_ID, sinceIso, limit) as TodoCompletionRow[];
 }
 
-/** The notes on a todo, oldest first. */
-export function getTodoComments(db: Db, todoId: string): TodoCommentRow[] {
+/**
+ * The notes a group may see: the ones the agent wrote on a group turn, which
+ * always carry the speaker's name. A note the owner typed in the app is theirs
+ * alone, even on a task filed under a group's area.
+ */
+const GROUP_VISIBLE_NOTE = "author='agent' AND author_name IS NOT NULL";
+
+type TodoCommentScope = {
+  /** Only the notes a group may see; set for group turns and for group-area search records. */
+  groupVisibleOnly?: boolean;
+};
+
+/**
+ * The notes on a todo, oldest first. `newest` keeps only that many of the most
+ * recent, still returned oldest first, so a long log cannot swell a tool
+ * result.
+ */
+export function getTodoComments(
+  db: Db,
+  todoId: string,
+  options: TodoCommentScope & { newest?: number } = {},
+): TodoCommentRow[] {
+  const visible = options.groupVisibleOnly ? `AND ${GROUP_VISIBLE_NOTE}` : "";
+  if (options.newest === undefined) {
+    return db.prepare(`
+      SELECT * FROM todo_comments WHERE user_id=? AND todo_id=? ${visible} ORDER BY created_at,rowid
+    `).all(USER_ID, todoId) as TodoCommentRow[];
+  }
   return db.prepare(`
-    SELECT * FROM todo_comments WHERE user_id=? AND todo_id=? ORDER BY created_at,rowid
-  `).all(USER_ID, todoId) as TodoCommentRow[];
+    SELECT * FROM (
+      SELECT *,rowid rid FROM todo_comments WHERE user_id=? AND todo_id=? ${visible}
+      ORDER BY created_at DESC,rowid DESC LIMIT ?
+    ) ORDER BY created_at,rid
+  `).all(USER_ID, todoId, options.newest) as TodoCommentRow[];
+}
+
+/** How many notes a todo has and when the latest was written, without loading them. */
+export function countTodoComments(
+  db: Db,
+  todoId: string,
+  options: TodoCommentScope = {},
+): { total: number; lastAt: string | null } {
+  const visible = options.groupVisibleOnly ? `AND ${GROUP_VISIBLE_NOTE}` : "";
+  const row = db.prepare(`
+    SELECT count(*) total,max(created_at) last_at FROM todo_comments WHERE user_id=? AND todo_id=? ${visible}
+  `).get(USER_ID, todoId) as { total: number; last_at: string | null };
+  return { total: row.total, lastAt: row.last_at };
 }
 
 /**

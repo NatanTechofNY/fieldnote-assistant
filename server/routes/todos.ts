@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  OWN_AREA_CLAUSE, USER_ID, deleteTodoComment, getRecentCompletions, getReminders, getTodo, getTodoComments, id, insertTodoComment, now,
+  OWN_AREA_CLAUSE, USER_ID, deleteTodoComment, getRecentCompletions, getReminders, countTodoComments, getTodo, getTodoComments, id, insertTodoComment, now,
   queueIndexJob, syncTodoReminders, userTimezone,
 } from "../db.ts";
 import { failure, success } from "../http.ts";
@@ -98,7 +98,9 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
       todo: todoJson(todo),
       subtasks: subtasks.map(todoJson),
       reminders: getReminders(db, todo.id).map(reminderJson),
-      comments: getTodoComments(db, todo.id).map(commentJson),
+      // The newest few hundred, oldest first; `comment_total` is the true count.
+      comments: getTodoComments(db, todo.id, { newest: 200 }).map(commentJson),
+      comment_total: countTodoComments(db, todo.id).total,
       ...(stats ? {
         completions: stats.completions.map(completionJson),
         completion_count: stats.completion_count,
