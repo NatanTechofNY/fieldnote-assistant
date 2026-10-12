@@ -94,7 +94,7 @@ export async function composeBriefTurn(
     brief.prompt,
     "",
     `--- Context supplied by the app, not by me. Today is ${context.date} in ${context.timezone}.`,
-    "This covers only my own records; group chats' todos and notes belong to their own check-ins and are left out.",
+    "This covers my own records. Group chats' notes and open todos belong to their own check-ins and are left out. Reflection evidence also lists, as group_todos_done, tasks completed in group chats today by chat; anyone in the chat may have finished them, so do not say I did.",
     ...catalog,
     catalog.length
       ? "Use these IDs and keys directly; do not guess a board ID, space key, or status ID, and do not look up boards or spaces that are not listed."

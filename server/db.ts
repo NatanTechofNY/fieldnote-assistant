@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type {
   CatalogProduct, ChannelMessageRow, Db, EntityType, IndexOperation, MemoryRow, ReminderRow,
-  StoreProductRow, TodoCompletionRow, TodoRow,
+  StoreProductRow, TodoCommentRow, TodoCompletionRow, TodoRow,
 } from "./types.ts";
 import { USER_ID } from "./types.ts";
 import { anchorRecurrence, materializeRecurrence, type RecurrenceRule } from "./recurrence.ts";
@@ -87,6 +87,18 @@ CREATE TABLE IF NOT EXISTS todo_completions (
 -- The UNIQUE constraint above already indexes (todo_id, occurrence_at); the
 -- separate index an earlier build created only duplicated it.
 DROP INDEX IF EXISTS todo_completions_todo;
+-- A log of timestamped notes on a todo, written by the owner or the agent. Add
+-- and delete only; the text is folded into the todo's search record.
+CREATE TABLE IF NOT EXISTS todo_comments (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  todo_id TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  author TEXT NOT NULL CHECK(author IN ('user','agent')),
+  author_name TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS todo_comments_todo ON todo_comments(todo_id, created_at);
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -1328,6 +1340,90 @@ export function getRecentCompletions(db: Db, sinceIso: string, limit = 500): Tod
     SELECT * FROM todo_completions WHERE user_id=? AND completed_at>=?
     ORDER BY completed_at DESC LIMIT ?
   `).all(USER_ID, sinceIso, limit) as TodoCompletionRow[];
+}
+
+/**
+ * The notes a group may see: the ones the agent wrote on a group turn, which
+ * always carry the speaker's name. A note the owner typed in the app is theirs
+ * alone, even on a task filed under a group's area.
+ */
+const GROUP_VISIBLE_NOTE = "author='agent' AND author_name IS NOT NULL";
+
+type TodoCommentScope = {
+  /** Only the notes a group may see; set for group turns and for group-area search records. */
+  groupVisibleOnly?: boolean;
+};
+
+/**
+ * The notes on a todo, oldest first. `newest` keeps only that many of the most
+ * recent, still returned oldest first, so a long log cannot swell a tool
+ * result.
+ */
+export function getTodoComments(
+  db: Db,
+  todoId: string,
+  options: TodoCommentScope & { newest?: number } = {},
+): TodoCommentRow[] {
+  const visible = options.groupVisibleOnly ? `AND ${GROUP_VISIBLE_NOTE}` : "";
+  if (options.newest === undefined) {
+    return db.prepare(`
+      SELECT * FROM todo_comments WHERE user_id=? AND todo_id=? ${visible} ORDER BY created_at,rowid
+    `).all(USER_ID, todoId) as TodoCommentRow[];
+  }
+  return db.prepare(`
+    SELECT * FROM (
+      SELECT *,rowid rid FROM todo_comments WHERE user_id=? AND todo_id=? ${visible}
+      ORDER BY created_at DESC,rowid DESC LIMIT ?
+    ) ORDER BY created_at,rid
+  `).all(USER_ID, todoId, options.newest) as TodoCommentRow[];
+}
+
+/** How many notes a todo has and when the latest was written, without loading them. */
+export function countTodoComments(
+  db: Db,
+  todoId: string,
+  options: TodoCommentScope = {},
+): { total: number; lastAt: string | null } {
+  const visible = options.groupVisibleOnly ? `AND ${GROUP_VISIBLE_NOTE}` : "";
+  const row = db.prepare(`
+    SELECT count(*) total,max(created_at) last_at FROM todo_comments WHERE user_id=? AND todo_id=? ${visible}
+  `).get(USER_ID, todoId) as { total: number; last_at: string | null };
+  return { total: row.total, lastAt: row.last_at };
+}
+
+/**
+ * Adds a note to a todo and queues the todo for reindexing, since its search
+ * record carries the recent notes. The todo's `updated_at` moves too, so a
+ * task someone just wrote on reads as recently touched. The caller has already
+ * resolved the todo (and, on a group turn, checked it is in scope).
+ */
+export function insertTodoComment(
+  db: Db,
+  input: { todoId: string; body: string; author: "user" | "agent"; authorName?: string | null },
+): TodoCommentRow {
+  const commentId = id("comment");
+  const timestamp = now();
+  db.transaction(() => {
+    db.prepare(`
+      INSERT INTO todo_comments(id,user_id,todo_id,body,author,author_name,created_at) VALUES(?,?,?,?,?,?,?)
+    `).run(commentId, USER_ID, input.todoId, input.body, input.author, input.authorName ?? null, timestamp);
+    db.prepare("UPDATE todos SET updated_at=? WHERE id=? AND user_id=?").run(timestamp, input.todoId, USER_ID);
+    queueIndexJob(db, "todo", input.todoId);
+  })();
+  return db.prepare("SELECT * FROM todo_comments WHERE id=?").get(commentId) as TodoCommentRow;
+}
+
+/** Removes one note from a todo; false when the todo has no such note. */
+export function deleteTodoComment(db: Db, todoId: string, commentId: string): boolean {
+  return db.transaction(() => {
+    const removed = db.prepare("DELETE FROM todo_comments WHERE id=? AND todo_id=? AND user_id=?")
+      .run(commentId, todoId, USER_ID).changes > 0;
+    if (removed) {
+      db.prepare("UPDATE todos SET updated_at=? WHERE id=? AND user_id=?").run(now(), todoId, USER_ID);
+      queueIndexJob(db, "todo", todoId);
+    }
+    return removed;
+  })();
 }
 
 export function getReminders(

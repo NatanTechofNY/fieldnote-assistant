@@ -182,7 +182,7 @@ export function threadKeepsPictures(db: Db, threadId: string): boolean {
  * what a past turn did rather than what it looked at.
  */
 const WRITE_TOOLS = new Set([
-  "create_todo", "update_todo", "set_todo_status", "delete_todo",
+  "create_todo", "update_todo", "set_todo_status", "add_todo_comment", "delete_todo",
   "create_memory", "update_memory", "delete_memory",
   "create_reminder", "update_reminder", "delete_reminder",
   // A tapback changes nothing in SQLite but is just as irreversible from the
@@ -231,7 +231,7 @@ const GESTURE_TOOLS = new Set([
  * tools that read the same records are what the marks follow.
  */
 const PROGRESS_REACTIONS: Record<string, string> = {
-  list_todos: "📋", get_todo: "📋", create_todo: "📋", update_todo: "📋", set_todo_status: "📋", delete_todo: "📋",
+  list_todos: "📋", get_todo: "📋", create_todo: "📋", update_todo: "📋", set_todo_status: "📋", add_todo_comment: "📋", delete_todo: "📋",
   get_memory: "🧠", create_memory: "🧠", update_memory: "🧠", delete_memory: "🧠",
   list_reminders: "⏰", create_reminder: "⏰", update_reminder: "⏰", delete_reminder: "⏰",
   get_agenda: "📅",

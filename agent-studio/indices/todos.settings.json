@@ -1,7 +1,8 @@
 {
   "searchableAttributes": [
     "unordered(title)",
-    "unordered(notes)"
+    "unordered(notes)",
+    "unordered(comments)"
   ],
   "attributesForFaceting": [
     "filterOnly(userId)",
@@ -35,7 +36,9 @@
     "recurrence",
     "is_recurring",
     "assistant_says",
-    "last_completed_at"
+    "last_completed_at",
+    "comments",
+    "last_comment_at"
   ],
   "attributesToHighlight": [],
   "attributesToSnippet": [],

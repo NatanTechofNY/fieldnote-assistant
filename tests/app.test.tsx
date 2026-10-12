@@ -26,6 +26,9 @@ beforeEach(() => {
   // each test open in whatever state the one before it left behind.
   window.localStorage.clear();
   servedLifeAreas = lifeAreas;
+  todoNotes = [];
+  noteWrites.length = 0;
+  failNoteWrites = false;
   deletedAttachments.length = 0;
   attachmentDeleteFails = false;
 });
@@ -197,6 +200,11 @@ const requestedUrls: string[] = [];
 /** Todo writes, so a form test can assert the payload and not just the call. */
 const todoWrites: Array<{ method: string; body: Record<string, unknown> }> = [];
 
+/** The notes the mock server holds on a task, so one posted in the editor reads back the way the API returns it. */
+let todoNotes: Array<Record<string, unknown>> = [];
+let failNoteWrites = false;
+const noteWrites: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
+
 /** Lets a test stand in for an Algolia plan without NeuralSearch, or an unreachable one. */
 let neuralSearchSetupDetails: Record<string, string> | null = null;
 
@@ -317,6 +325,31 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       return new Response(JSON.stringify({ success: true, data: area }));
     }
     return new Response(JSON.stringify({ success: true, data: servedLifeAreas }));
+  }
+  const noteRoute = url.match(/^\/api\/todos\/([^/?]+)\/comments(?:\/([^/?]+))?$/);
+  if (noteRoute) {
+    const method = init?.method || "GET";
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    noteWrites.push({ method, url, body });
+    if (failNoteWrites) return new Response(JSON.stringify({ success: false, error: "The note was not saved" }), { status: 500 });
+    if (method === "DELETE") {
+      todoNotes = todoNotes.filter(note => note.id !== noteRoute[2]);
+      return new Response(JSON.stringify({ success: true, data: { id: noteRoute[2] } }));
+    }
+    const note = {
+      id: `comment_${todoNotes.length + 1}`, todo_id: noteRoute[1], body: body.body,
+      author: "user", author_name: null, created_at: "2026-07-25T12:00:00.000Z",
+    };
+    todoNotes = [...todoNotes, note];
+    return new Response(JSON.stringify({ success: true, data: note }), { status: 201 });
+  }
+  const detailRoute = url.match(/^\/api\/todos\/([^/?]+)$/);
+  if (detailRoute && (init?.method || "GET") === "GET" && detailRoute[1] !== "completions") {
+    const found = todos.find(item => item.id === detailRoute[1]);
+    return new Response(JSON.stringify({
+      success: true,
+      data: { todo: found, subtasks: [], reminders: [], comments: todoNotes.filter(note => note.todo_id === detailRoute[1]) },
+    }));
   }
   if (url.includes("/api/todos")) {
     const method = init?.method || "GET";
@@ -2624,6 +2657,86 @@ it("manages a task's subtasks from the editor", async () => {
   expect(screen.getByRole("dialog")).toBeInTheDocument();
 });
 
+it("keeps a log of timestamped notes on a task, written by you or the assistant", async () => {
+  todoNotes = [{
+    id: "comment_seed", todo_id: "todo_1", body: "Venue confirmed Thursday", author: "agent", author_name: "Sarah",
+    created_at: "2026-07-24T15:30:00.000Z",
+  }];
+  renderAt("/todos");
+  await userEvent.click(await screen.findByRole("button", { name: "Prepare the DevCon demo" }));
+  const dialog = await screen.findByRole("dialog");
+
+  const log = await within(dialog).findByRole("list", { name: "Task notes" });
+  expect(within(log).getByText("Venue confirmed Thursday")).toBeInTheDocument();
+  expect(within(log).getByText("Assistant · for Sarah")).toBeInTheDocument();
+  const stamp = within(log).getByText(/^Today, /);
+  expect(stamp).toHaveAttribute("datetime", "2026-07-24T15:30:00.000Z");
+  expect(stamp).toHaveAttribute("title", expect.stringMatching(/Jul 24, 2026/));
+
+  // Posting is its own button and shortcut: Enter-free, so it never saves the task and closes the editor.
+  const post = within(dialog).getByRole("button", { name: /Post/ });
+  expect(post).toBeDisabled();
+  await userEvent.type(within(dialog).getByLabelText("New note"), "Rehearsal moved to Friday");
+  await userEvent.click(post);
+  await waitFor(() => expect(noteWrites).toEqual([{
+    method: "POST", url: "/api/todos/todo_1/comments", body: { body: "Rehearsal moved to Friday" },
+  }]));
+  expect(await within(dialog).findByText("Rehearsal moved to Friday")).toBeInTheDocument();
+  expect(within(dialog).getByText("You")).toBeInTheDocument();
+  expect(within(dialog).getByLabelText("New note")).toHaveValue("");
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+  await userEvent.type(within(dialog).getByLabelText("New note"), "Sent the agenda{Control>}{Enter}{/Control}");
+  await waitFor(() => expect(noteWrites.at(-1)).toMatchObject({ method: "POST", body: { body: "Sent the agenda" } }));
+
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  try {
+    await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getAllByRole("button", { name: /^Delete note from Assistant, Today, / })[0]);
+    await waitFor(() => expect(noteWrites.at(-1)).toMatchObject({ method: "DELETE", url: "/api/todos/todo_1/comments/comment_seed" }));
+    await waitFor(() => expect(within(dialog).queryByText("Venue confirmed Thursday")).not.toBeInTheDocument());
+  } finally {
+    confirmSpy.mockRestore();
+  }
+});
+
+it("keeps a note you wrote when saving fails, and leaves a note when you decline to delete it", async () => {
+  todoNotes = [{
+    id: "comment_seed", todo_id: "todo_1", body: "Venue confirmed Thursday", author: "agent", author_name: "Sarah",
+    created_at: "2026-07-24T15:30:00.000Z",
+  }];
+  renderAt("/todos");
+  await userEvent.click(await screen.findByRole("button", { name: "Prepare the DevCon demo" }));
+  const dialog = await screen.findByRole("dialog");
+  const note = within(dialog).getByLabelText("New note");
+
+  failNoteWrites = true;
+  await userEvent.type(note, "Call the caterer");
+  await userEvent.click(within(dialog).getByRole("button", { name: /Post/ }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("The note was not saved");
+  expect(note).toHaveValue("Call the caterer");
+  await userEvent.type(note, "!");
+  await waitFor(() => expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument());
+
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  try {
+    const writes = noteWrites.length;
+    await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getByRole("button", { name: /^Delete note/ }));
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(noteWrites.length).toBe(writes);
+    expect(within(dialog).getByText("Venue confirmed Thursday")).toBeInTheDocument();
+  } finally {
+    confirmSpy.mockRestore();
+  }
+});
+
+it("offers no notes while a task is still being captured", async () => {
+  renderAt("/todos");
+  expect(await screen.findByText("The board.")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: /New task/ }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).queryByLabelText("New note")).not.toBeInTheDocument();
+});
+
 /** A task being captured has no id yet, so its steps ride along on the create. */
 it("captures a new task together with its subtasks", async () => {
   renderAt("/todos");
@@ -2653,6 +2766,30 @@ it("filters the board by life area and opens the task editor", async () => {
 
   await userEvent.click(screen.getByRole("button", { name: /New task/ }));
   expect(await screen.findByRole("dialog")).toBeInTheDocument();
+});
+
+/** The board's area filter is the one thing on it a new task can inherit. */
+it("starts a new task in the life area the board is filtered to", async () => {
+  renderAt("/todos");
+  expect(await screen.findByText("The board.")).toBeInTheDocument();
+
+  // "My items" is the default and is not an area, so nothing is filled in.
+  await userEvent.click(screen.getByRole("button", { name: /New task/ }));
+  expect(within(await screen.findByRole("dialog")).getByLabelText("Life area")).toHaveValue("");
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+  await userEvent.click(screen.getByRole("button", { name: "Work" }));
+  await userEvent.click(screen.getByRole("button", { name: /New task/ }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByLabelText("Life area")).toHaveValue("area_work");
+
+  await userEvent.type(within(dialog).getByLabelText("Task"), "Draft the agenda");
+  await userEvent.click(within(dialog).getByRole("button", { name: /Save/ }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(todoWrites.at(-1)).toMatchObject({
+    method: "POST", body: { title: "Draft the agenda", life_area_id: "area_work", life_area_source: "user" },
+  });
 });
 
 /** Writes only: a reschedule is followed by the refetch it invalidated. */

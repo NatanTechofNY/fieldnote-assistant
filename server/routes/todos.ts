@@ -1,11 +1,14 @@
 import { z } from "zod";
-import { OWN_AREA_CLAUSE, USER_ID, getRecentCompletions, getReminders, getTodo, id, now, queueIndexJob, syncTodoReminders, userTimezone } from "../db.ts";
+import {
+  OWN_AREA_CLAUSE, USER_ID, deleteTodoComment, getRecentCompletions, getReminders, countTodoComments, getTodo, getTodoComments, id, insertTodoComment, now,
+  queueIndexJob, syncTodoReminders, userTimezone,
+} from "../db.ts";
 import { failure, success } from "../http.ts";
 import {
   DERIVED_SCHEDULE, REPEATING_SUBTASK, STEP_SCHEDULE, planRecurrenceWrite,
 } from "../recurrence.ts";
-import { iso, status, todoCreate, todoPatch } from "../schemas.ts";
-import { applyStatusTimes, completionJson, reminderJson, todoJson } from "../serializers.ts";
+import { iso, status, todoCommentCreate, todoCreate, todoPatch } from "../schemas.ts";
+import { applyStatusTimes, commentJson, completionJson, reminderJson, todoJson } from "../serializers.ts";
 import {
   clearStepSchedules, completeParentIfSettled, completionStats, isStepOfRepeating, reopenStepsForNextOccurrence,
   startParentIfPending, syncOccurrenceCompletion,
@@ -95,6 +98,9 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
       todo: todoJson(todo),
       subtasks: subtasks.map(todoJson),
       reminders: getReminders(db, todo.id).map(reminderJson),
+      // The newest few hundred, oldest first; `comment_total` is the true count.
+      comments: getTodoComments(db, todo.id, { newest: 200 }).map(commentJson),
+      comment_total: countTodoComments(db, todo.id).total,
       ...(stats ? {
         completions: stats.completions.map(completionJson),
         completion_count: stats.completion_count,
@@ -236,6 +242,19 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
     })();
     search.flushSoon();
     return success(res, todoJson(getTodo(db, current.id) as TodoRow));
+  });
+  app.post("/api/todos/:id/comments", (req, res) => {
+    const body = todoCommentCreate.parse(req.body);
+    if (!getTodo(db, req.params.id)) return failure(res, 404, "Todo not found");
+    const comment = insertTodoComment(db, { todoId: req.params.id, body: body.body, author: "user" });
+    search.flushSoon();
+    return success(res, commentJson(comment), 201);
+  });
+  app.delete("/api/todos/:id/comments/:commentId", (req, res) => {
+    if (!getTodo(db, req.params.id)) return failure(res, 404, "Todo not found");
+    if (!deleteTodoComment(db, req.params.id, req.params.commentId)) return failure(res, 404, "Comment not found");
+    search.flushSoon();
+    return success(res, { id: req.params.commentId });
   });
   app.delete("/api/todos/:id", (req, res) => {
     if (!getTodo(db, req.params.id)) return failure(res, 404, "Todo not found");

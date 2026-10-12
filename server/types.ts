@@ -84,6 +84,17 @@ export interface TodoCompletionRow {
   created_at: string;
 }
 
+export interface TodoCommentRow {
+  id: string;
+  user_id: string;
+  todo_id: string;
+  body: string;
+  author: "user" | "agent";
+  /** The group member the agent wrote it for, when a group turn wrote it. */
+  author_name: string | null;
+  created_at: string;
+}
+
 export interface MemoryRow {
   id: string;
   user_id: string;

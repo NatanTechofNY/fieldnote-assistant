@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { algoliasearch } from "algoliasearch";
 import { attachmentTextForMemory, attachmentTextIndexed } from "./attachments.ts";
 import {
-  getChannelMessage, getMemory, getStoreProduct, getTodo, now, queueIndexJob, USER_ID,
+  getChannelMessage, getMemory, countTodoComments, getStoreProduct, getTodo, getTodoComments, now, queueIndexJob, USER_ID,
 } from "./db.ts";
 import { getNotificationPreferences, getSearchPreferences } from "./integrations.ts";
 import { localParts } from "./local-time.ts";
@@ -54,6 +54,34 @@ function memoryDay(anchor: string, timezone: string): { occurred_on: string; occ
 export type SearchEntityType = "todo" | "memory" | "message";
 
 export const SEARCH_ENTITY_TYPES: SearchEntityType[] = ["todo", "memory", "message"];
+
+/**
+ * How much of a todo's notes its search record carries: at most this many of the
+ * newest, each cut to this many characters, and no more than this many bytes in
+ * all. The byte budget is the one that protects the record: a count and a
+ * character cap alone allow about 10 KB of notes, and multibyte text is bigger
+ * still, which with the title and `notes` would reach Algolia's record limit.
+ */
+export const TODO_COMMENTS_INDEXED = 20;
+export const TODO_COMMENT_INDEXED_LENGTH = 500;
+export const TODO_COMMENTS_INDEXED_BYTES = 4000;
+
+/** The note texts for a todo's search record, newest first, within the budgets above. */
+export function indexedCommentBodies(commentsOldestFirst: Array<{ body: string }>): string[] {
+  const bodies: string[] = [];
+  let remaining = TODO_COMMENTS_INDEXED_BYTES;
+  for (const { body } of [...commentsOldestFirst].reverse().slice(0, TODO_COMMENTS_INDEXED)) {
+    if (remaining <= 0) break;
+    let text = body.slice(0, TODO_COMMENT_INDEXED_LENGTH);
+    if (Buffer.byteLength(text) > remaining) {
+      text = Buffer.from(text).subarray(0, remaining).toString("utf8").replace(/\uFFFD+$/, "");
+    }
+    if (!text) break;
+    bodies.push(text);
+    remaining -= Buffer.byteLength(text);
+  }
+  return bodies;
+}
 
 /**
  * Only what a result row renders, so a palette keystroke does not pull whole
@@ -210,11 +238,23 @@ export class AlgoliaSync {
       const row = getTodo(this.db, entityId);
       if (!row) return null;
       const recurrenceRule = parseRecurrence(row.recurrence_json);
+      /*
+       * A task filed under a group's area is searchable from that group, so its
+       * record carries only the notes a group may see. The owner's own notes on
+       * it stay in SQLite and the app.
+       */
+      const inGroupArea = Boolean(row.life_area_id && this.db.prepare(
+        "SELECT 1 found FROM life_areas WHERE id=? AND thread_id IS NOT NULL",
+      ).get(row.life_area_id));
+      const visibility = { groupVisibleOnly: inGroupArea };
+      const recentComments = getTodoComments(this.db, row.id, { ...visibility, newest: TODO_COMMENTS_INDEXED });
       return {
         objectID: row.id,
         userId: row.user_id,
         title: row.title,
         notes: row.notes,
+        comments: indexedCommentBodies(recentComments),
+        last_comment_at: countTodoComments(this.db, row.id, visibility).lastAt,
         status: row.status,
         priority: row.priority,
         category_id: row.category_id,

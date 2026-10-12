@@ -9,7 +9,7 @@ import type {
 import { PageHead } from "../../components/layout/PageHead";
 import { AttachButton, ErrorState, Loading } from "../../components/ui";
 import { LifeAreaFilter } from "../../components/ui/LifeAreaFilter";
-import { areaFilterParams, inAreaFilter } from "../../lib/area-filter";
+import { areaFilterParams, inAreaFilter, MY_ITEMS } from "../../lib/area-filter";
 import { useAreaFilter } from "../../lib/use-area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { CompleteParentDialog } from "./CompleteParentDialog";
@@ -43,6 +43,10 @@ export function TodosPage() {
   // A task captured from the calendar opens on the slot that was clicked.
   const [capturedAt, setCapturedAt] = useState("");
   const areaParams = areaFilterParams(lifeAreaId);
+  // "My items" and "All areas" are not areas, so only a specific pick is carried into a new task.
+  const filteredAreaId = lifeAreaId && lifeAreaId !== MY_ITEMS && lifeAreas.some(area => area.id === lifeAreaId)
+    ? lifeAreaId
+    : undefined;
   const { data: fetched = [], isLoading, error } = useQuery({
     queryKey: ["todos", showDone, areaParams.life_area_id ?? "", areaParams.scope ?? ""],
     queryFn: () => api.todos(showDone, areaParams.life_area_id, areaParams.scope),
@@ -171,6 +175,7 @@ export function TodosPage() {
     {editing && <TodoModal
       todo={editing === "new" ? undefined : editing}
       defaultDueAt={editing === "new" ? capturedAt : undefined}
+      defaultLifeAreaId={editing === "new" ? filteredAreaId : undefined}
       subtasks={editing === "new" ? [] : allChildren.get(editing.id) || []}
       allTodos={fetched.filter(t => !t.parent_id)}
       lifeAreas={lifeAreas}
