@@ -12,6 +12,7 @@ import { boardStatuses, statusMeta } from "../../lib/todo-meta";
 import { invalidateContent } from "../../lib/invalidate";
 import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck, SubtaskProgress, SubtaskStart, SubtaskState } from "./SubtaskCheck";
+import { TodoNotes } from "./TodoNotes";
 
 type RepeatMode = "never" | "daily" | "interval" | "weekly";
 
@@ -21,7 +22,7 @@ function repeatModeOf(rule: Recurrence | null | undefined): RepeatMode {
   return rule.interval > 1 ? "interval" : "daily";
 }
 
-export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, onClose }: { todo?: Todo; defaultDueAt?: string; subtasks: Todo[]; allTodos: Todo[]; lifeAreas: LifeArea[]; onClose: () => void }) {
+export function TodoModal({ todo, defaultDueAt, defaultLifeAreaId, subtasks, allTodos, lifeAreas, onClose }: { todo?: Todo; defaultDueAt?: string; defaultLifeAreaId?: string; subtasks: Todo[]; allTodos: Todo[]; lifeAreas: LifeArea[]; onClose: () => void }) {
   const timezone = useTimezone();
   const queryClient = useQueryClient();
   const [title, setTitle] = useState(todo?.title || "");
@@ -62,7 +63,8 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
   const [status, setStatus] = useState<TodoStatus>(todo?.status || "pending");
   const [priority, setPriority] = useState<NonNullable<Todo["priority"]>>(todo?.priority || "normal");
   const [parentId, setParentId] = useState(todo?.parent_id || "");
-  const [lifeAreaId, setLifeAreaId] = useState(todo?.life_area_id || "");
+  // A task captured while the board is filtered to one area starts in that area.
+  const [lifeAreaId, setLifeAreaId] = useState(todo ? todo.life_area_id || "" : defaultLifeAreaId || "");
   // A task being captured has no id to hang children off yet, so its steps are
   // held here and sent with the create call. An existing task writes each one
   // straight away, the way the checkboxes beside them already do.
@@ -248,6 +250,8 @@ export function TodoModal({ todo, defaultDueAt, subtasks, allTodos, lifeAreas, o
           </div>}
           {addSubtask.error && <div className="inline-error"><TriangleAlert size={14}/><span>{addSubtask.error.message}</span></div>}
         </div>
+        {/* A task being captured has no id to hang notes on yet. */}
+        {todo && <TodoNotes todoId={todo.id}/>}
       </div>
       <aside className="task-form-side">
         <section className="task-panel">

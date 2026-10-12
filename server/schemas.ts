@@ -125,6 +125,10 @@ export const todoPatch = z.object({
 }).partial().strict()
   .refine((value) => Object.keys(value).length > 0, "No changes provided");
 
+/** A note on a todo. Trimmed, so a blank one is refused rather than saved as whitespace. */
+export const todoCommentBody = z.string().trim().min(1).max(4000);
+export const todoCommentCreate = z.object({ body: todoCommentBody }).strict();
+
 /**
  * One person's mood on a shared entry. The name may be left out by a tool, in
  * which case it is the speaker's; `mood_label` and `mood_score` on the entry
@@ -510,6 +514,7 @@ export const toolInput = {
     ...overridable,
   }),
   set_todo_status: z.object({ id: entityId, status }),
+  add_todo_comment: z.object({ id: entityId, body: todoCommentBody }),
   delete_todo: z.object({ id: entityId, ...confirmable }),
   get_memory: z.object({ id: entityId }),
   create_memory: z.object({

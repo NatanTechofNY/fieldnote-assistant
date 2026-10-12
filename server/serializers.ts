@@ -2,7 +2,20 @@ import { attachmentJson } from "./attachments.ts";
 import { id, now, USER_ID } from "./db.ts";
 import { parseMoods } from "./moods.ts";
 import { parseRecurrence, recurrenceJson } from "./recurrence.ts";
-import type { AttachmentRow, Db, MemoryRow, MessageRow, ReminderRow, TodoCompletionRow, TodoRow, TodoStatus } from "./types.ts";
+import type {
+  AttachmentRow, Db, MemoryRow, MessageRow, ReminderRow, TodoCommentRow, TodoCompletionRow, TodoRow, TodoStatus,
+} from "./types.ts";
+
+export function commentJson(row: TodoCommentRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    todo_id: row.todo_id,
+    body: row.body,
+    author: row.author,
+    author_name: row.author_name,
+    created_at: row.created_at,
+  };
+}
 
 export function todoJson(row: TodoRow): Record<string, unknown> {
   return {

@@ -2368,6 +2368,19 @@ tr:hover .attach-button,
 .subtask-empty { margin:0; color:var(--text-tertiary); font-size:12px; line-height:1.5; }
 .subtask-add { display:flex; align-items:center; gap:8px; margin-top:10px; }
 .subtask-add .input { flex:1; min-width:0; }
+/* A task's notes: a log with the newest at the bottom, next to the composer. */
+.task-notes { margin-top:12px; margin-bottom:0; }
+.task-notes .subtask-empty { margin-bottom:10px; }
+.note-list { display:grid; gap:8px; margin:0 0 10px; padding:0; list-style:none; max-height:260px; overflow:auto; }
+.note { padding:8px 10px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); }
+.note.agent { background:var(--surface-sunken); }
+.note-head { display:flex; align-items:center; gap:8px; margin-bottom:3px; font-size:11px; color:var(--text-tertiary); }
+.note-author { color:var(--text-secondary); font-weight:600; }
+.note-head time { margin-right:auto; }
+.note-head .button.icon { padding:3px; min-height:0; }
+.note-body { margin:0; font-size:13px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
+.note-compose { display:flex; align-items:flex-end; gap:8px; }
+.note-compose .input { flex:1; min-width:0; resize:vertical; line-height:1.5; }
 .confirm-list { max-height:220px; overflow:auto; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius); }
 .confirm-list .subtask-name { color:var(--text); font-size:13px; }
 .toast {

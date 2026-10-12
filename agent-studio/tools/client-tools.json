@@ -452,6 +452,32 @@
   {
     "type": "function",
     "function": {
+      "name": "add_todo_comment",
+      "description": "Adds a timestamped note to one exact todo's log: progress, a blocker, or context. Not for changing the task; get_todo returns the log as comments.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact todo ID"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "description": "The note, in plain words; it is saved with the time it was written"
+          }
+        },
+        "required": ["id", "body"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "delete_todo",
       "description": "Deletes one exact todo. Call only after resolving ambiguity and receiving explicit user confirmation.",
       "strict": true,

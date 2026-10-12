@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { algoliasearch } from "algoliasearch";
 import { attachmentTextForMemory, attachmentTextIndexed } from "./attachments.ts";
 import {
-  getChannelMessage, getMemory, getStoreProduct, getTodo, now, queueIndexJob, USER_ID,
+  getChannelMessage, getMemory, getStoreProduct, getTodo, getTodoComments, now, queueIndexJob, USER_ID,
 } from "./db.ts";
 import { getNotificationPreferences, getSearchPreferences } from "./integrations.ts";
 import { localParts } from "./local-time.ts";
@@ -54,6 +54,10 @@ function memoryDay(anchor: string, timezone: string): { occurred_on: string; occ
 export type SearchEntityType = "todo" | "memory" | "message";
 
 export const SEARCH_ENTITY_TYPES: SearchEntityType[] = ["todo", "memory", "message"];
+
+/** How many of a todo's newest comments its search record carries, and how much of each. */
+export const TODO_COMMENTS_INDEXED = 20;
+export const TODO_COMMENT_INDEXED_LENGTH = 500;
 
 /**
  * Only what a result row renders, so a palette keystroke does not pull whole
@@ -210,11 +214,16 @@ export class AlgoliaSync {
       const row = getTodo(this.db, entityId);
       if (!row) return null;
       const recurrenceRule = parseRecurrence(row.recurrence_json);
+      const allComments = getTodoComments(this.db, row.id);
+      // Newest first and bounded, so a task with a long log stays well under the record size limit.
+      const recentComments = allComments.slice(-TODO_COMMENTS_INDEXED).reverse();
       return {
         objectID: row.id,
         userId: row.user_id,
         title: row.title,
         notes: row.notes,
+        comments: recentComments.map(comment => comment.body.slice(0, TODO_COMMENT_INDEXED_LENGTH)),
+        last_comment_at: allComments.at(-1)?.created_at ?? null,
         status: row.status,
         priority: row.priority,
         category_id: row.category_id,

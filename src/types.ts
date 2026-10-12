@@ -72,6 +72,17 @@ export interface TodoCompletion {
   completed_at: string;
 }
 
+/** One timestamped note in a task's log, written by the owner or by the assistant. */
+export interface TodoComment {
+  id: string;
+  todo_id: string;
+  body: string;
+  author: "user" | "agent";
+  /** The person in a group chat the assistant wrote it for, when it did. */
+  author_name: string | null;
+  created_at: string;
+}
+
 export interface Todo {
   id: string;
   title: string;

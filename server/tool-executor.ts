@@ -6,8 +6,8 @@ import {
 } from "./atlassian-service.ts";
 import { productCaption, productJson, searchStoreProductsLocally, STORE_NAME } from "./catalog.ts";
 import {
-  getMemory, getReminders, getStoreProduct, getTodo, GROUP_NAME_SQL, id, insertOutboundChannelMessage, instant, now,
-  OWN_AREA_CLAUSE, queueIndexJob, recordMessageReaction, renameLifeArea, syncTodoReminders, USER_ID, userTimezone,
+  getMemory, getReminders, getStoreProduct, getTodo, getTodoComments, GROUP_NAME_SQL, id, insertOutboundChannelMessage,
+  insertTodoComment, instant, now, OWN_AREA_CLAUSE, queueIndexJob, recordMessageReaction, renameLifeArea, syncTodoReminders, USER_ID, userTimezone,
 } from "./db.ts";
 import {
   DERIVED_REMINDER, DERIVED_SCHEDULE, REPEATING_SUBTASK, STEP_SCHEDULE,
@@ -28,6 +28,7 @@ import { plainText, sendSms, type SmsSender } from "./messaging.ts";
 import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
 import { SOUL_MAX, toolInput, type ToolName } from "./schemas.ts";
+import { commentJson } from "./serializers.ts";
 import { sendSendblueReaction } from "./sendblue-service.ts";
 import { groupVoice, type ReplyMode, setGroupSettings, setGroupSoul, setOwnerSoul } from "./soul.ts";
 import {
@@ -1226,6 +1227,8 @@ export async function executeAgentTool(
     const threadId = input.thread_id as string;
     const thread = db.prepare(`
       SELECT t.id,t.channel,t.address,${GROUP_NAME_SQL} group_name FROM channel_threads t
+      // Oldest first, as the log reads; what was said about the task so far.
+      comments: getTodoComments(db, todo.id).map(commentJson),
       LEFT JOIN life_areas la ON la.thread_id=t.id
       WHERE t.id=? AND t.user_id=?
     `).get(threadId, USER_ID) as { id: string; channel: "web" | "sms"; address: string; group_name: string | null } | undefined;
@@ -1575,6 +1578,19 @@ export async function executeAgentTool(
     // not act on it as the owner's word (see `assertOwnWords`).
     if (context && found.attachments?.some(picture => picture.description)) {
       context.readUntrusted = true;
+  if (name === "add_todo_comment") {
+    const todoId = input.id as string;
+    // The same fence as every by-id read: from a group, another area's todo does not exist.
+    if (!scopedTodo(db, todoId, scope)) throw new Error(TODO_NOT_FOUND);
+    const comment = insertTodoComment(db, {
+      todoId,
+      body: input.body as string,
+      author: "agent",
+      authorName: scope ? context?.speakerName ?? null : null,
+    });
+    search.flushSoon();
+    return commentJson(comment);
+  }
     }
     return found;
   }

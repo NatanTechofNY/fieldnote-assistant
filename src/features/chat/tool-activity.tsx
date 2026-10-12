@@ -26,6 +26,7 @@ export const toolActivityMeta: Record<string, { active: string; done: string; so
   create_todo: { active: "Saving new task", done: "Task saved", source: "SQLite" },
   update_todo: { active: "Updating task", done: "Task updated", source: "SQLite" },
   set_todo_status: { active: "Changing task status", done: "Task status updated", source: "SQLite" },
+  add_todo_comment: { active: "Adding a note to a task", done: "Task note added", source: "SQLite" },
   delete_todo: { active: "Removing task", done: "Task removed", source: "SQLite" },
   get_memory: { active: "Opening memory", done: "Memory recalled", source: "SQLite" },
   create_memory: { active: "Saving memory", done: "Memory saved", source: "SQLite" },

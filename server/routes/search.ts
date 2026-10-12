@@ -134,9 +134,10 @@ export function registerSearchRoutes({ app, db, search }: RouteContext): void {
         FROM todos t LEFT JOIN categories c ON c.id=t.category_id
         LEFT JOIN life_areas la ON la.id=t.life_area_id
         WHERE t.user_id=? AND (lower(t.title) LIKE lower(?) ESCAPE '\\'
-          OR lower(COALESCE(t.notes,'')) LIKE lower(?) ESCAPE '\\')
+          OR lower(COALESCE(t.notes,'')) LIKE lower(?) ESCAPE '\\'
+          OR EXISTS (SELECT 1 FROM todo_comments tc WHERE tc.todo_id=t.id AND lower(tc.body) LIKE lower(?) ESCAPE '\\'))
         ORDER BY t.updated_at DESC,t.rowid DESC LIMIT ?
-      `).all(USER_ID, pattern, pattern, input.limit) as Array<Record<string, unknown>>;
+      `).all(USER_ID, pattern, pattern, pattern, input.limit) as Array<Record<string, unknown>>;
     }
     if (types.includes("memory")) {
       fallback.memory = db.prepare(`
