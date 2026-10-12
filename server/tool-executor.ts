@@ -200,7 +200,7 @@ export function getReflectionEvidence(
       SELECT t.*,c.name category_name,la.name life_area_name,la.slug life_area_slug
       FROM todos t LEFT JOIN categories c ON c.id=t.category_id
       JOIN life_areas la ON la.id=t.life_area_id AND la.thread_id IS NOT NULL
-      WHERE t.user_id=? AND t.status='done' AND t.completed_at>=? AND t.completed_at<?
+      WHERE t.user_id=? AND t.status='done' AND t.assistant_says=0 AND t.completed_at>=? AND t.completed_at<?
       ORDER BY t.completed_at DESC
     `).all(USER_ID, period.start, period.endExclusive) as TodoRow[]
     : [];

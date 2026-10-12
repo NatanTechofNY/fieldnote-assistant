@@ -9303,7 +9303,8 @@ describe("Sendblue provider", () => {
     const due = { due_at: `${today}T23:59:00.000Z`, reminder_at: `${today}T23:59:00.000Z` };
     const mine = (await api.post("/api/todos").send({ title: "Check how DocSearch MCP is doing", life_area_id: "area_work" }).expect(201)).body.data;
     const theirs = (await api.post("/api/todos").send({ title: "Clean kitchen", life_area_id: home.id }).expect(201)).body.data;
-    for (const todo of [mine, theirs]) await api.patch(`/api/todos/${todo.id}/status`).send({ status: "done" }).expect(200);
+    const says = (await api.post("/api/todos").send({ title: "Tell Sarah the sitter is booked", life_area_id: home.id, assistant_says: true }).expect(201)).body.data;
+    for (const todo of [mine, theirs, says]) await api.patch(`/api/todos/${todo.id}/status`).send({ status: "done" }).expect(200);
     const myOpen = (await api.post("/api/todos").send({ title: "Send the invoice", ...due }).expect(201)).body.data;
     await api.post("/api/todos").send({ title: "Empty trash", life_area_id: home.id, ...due }).expect(201);
 
@@ -9327,7 +9328,7 @@ describe("Sendblue provider", () => {
     assert.deepEqual(
       evidence.group_todos_done.map(todo => [todo.id, todo.life_area_name]),
       [[theirs.id, "Home"]],
-      "but the owner did it, so it is listed by chat for the end-of-day text",
+      "but the owner did it, so it is listed by chat for the end-of-day text, and a line the assistant was to say is not the owner's work",
     );
     assert.equal(evidence.candidate_totals.group_todos_done, 1);
     assert.deepEqual(evidence.memory_candidates, [], "and no group notes come with it");
@@ -9353,7 +9354,7 @@ describe("Sendblue provider", () => {
     const asked = agentCallingMany([reads[0]], "Kitchen and DocSearch.");
     await runSmsAgent(db, fakeSearch(db), RECIPIENT, "what did we finish today?", "SB_asked", { fetcher: asked.fetcher, inbound: { provider: "sendblue" } });
     const askedEvidence = toolOutputs(db, RECIPIENT).get_reflection_evidence.data as { todo_candidates: Array<{ id: string }> };
-    assert.deepEqual(askedEvidence.todo_candidates.map(todo => todo.id).sort(), [mine.id, theirs.id].sort());
+    assert.deepEqual(askedEvidence.todo_candidates.map(todo => todo.id).sort(), [mine.id, theirs.id, says.id].sort());
     assert.equal(asked.requests[0].algolia, undefined);
   });
 
