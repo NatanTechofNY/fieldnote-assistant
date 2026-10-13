@@ -20,6 +20,8 @@ import type { Db } from "./types.ts";
 export const SWEEP_IDLE_MS = 20 * 60_000;
 /** Fewer messages than this since the last sweep are not worth a completion. */
 export const SWEEP_MIN_MESSAGES = 4;
+/** The worker runs at most one sweep in this long, across every chat. */
+export const SWEEP_SPACING_MS = 5 * 60_000;
 /** The most messages one sweep reads, newest kept. */
 const SWEEP_TRANSCRIPT_LIMIT = 150;
 /** A first sweep of a thread reads back no further than this. */
@@ -52,6 +54,42 @@ function sweptThrough(db: Db, threadId: string): string {
   `).get(...keyRange(threadId)) as { through: string | null };
   const lookback = new Date(Date.now() - SWEEP_LOOKBACK_MS).toISOString();
   return row.through && row.through > lookback ? row.through : lookback;
+}
+
+export type SweepOutlook = {
+  /** Messages since the last sweep that a sweep would read. */
+  pendingMessages: number;
+  /** How many a sweep waits for. */
+  needed: number;
+  /** The earliest the next sweep can start, or null while there are too few messages for one. */
+  at: string | null;
+};
+
+/**
+ * When a thread's next sweep can start, read from the same rules the worker
+ * uses: enough new messages, twenty quiet minutes after the last one, and five
+ * minutes since any sweep ran. It is the earliest time, not a promise: the
+ * worker also waits while a reply is queued or someone is writing.
+ */
+export function sweepOutlook(db: Db, threadId: string): SweepOutlook {
+  const { count } = spokenSince(db, threadId, sweptThrough(db, threadId));
+  if (count < SWEEP_MIN_MESSAGES) return { pendingMessages: count, needed: SWEEP_MIN_MESSAGES, at: null };
+  const last = db.prepare(`
+    SELECT max(created_at) at FROM channel_messages WHERE thread_id=? AND role='user' AND direction='inbound'
+  `).get(threadId) as { at: string | null };
+  const ran = db.prepare(`
+    SELECT max(updated_at) at FROM scheduled_dispatches WHERE user_id=? AND kind='memory_sweep'
+  `).get(USER_ID) as { at: string | null };
+  const retry = db.prepare(`
+    SELECT max(available_at) at FROM scheduled_dispatches
+    WHERE idempotency_key>=? AND idempotency_key<? AND status='pending'
+  `).get(...keyRange(threadId)) as { at: string | null };
+  const times = [
+    last.at ? new Date(Date.parse(last.at) + SWEEP_IDLE_MS).toISOString() : null,
+    ran.at ? new Date(Date.parse(ran.at) + SWEEP_SPACING_MS).toISOString() : null,
+    retry.at,
+  ].filter((time): time is string => Boolean(time));
+  return { pendingMessages: count, needed: SWEEP_MIN_MESSAGES, at: times.sort().at(-1) ?? new Date().toISOString() };
 }
 
 /*
