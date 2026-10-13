@@ -5,7 +5,6 @@ import { describe, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import App from "../src/App";
 import { api } from "../src/api";
-import { ReminderWatcher } from "../src/components/ReminderWatcher";
 import { memoryAttachment, serializeAttachments, todoAttachment } from "../src/lib/agent-attachments";
 import { toZonedDateTimeLocal, zonedDateTimeLocalToIso } from "../src/lib/timezone";
 import type { Memory, Todo } from "../src/types";
@@ -931,7 +930,6 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       },
     },
   }));
-  if (url.includes("/api/reminders/due")) return new Response(JSON.stringify({ success: true, data: [] }));
   if (url.includes("/api/reflections/period")) return new Response(JSON.stringify({
     success: true,
     data: {
@@ -3412,89 +3410,6 @@ describe("session expiry", () => {
     } finally {
       location.restore();
     }
-  });
-});
-
-describe("ReminderWatcher", () => {
-  beforeEach(() => { window.localStorage.clear(); });
-
-  const due = {
-    id: "reminder_1",
-    todo_id: "todo_1",
-    todo_title: "Prepare the DevCon demo",
-    kind: "due",
-    slot: "primary",
-    scheduled_for: "2026-07-26T12:00:00.000Z",
-    status: "pending",
-  };
-
-  it("surfaces a due reminder once and lets it be dismissed", async () => {
-    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ success: true, data: [due] })));
-    try {
-      render(<ReminderWatcher />);
-      expect(await screen.findByText("Prepare the DevCon demo")).toBeInTheDocument();
-      expect(screen.getByText("Local reminder")).toBeInTheDocument();
-
-      await userEvent.click(screen.getByRole("button"));
-      await waitFor(() => expect(screen.queryByText("Local reminder")).not.toBeInTheDocument());
-    } finally {
-      vi.mocked(fetch).mockReset();
-    }
-  });
-
-  /*
-   * A due date leaves its reminder row pending forever, because a date is not a
-   * notification and nothing marks one delivered. Dismissal therefore has to
-   * outlive the tab, or every reload re-raises a toast already acknowledged.
-   */
-  it("keeps a dismissed reminder dismissed after a reload", async () => {
-    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ success: true, data: [due] })));
-    try {
-      const first = render(<ReminderWatcher />);
-      expect(await screen.findByText("Prepare the DevCon demo")).toBeInTheDocument();
-      await userEvent.click(screen.getByRole("button"));
-      await waitFor(() => expect(screen.queryByText("Local reminder")).not.toBeInTheDocument());
-      expect(JSON.parse(window.localStorage.getItem("fieldnote:dismissed-reminders") || "[]"))
-        .toEqual(["reminder_1"]);
-      first.unmount();
-
-      vi.mocked(fetch).mockClear();
-      render(<ReminderWatcher />);
-      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled());
-      expect(screen.queryByText("Local reminder")).not.toBeInTheDocument();
-    } finally {
-      vi.mocked(fetch).mockReset();
-    }
-  });
-
-  it("forgets a dismissal once the reminder stops being due", async () => {
-    window.localStorage.setItem("fieldnote:dismissed-reminders", JSON.stringify(["reminder_gone"]));
-    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ success: true, data: [due] })));
-    try {
-      render(<ReminderWatcher />);
-      // Pruning to what is still due stops the store growing by one entry for
-      // every reminder the account has ever had.
-      expect(await screen.findByText("Prepare the DevCon demo")).toBeInTheDocument();
-      await waitFor(() => expect(
-        JSON.parse(window.localStorage.getItem("fieldnote:dismissed-reminders") || "[]"),
-      ).toEqual([]));
-    } finally {
-      vi.mocked(fetch).mockReset();
-    }
-  });
-
-  it("stays quiet when nothing is due and when the poll fails", async () => {
-    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ success: true, data: [] })));
-    const quiet = render(<ReminderWatcher />);
-    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled());
-    expect(screen.queryByText("Local reminder")).not.toBeInTheDocument();
-    quiet.unmount();
-
-    vi.mocked(fetch).mockRejectedValue(new Error("offline"));
-    render(<ReminderWatcher />);
-    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled());
-    expect(screen.queryByText("Local reminder")).not.toBeInTheDocument();
-    vi.mocked(fetch).mockReset();
   });
 });
 
