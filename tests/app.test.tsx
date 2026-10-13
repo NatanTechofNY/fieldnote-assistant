@@ -1796,7 +1796,7 @@ it("shapes a group's voice from the Group chats section", async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings?tab=messaging"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=groups"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
@@ -1864,7 +1864,7 @@ it("schedules a group's check-ins, and a copy to the owner, from the Group chats
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
   const classifications = (await screen.findByText("Group chat")).closest(".settings-section")!;
 
-  await openTab(/Messaging/);
+  await openTab(/Group chats/);
   expect(await screen.findByText("Who can talk to the assistant")).toBeInTheDocument();
   expect(screen.queryByLabelText("Morning check-in for Work")).not.toBeInTheDocument();
 
@@ -3134,7 +3134,7 @@ it("keeps the settings tabs in the address and moves between them with the arrow
   renderAt("/settings?tab=connections");
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
   const tabs = screen.getAllByRole("tab").filter(tab => tab.id.startsWith("settings-tab-"));
-  expect(tabs).toHaveLength(5);
+  expect(tabs).toHaveLength(6);
   const connections = screen.getByRole("tab", { name: /Connections/ });
   expect(connections).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", connections.id);
@@ -3152,6 +3152,16 @@ it("keeps the settings tabs in the address and moves between them with the arrow
   expect(screen.getByRole("tab", { name: /Advanced/ })).toHaveAttribute("aria-selected", "true");
   await userEvent.keyboard("{Home}");
   expect(screen.getByText("Appearance")).toBeInTheDocument();
+});
+
+it("gives group chats a tab of their own, apart from the message provider", async () => {
+  renderAt("/settings?tab=messaging");
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  expect(screen.getByText("Message provider")).toBeInTheDocument();
+  expect(screen.queryByText("Who can talk to the assistant")).not.toBeInTheDocument();
+  await openTab(/Group chats/);
+  expect(await screen.findByText("Who can talk to the assistant")).toBeVisible();
+  expect(screen.getByRole("tab", { name: /Group chats/ })).toHaveAttribute("aria-selected", "true");
 });
 
 it("falls back to the first settings tab for a tab it does not know", async () => {

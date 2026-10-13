@@ -32,7 +32,7 @@ const themeStatus: Record<ThemePreference, string> = {
 const providerLabel: Record<SmsProvider, string> = { twilio: "Twilio", sendblue: "Sendblue" };
 
 /** The tab ids, in the order they run across the menu; `?tab=` carries one of them. */
-const SETTINGS_TAB_IDS = ["general", "assistant", "messaging", "connections", "advanced"] as const;
+const SETTINGS_TAB_IDS = ["general", "assistant", "messaging", "groups", "connections", "advanced"] as const;
 type SettingsTabId = (typeof SETTINGS_TAB_IDS)[number];
 
 /** Sections used to open and close, remembered here; they are always open now. */
@@ -273,6 +273,10 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
       id: "messaging", label: "Messaging", icon: MessagesSquare,
       status: activeConnection.configured ? providerLabel[activeProvider] : "Not connected",
       attention: !activeConnection.configured,
+    },
+    {
+      id: "groups", label: "Group chats", icon: Users,
+      status: data.notifications.smsProvider === "sendblue" ? `${trustedContacts.length} trusted` : "Needs iMessage",
     },
     { id: "connections", label: "Connections", icon: Plug, status: `${connectedServices} of 2` },
     { id: "advanced", label: "Advanced", icon: Wrench },
@@ -661,6 +665,8 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
           </div>
           </div>
         </SettingsSection>
+        </div>}
+        {visited.has("groups") && <div className="settings-stack" hidden={activeTab !== "groups"}>
         <SettingsSection
           sectionId="group-chats"
           title="Group chats"
