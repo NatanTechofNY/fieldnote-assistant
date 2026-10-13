@@ -9,6 +9,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import type { z } from "zod";
+import { attachmentFileIntact, getAttachment } from "./attachments.ts";
 import { id, now, USER_ID } from "./db.ts";
 import { groupMembers } from "./group-members.ts";
 import { getNotificationPreferences, getSendbluePublicConfig, getTwilioPublicConfig } from "./integrations.ts";
@@ -36,6 +37,7 @@ export type PageBlock = {
   items?: string[];
   slots?: string[];
   url?: string;
+  attachment_ids?: string[];
   range?: (typeof TODO_BLOCK_RANGES)[number];
   multi?: boolean;
   closes_at?: string;
@@ -194,6 +196,29 @@ function dropEmpty(block: Record<string, unknown>): PageBlock {
   return out as PageBlock;
 }
 
+/** The blocks that can carry saved pictures: an image block shows them all, a checklist or itinerary one per item. */
+const PICTURE_BLOCKS = new Set<PageBlockType>(["image", "checklist", "itinerary"]);
+
+function normalizePictures(block: PageBlock, need: (condition: unknown, message: string) => void): void {
+  if (!block.attachment_ids) return;
+  need(PICTURE_BLOCKS.has(block.type), "cannot carry pictures; use an image, checklist, or itinerary block");
+  const ids = block.attachment_ids.map(value => value.trim());
+  if (block.type === "image") {
+    block.attachment_ids = [...new Set(ids.filter(Boolean))];
+    if (!block.attachment_ids.length) delete block.attachment_ids;
+    return;
+  }
+  need(ids.length <= (block.items?.length ?? 0), "has more attachment_ids than items; give one per item, \"\" for an item with no picture");
+  while (ids.length && !ids.at(-1)) ids.pop();
+  if (ids.some(Boolean)) block.attachment_ids = ids;
+  else delete block.attachment_ids;
+}
+
+/** Every saved picture a page's blocks name, once each. */
+export function pageAttachmentIds(blocks: PageBlock[]): string[] {
+  return [...new Set(blocks.flatMap(block => block.attachment_ids ?? []).filter(Boolean))];
+}
+
 /**
  * Holds each block to the fields its type needs and fills in the ids the
  * interactive ones are addressed by. The tool schema allows every field on
@@ -222,8 +247,9 @@ export function normalizeBlocks(inputs: Array<z.infer<typeof pageBlockInput>>): 
         block.url = httpsOnly(block.url as string, `${where} url`);
         break;
       case "image":
-        need(block.url, "needs a url");
-        block.url = httpsOnly(block.url as string, `${where} url`);
+        // Either a public https picture, or saved ones the app serves itself; the checks for those are in `assertPagePictures`.
+        need(block.url || block.attachment_ids?.some(Boolean), "needs a url or attachment_ids");
+        if (block.url) block.url = httpsOnly(block.url, `${where} url`);
         break;
       case "todos":
         need(block.range, "needs a range: today, week, overdue, or done_week");
@@ -267,6 +293,7 @@ export function normalizeBlocks(inputs: Array<z.infer<typeof pageBlockInput>>): 
       delete block.id;
     }
     if (block.type !== "poll" && block.type !== "availability" && block.type !== "live_checklist") delete block.multi;
+    normalizePictures(block, need);
     return block;
   });
 }
@@ -293,6 +320,30 @@ export function assertRecordsAllowed(blocks: PageBlock[], audience: PageAudience
       `A shared page cannot show your own records (${offending.type} block). Name the group with thread_id so it shows that group's records, or make the page private.`,
     );
   }
+}
+
+/**
+ * Why a saved picture may not be on a page with this audience and area, or null
+ * when it may. A picture belongs to the chat it was sent in, and a page shows
+ * only its own chat's: the owner's own pictures on a private page, a group's on
+ * that group's page. A shared page is public by link, so the owner's own
+ * pictures (a ticket, a receipt) are never on one. The page's route asks again
+ * on every request, so a block saved before a rule changed cannot leak.
+ */
+export function pictureProblem(db: Db, attachmentId: string, audience: PageAudience, lifeAreaId: string | null): string | null {
+  const picture = getAttachment(db, attachmentId);
+  if (!picture) return `Picture ${attachmentId} was not found. Use an attachment id from get_memory or this turn's pictures.`;
+  const area = picture.life_area_id ?? null;
+  if (area !== (lifeAreaId ?? null)) {
+    return lifeAreaId
+      ? `Picture ${attachmentId} was sent in a different chat than this group's page, so it cannot go on it.`
+      : `Picture ${attachmentId} was sent in a group chat; a page made from your own chat can only show your own pictures.`;
+  }
+  if (audience === "shared" && !lifeAreaId) {
+    return "A shared page is public to anyone with its link, so it cannot show pictures from your own chat. Make the page private, or file it under a group so it shows that group's pictures.";
+  }
+  if (!attachmentFileIntact(db, picture)) return `Picture ${attachmentId} is no longer stored.`;
+  return null;
 }
 
 /* Pages -------------------------------------------------------------------- */

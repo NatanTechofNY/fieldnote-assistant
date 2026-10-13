@@ -8,7 +8,7 @@ import { USER_ID } from "./db.ts";
 import { groupIdOfAddress } from "./group-thread.ts";
 import { assertSendableImage } from "./image-output.ts";
 import {
-  createPage, getPage, getPageBySlug, hasVoting, normalizeBlocks, PageError, pageBlocks, pageIsLive, updatePage,
+  createPage, getPage, getPageBySlug, hasVoting, normalizeBlocks, PageError, pageAttachmentIds, pageBlocks, pageIsLive, pictureProblem, updatePage,
   type PageAudience, type PageBlock, type PageRow,
 } from "./pages.ts";
 import { OWNER_ONLY_TEMPLATES, templates, type TemplateScope } from "./page-templates/index.ts";
@@ -44,6 +44,14 @@ function scopeFor(db: Db, origin: PageOrigin, threadId: string | null | undefine
   }
   if (threadId) return groupThread(db, threadId);
   return { lifeAreaId: null, threadId: origin.threadId ?? null, groupId: null, groupName: null };
+}
+
+/** Saved pictures on a page must be the page's own chat's, and never the owner's on a page anyone can open. */
+export function assertPagePictures(db: Db, blocks: PageBlock[], audience: PageAudience, lifeAreaId: string | null): void {
+  for (const attachmentId of pageAttachmentIds(blocks)) {
+    const problem = pictureProblem(db, attachmentId, audience, lifeAreaId);
+    if (problem) throw new PageError(problem);
+  }
 }
 
 /** Every image is checked the way a picture sent in chat is: https, a picture type, and reachable. */
@@ -130,6 +138,7 @@ export async function createPageFromInput(
     throw new PageError("That page draws on the owner's private records, so it can only be the owner's own and cannot be shared or filed under a group");
   }
   await assertPageImages(blocks);
+  assertPagePictures(db, blocks, audience, scope.lifeAreaId);
   const page = createPage(db, {
     title, blocks, kind, template, audience,
     lifeAreaId: scope.lifeAreaId, threadId: scope.threadId, groupId: scope.groupId, expiresInDays,
@@ -157,7 +166,10 @@ export async function updatePageFromInput(db: Db, row: PageRow, input: z.infer<t
     return { ...block, id: `${block.type}${number}` };
   });
   const blocks = input.blocks ? normalizeBlocks(incoming as Array<z.infer<typeof pageBlockInput>>) : null;
-  if (blocks) await assertPageImages(blocks);
+  if (blocks) {
+    await assertPageImages(blocks);
+    assertPagePictures(db, blocks, row.audience, row.life_area_id);
+  }
   return updatePage(db, row, { title: input.title, blocks, expiresInDays: input.expires_in_days });
 }
 

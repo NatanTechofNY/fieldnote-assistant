@@ -1681,7 +1681,7 @@
                 "type": {
                   "type": "string",
                   "enum": ["heading", "text", "checklist", "link", "image", "todos", "poll", "availability", "live_checklist", "progress", "countdown", "itinerary", "stats", "habits", "rotation", "mood_chart", "mood_heatmap"],
-                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); todos use range; live_checklist/progress use todo_id; countdown uses when"
+                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); image also takes attachment_ids; itinerary/checklist may take attachment_ids, one per item; todos use range; live_checklist/progress use todo_id; countdown uses when"
                 },
                 "id": {
                   "type": ["string", "null"],
@@ -1709,6 +1709,13 @@
                   "type": ["string", "null"],
                   "description": "https URL for a link or image block"
                 },
+                "attachment_ids": {
+                  "type": ["array", "null"],
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Saved pictures (ids from get_memory attachments or the turn context's pictures; a ticket or receipt the person texted). On an image block, all of them are shown. On an itinerary or checklist block, one per item in the same order, \"\" for an item with none, so a ticket sits under its stop. Only your own chat's pictures, on a private page; in a group, only that group's"
+                },
                 "range": {
                   "type": ["string", "null"],
                   "enum": ["today", "week", "overdue", "done_week", null],
@@ -1735,7 +1742,7 @@
                   "description": "Days of history a habits, mood_chart, or mood_heatmap block covers, 7 to 366"
                 }
               },
-              "required": ["type", "id", "text", "items", "slots", "url", "range", "multi", "closes_at", "when", "todo_id", "days"],
+              "required": ["type", "id", "text", "items", "slots", "url", "attachment_ids", "range", "multi", "closes_at", "when", "todo_id", "days"],
               "additionalProperties": false
             },
             "description": "Blocks in order"
@@ -1818,7 +1825,7 @@
                 "type": {
                   "type": "string",
                   "enum": ["heading", "text", "checklist", "link", "image", "todos", "poll", "availability", "live_checklist", "progress", "countdown", "itinerary", "stats", "habits", "rotation", "mood_chart", "mood_heatmap"],
-                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); todos use range; live_checklist/progress use todo_id; countdown uses when"
+                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); image also takes attachment_ids; itinerary/checklist may take attachment_ids, one per item; todos use range; live_checklist/progress use todo_id; countdown uses when"
                 },
                 "id": {
                   "type": ["string", "null"],
@@ -1846,6 +1853,13 @@
                   "type": ["string", "null"],
                   "description": "https URL for a link or image block"
                 },
+                "attachment_ids": {
+                  "type": ["array", "null"],
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Saved pictures (ids from get_memory attachments or the turn context's pictures; a ticket or receipt the person texted). On an image block, all of them are shown. On an itinerary or checklist block, one per item in the same order, \"\" for an item with none, so a ticket sits under its stop. Only your own chat's pictures, on a private page; in a group, only that group's"
+                },
                 "range": {
                   "type": ["string", "null"],
                   "enum": ["today", "week", "overdue", "done_week", null],
@@ -1872,7 +1886,7 @@
                   "description": "Days of history a habits, mood_chart, or mood_heatmap block covers, 7 to 366"
                 }
               },
-              "required": ["type", "id", "text", "items", "slots", "url", "range", "multi", "closes_at", "when", "todo_id", "days"],
+              "required": ["type", "id", "text", "items", "slots", "url", "attachment_ids", "range", "multi", "closes_at", "when", "todo_id", "days"],
               "additionalProperties": false
             },
             "description": "Blocks in order"

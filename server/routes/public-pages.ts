@@ -1,11 +1,14 @@
 import type { Request, Response } from "express";
+import { existsSync } from "node:fs";
 import { authEnabled, throttleKey } from "../auth.ts";
+import { attachmentPath, getAttachment } from "../attachments.ts";
 import { claimChecklistItem, toggleChecklistItem } from "../page-live.ts";
 import { pageCalendar } from "../page-ics.ts";
 import { pageOgImage } from "../page-og.ts";
 import { noticeFor, renderPage, renderUnavailable } from "../page-render.ts";
 import {
-  cleanVoterName, getPageBySlug, isPreviewFetcher, PageError, pageIsLive, recordPageView, recordVote, type PageRow,
+  cleanVoterName, getPageBySlug, isPreviewFetcher, PageError, pageAttachmentIds, pageBlocks, pageIsLive, pictureProblem,
+  recordPageView, recordVote, type PageRow,
 } from "../pages.ts";
 import type { RouteContext } from "./context.ts";
 
@@ -15,6 +18,8 @@ import type { RouteContext } from "./context.ts";
  * What an unauthenticated caller can do here is bounded by this file:
  *   - read a page whose unguessable link they hold, if it is a shared one
  *     that has not expired or been revoked (an owner page redirects to sign-in);
+ *   - load a saved picture only through a page whose blocks name it, and only
+ *     one that belongs to that page's own chat (`pictureProblem`);
  *   - answer a poll or availability grid under a name they type;
  *   - tick or claim a step of a shared checklist on that page.
  * Nothing here reaches any record the page's own blocks do not name.
@@ -58,7 +63,7 @@ const signedInOwner = (res: Response): boolean => authEnabled() && res.locals.au
 const formCode = (error: PageError): string => (["name", "closed", "option", "full"].includes(error.code) ? error.code : "gone");
 
 function secure(res: Response): void {
-  res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+  res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' https: data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -141,6 +146,26 @@ export function registerPublicPageRoutes({ app, db, search }: RouteContext): voi
     secure(res);
     res.setHeader("Content-Disposition", 'attachment; filename="event.ics"');
     return res.type("text/calendar").send(calendar);
+  });
+
+  // A saved picture a page shows. The page decides who may see it: the same gate as the page, the picture named by one of its blocks, and from its own chat.
+  app.get("/p/:slug/pictures/:attachmentId", (req, res) => {
+    const page = open(req, res);
+    if (!page) return;
+    const attachmentId = String(req.params.attachmentId ?? "");
+    const picture = pageAttachmentIds(pageBlocks(page)).includes(attachmentId) ? getAttachment(db, attachmentId) : undefined;
+    const path = picture ? attachmentPath(db, picture) : undefined;
+    if (!picture || !path || pictureProblem(db, attachmentId, page.audience, page.life_area_id) || !existsSync(path)) {
+      return unavailable(res);
+    }
+    secure(res);
+    // Stored bytes are served as the type they were verified as, never sniffed into something a browser would run.
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+    res.setHeader("Content-Type", picture.content_type);
+    res.setHeader("Content-Disposition", "inline");
+    // A page can be revoked or its picture deleted, so the browser asks again each time; the ETag makes that cheap.
+    res.setHeader("Cache-Control", "private, no-cache");
+    return res.sendFile(path, { dotfiles: "allow" });
   });
 
   app.post("/p/:slug/name", (req, res) => {
