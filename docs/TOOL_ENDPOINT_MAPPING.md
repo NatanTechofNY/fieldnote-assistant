@@ -252,7 +252,7 @@ Six tools publish and manage web pages at an unguessable link, `/p/<slug>`; the 
 
 **Group scope.** From a group chat, `create_page` files the page under the group's area and thread, `update_page`, `list_pages`, `get_poll_results`, and `revoke_page` reach only that area's shared pages (`scopedPage`; a private page filed under the area is still the owner's), and `send_to_contact` is refused (`OWNER_ONLY_TOOLS`).
 
-**Public writes.** A page's visitors can type a name (`POST /p/:slug/name`), vote, or tick a shared checklist step. Names are remembered in an `fn_voter` cookie, one vote per name per question, and a checklist tick only succeeds for a subtask of the block's own todo. These routes are rate-limited per IP and send a strict CSP (no script runs on a page).
+**Public writes.** A page's visitors can type a name (`POST /p/:slug/name`), vote, or tick a shared checklist step. Names are remembered in an `fn_voter` cookie, one vote per name per question, and a checklist tick only succeeds for a subtask of the block's own todo. These routes are rate-limited per IP and send a strict CSP (no script runs on a page). Saved pictures (`GET /p/:slug/pictures/:id`) are throttled separately, with a higher limit.
 
 **Follow-through.** The worker closes a poll whose `closes_at` has passed by texting its result to the chat it was made in once (`results_posted_at`), nudges the people who have not voted once (`nudged_at`), and echoes votes and ticks back to the chat as they arrive (`page_events.echoed_at`). The digest can carry a link to today's page (Settings → Schedule → "Link today's page"), and a group can get a week-in-review page on Sunday evening (Settings → Group chats). Each of these claims its row before sending and reverts it if the send fails.
 

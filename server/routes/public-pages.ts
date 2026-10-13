@@ -28,33 +28,53 @@ import type { RouteContext } from "./context.ts";
 const SLUG = /^[A-Za-z0-9_-]{22}$/;
 const VOTER_COOKIE = "fn_voter";
 const WRITES_PER_WINDOW = 60;
+const PICTURES_PER_WINDOW = 600;
 const WINDOW_MS = 10 * 60 * 1000;
-const writes = new Map<string, number[]>();
 
 /**
- * Writes per page and caller, counted separately from sign-in failures. The
- * caller is the socket peer (`req.ip` follows X-Forwarded-For, which anyone can
- * set), so behind a proxy everyone shares one peer; keying on the page as well
- * keeps one busy or abusive link from silencing every other.
+ * A sliding-window count per page and caller. The caller is the socket peer
+ * (`req.ip` follows X-Forwarded-For, which anyone can set), so behind a proxy
+ * everyone shares one peer; keying on the page as well keeps one busy or
+ * abusive link from silencing every other.
  */
-function tooManyWrites(req: Request): boolean {
-  const key = `${req.params.slug ?? ""}|${throttleKey(req)}`;
-  const cutoff = Date.now() - WINDOW_MS;
-  const recent = (writes.get(key) ?? []).filter(at => at > cutoff);
-  if (writes.size > 2000) {
-    for (const [candidate, times] of writes) if (!times.some(at => at > cutoff)) writes.delete(candidate);
-  }
-  if (recent.length >= WRITES_PER_WINDOW) {
-    writes.set(key, recent);
-    return true;
-  }
-  writes.set(key, [...recent, Date.now()]);
-  return false;
+function throttle(initial: number): { exceeded: (req: Request) => boolean; clear: () => void; limit: (next: number) => void } {
+  let limit = initial;
+  const hits = new Map<string, number[]>();
+  return {
+    exceeded(req) {
+      const key = `${req.params.slug ?? ""}|${throttleKey(req)}`;
+      const cutoff = Date.now() - WINDOW_MS;
+      const recent = (hits.get(key) ?? []).filter(at => at > cutoff);
+      if (hits.size > 2000) {
+        for (const [candidate, times] of hits) if (!times.some(at => at > cutoff)) hits.delete(candidate);
+      }
+      if (recent.length >= limit) {
+        hits.set(key, recent);
+        return true;
+      }
+      hits.set(key, [...recent, Date.now()]);
+      return false;
+    },
+    clear: () => hits.clear(),
+    limit: next => { limit = next; },
+  };
 }
 
-/** For tests: forget every caller's recent writes. */
+// Writes are counted separately from sign-in failures, and from pictures: a page can hold forty, and one view loads them all.
+const writeThrottle = throttle(WRITES_PER_WINDOW);
+const pictureThrottle = throttle(PICTURES_PER_WINDOW);
+const tooManyWrites = writeThrottle.exceeded;
+
+/** For tests: forget every caller's recent writes and picture loads, and restore the picture limit. */
 export function resetPageWriteThrottle(): void {
-  writes.clear();
+  writeThrottle.clear();
+  pictureThrottle.clear();
+  pictureThrottle.limit(PICTURES_PER_WINDOW);
+}
+
+/** For tests: a limit low enough to reach without hundreds of requests. */
+export function setPictureLoadLimit(limit: number): void {
+  pictureThrottle.limit(limit);
 }
 
 /** A signed-in owner. With no password set everyone is "authenticated", so nobody counts as the owner. */
@@ -152,6 +172,11 @@ export function registerPublicPageRoutes({ app, db, search }: RouteContext): voi
   app.get("/p/:slug/pictures/:attachmentId", (req, res) => {
     const page = open(req, res);
     if (!page) return;
+    if (pictureThrottle.exceeded(req)) {
+      secure(res);
+      res.setHeader("Retry-After", String(WINDOW_MS / 1000));
+      return res.status(429).type("text/plain").send("Too many requests.");
+    }
     const attachmentId = String(req.params.attachmentId ?? "");
     const picture = pageAttachmentIds(pageBlocks(page)).includes(attachmentId) ? getAttachment(db, attachmentId) : undefined;
     const path = picture ? attachmentPath(db, picture) : undefined;

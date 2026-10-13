@@ -78,7 +78,7 @@ import { resetPageJobFailures, runPageJobs } from "../server/page-worker.ts";
 import { ensureTodayPage } from "../server/page-service.ts";
 import { pageCalendar } from "../server/page-ics.ts";
 import { closePollsNow, createPage, getPage, MAX_VOTERS, optionId, pageIsLive, revokePage, sweepPages } from "../server/pages.ts";
-import { resetPageWriteThrottle } from "../server/routes/public-pages.ts";
+import { resetPageWriteThrottle, setPictureLoadLimit } from "../server/routes/public-pages.ts";
 import { resetWebState } from "../server/web-service.ts";
 import { pullGifLine, rememberImages } from "../server/image-output.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
@@ -13842,6 +13842,15 @@ describe("hosted pages", () => {
     const anonymous = await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(200);
     assert.deepEqual(anonymous.body, Buffer.from([0xff, 0xd8, 0xff, 0x02]));
     assert.match((await api.get(`/p/${sharedSlug}`).expect(200)).text, new RegExp(`/p/${sharedSlug}/pictures/${groupPhoto.id}`));
+    // Pictures are throttled per page and caller (600 in ten minutes, well above what viewing a page of forty needs).
+    resetPageWriteThrottle();
+    setPictureLoadLimit(3);
+    for (let load = 0; load < 3; load += 1) await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(200);
+    const throttled = await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(429);
+    assert.ok(Number(throttled.headers["retry-after"]) > 0);
+    await api.get(`/p/${sharedSlug}`).expect(200);
+    resetPageWriteThrottle();
+    await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(200);
     delete process.env.APP_ADMIN_PASSWORD;
     await assert.rejects(run(db, "create_page", { blocks: [{ type: "image", attachment_ids: [ticket.id] }] }, group), /different chat/);
     await assert.rejects(
