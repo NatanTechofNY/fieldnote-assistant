@@ -1321,7 +1321,7 @@ export async function runWorkerOnce(
         }
         // Another message from the group is already queued: that turn answers
         // this one with it — unless the burst has been gathering long enough
-        // that its first message is owed an answer now.
+        // (in time or in messages) that it is owed an answer now.
         const next = group && !retrying && message.messageId ? nextTextWaiting(db, source, read, event, address, true) : undefined;
         /*
          * How long the burst has been gathering is measured from when the worker
