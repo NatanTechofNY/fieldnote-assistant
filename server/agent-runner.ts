@@ -190,6 +190,8 @@ const WRITE_TOOLS = new Set([
   // second. The same goes for a bubble sent mid-turn.
   "react_to_message", "send_message", "send_image",
   "send_to_group", "react_in_group", "send_to_contact",
+  // Keeping a picture is a file and a link on a memory; a retried turn should know it was done.
+  "save_pictures",
   // A page is a link in someone's chat; a retried turn that cannot see the first makes a second.
   "create_page", "update_page", "revoke_page",
   // Naming the group twice is harmless, but a retry should know it was done.
@@ -245,7 +247,7 @@ const PROGRESS_REACTIONS: Record<string, string> = {
   list_confluence_spaces: "📄", list_confluence_pages: "📄", get_confluence_page: "📄", list_confluence_comments: "📄",
   search_store_products: "🛒",
   web_search: "🌐", read_web_page: "🌐",
-  view_image: "🖼️",
+  view_image: "🖼️", save_pictures: "🖼️",
 };
 const GENERAL_PROGRESS_REACTION = "🔍";
 /**
@@ -1388,7 +1390,7 @@ function groupRoomContext(db: Db, threadId: string, areaId: string): Record<stri
     ...(roster ? { groupMembers: roster } : {}),
     groupCheckins: schedule || "none set; the owner can turn them on in the app",
     ...(keepsPictures ? {} : {
-      groupPictures: "Pictures sent here are read but not kept: a memory holds only the text read off one, so never say a picture is attached or saved.",
+      groupPictures: "Pictures sent here are read but not kept on arrival: a memory holds only the text read off one, so never say a picture is attached or saved unless save_pictures returned it. When someone asks you to save, keep, or store a picture, call save_pictures.",
     }),
   };
 }

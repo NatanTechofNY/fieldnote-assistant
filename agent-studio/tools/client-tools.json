@@ -416,7 +416,7 @@
           },
           "override_user_classification": {
             "type": "boolean",
-            "description": "True only when the user explicitly asked to replace a user-selected life area"
+            "description": "A top-level argument beside id and patch, never a key inside patch, and always sent: false unless the user explicitly asked to replace a user-selected life area"
           }
         },
         "required": ["id", "patch", "override_user_classification"],
@@ -732,7 +732,7 @@
           },
           "override_user_classification": {
             "type": "boolean",
-            "description": "True only when the user explicitly asked to replace a user-selected life area"
+            "description": "A top-level argument beside id and patch, never a key inside patch, and always sent: false unless the user explicitly asked to replace a user-selected life area"
           }
         },
         "required": ["id", "patch", "override_user_classification"],
@@ -1607,6 +1607,27 @@
           }
         },
         "required": ["url", "caption"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "save_pictures",
+      "description": "Keeps the newest picture(s) sent in this chat as files because someone asked you to save one; works even where the chat keeps none. Attaches to this turn's memories. Say saved only if in `saved`.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 4,
+            "description": "How many of the newest pictures to keep when they asked for several; null for the single newest"
+          }
+        },
+        "required": ["count"],
         "additionalProperties": false
       }
     }

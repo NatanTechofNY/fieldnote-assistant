@@ -1538,7 +1538,7 @@ describe("Agent Studio configuration sync", () => {
       agentId: "agent",
       fetcher,
     });
-    assert.equal(result.clientTools, 52);
+    assert.equal(result.clientTools, 53);
     assert.equal(result.preservedTools, 1, "unrelated tools survive, the search tool is rebuilt not preserved");
     assert.equal(result.searchIndices, 3);
     assert.deepEqual(calls.map(call => call.method), ["GET", "PATCH", "POST"]);
@@ -1597,7 +1597,7 @@ describe("Agent Studio configuration sync", () => {
       assert.deepEqual(controls.facets.default, expected, `${index.index} exposes only safe facets`);
       assert.deepEqual(parameters.facets, expected, `${index.index} requests the same set it allows`);
     }
-    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 52);
+    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 53);
     assert.ok(!patch.tools.some(tool => tool.name === "list_memories"));
     assert.ok(patch.tools.some(tool => tool.name === "list_jira_issues" && "inputSchema" in tool));
     assert.ok(patch.tools.some(tool => tool.name === "create_memory" && "inputSchema" in tool));
@@ -2669,7 +2669,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
     const declared = Object.keys(toolInput);
-    assert.equal(declared.length, 52, "the tool contract changed; extend this test with it");
+    assert.equal(declared.length, 53, "the tool contract changed; extend this test with it");
     // The Atlassian tools read a remote system rather than SQLite, so they are
     // exercised against a stubbed site in their own block instead of here, as
     // are the shopping tools, which read the store catalog, and the web tools.
@@ -2843,6 +2843,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
     assert.match((await call("react_in_group", { thread_id: "thread_ctx", message_id: "msg_ctx", reaction: "love" }, 400)).error, /not a text conversation/);
     await call("send_to_group", { thread_id: "thread_ctx", text: null, image_url: null, reply_to_message_id: null }, 400);
 
+    assert.match((await call("save_pictures", { count: null }, 400)).error, /text conversation/);
     await call("delete_memory", { id: memory.id }, 409);
     assert.equal((await call("delete_memory", { id: memory.id, confirmed: true })).data.id, memory.id);
     await call("delete_todo", { id: created.id }, 409);
@@ -2861,6 +2862,8 @@ describe("agent tools over /api/agent/tools/:name", () => {
       ...web,
       // Exercised with a stubbed GIPHY and image host in the web tools block.
       "find_gif", "send_image",
+      // Exercised in the pictures block; the browser has no chat to take a picture from.
+      "save_pictures",
       // Exercised in and out of a group in their own block.
       "update_soul", "update_group_settings",
       // Exercised in the hosted pages block.
@@ -8218,6 +8221,185 @@ describe("Sendblue provider", () => {
         ...context, turnAttachmentIds: [picture.id],
       }) as { attachments: unknown[] };
       assert.equal(reworded.attachments.length, 1);
+    });
+
+    describe("save_pictures", () => {
+      const tools = { flushSoon() {} };
+      type Saved = { saved: Array<{ id: string; description: string | null; kind: string }>; failed: Array<{ reason: string }>; attached_to_memory_ids: string[] };
+
+      /** A group that keeps no pictures on arrival, as Goopers does. */
+      function quietGroup(db: Db, threadId: string) {
+        const made = groupContext(db, threadId);
+        db.prepare("UPDATE life_areas SET keep_pictures=0 WHERE id=?").run(made.area.id);
+        return made.context;
+      }
+
+      it("keeps a picture someone asks for later, in a group that keeps none, and attaches it to the memory written this turn", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const context = quietGroup(db, "thread_save_later");
+        const messageId = fileInbound(db, context.threadId, "Natella ticket\n[Image (document): Order #37654940 General Admission]", "SB_ticket", [receipt]);
+        fileInbound(db, context.threadId, "Goop, save this image for this group", "SB_ask");
+        let downloads = 0;
+        const pictureFetcher: typeof fetch = async () => { downloads += 1; return new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } }); };
+        const turn: ToolTurnContext = { ...context, pictureFetcher };
+
+        // The order the model took in production: the memory first, the picture after.
+        const memory = await executeAgentTool(db, tools, "create_memory", { title: "Tickets", content: "GA for Cementa", kind: "note" }, turn) as { id: string; attachments: unknown[] };
+        assert.deepEqual(memory.attachments, [], "nothing was kept on arrival");
+        const result = await executeAgentTool(db, tools, "save_pictures", { count: null }, turn) as Saved;
+
+        assert.equal(downloads, 1);
+        assert.equal(result.saved.length, 1);
+        assert.deepEqual(result.failed, []);
+        assert.deepEqual(result.attached_to_memory_ids, [memory.id], "the memory written earlier carries it");
+        assert.equal(result.saved[0].kind, "document");
+        assert.match(String(result.saved[0].description), /Order #37654940/, "what was read off it travels with the file");
+        const row = db.prepare("SELECT channel_message_id,thread_id FROM attachments WHERE id=?").get(result.saved[0].id) as { channel_message_id: string; thread_id: string };
+        assert.equal(row.channel_message_id, messageId);
+        assert.equal(row.thread_id, context.threadId);
+        assert.equal(readdirSync(scratch).length, 1, "the file is on disk");
+        assert.equal(turn.readUntrusted, true, "the words in it are not the asker's");
+
+        // Called first, the picture is attached to the memory written after it.
+        const second = quietGroup(db, "thread_save_first");
+        fileInbound(db, second.threadId, "[Image: a dog]", "SB_dog", [`${receipt}?dog`]);
+        const secondTurn: ToolTurnContext = { ...second, pictureFetcher };
+        await executeAgentTool(db, tools, "save_pictures", { count: 1 }, secondTurn);
+        const after = await executeAgentTool(db, tools, "create_memory", { title: "Dog", content: "a dog", kind: "note" }, secondTurn) as { attachments: unknown[] };
+        assert.equal(after.attachments.length, 1);
+      });
+
+      it("saves the newest pictures up to count, and reuses one it already holds", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const context = quietGroup(db, "thread_save_count");
+        const bytes = new Map<string, Buffer>();
+        for (const [index, handle] of ["SB_old", "SB_mid", "SB_new"].entries()) {
+          const url = `${receipt}?n=${index}`;
+          bytes.set(url, Buffer.from(`picture ${index}`));
+          fileInbound(db, context.threadId, `[Image: picture ${index}]`, handle, [url]);
+        }
+        let downloads = 0;
+        const pictureFetcher: typeof fetch = async input => {
+          downloads += 1;
+          return new Response(new Uint8Array(bytes.get(String(input)) ?? jpeg), { headers: { "content-type": "image/jpeg" } });
+        };
+        const turn: ToolTurnContext = { ...context, pictureFetcher };
+
+        const two = await executeAgentTool(db, tools, "save_pictures", { count: 2 }, turn) as Saved;
+        assert.deepEqual(two.saved.map(item => item.description), ["picture 2", "picture 1"], "the newest two, newest first");
+        assert.equal(downloads, 2);
+        const again = await executeAgentTool(db, tools, "save_pictures", { count: 2 }, { ...context, pictureFetcher }) as Saved;
+        assert.deepEqual(again.saved.map(item => item.id), two.saved.map(item => item.id), "the same rows, not copies");
+        assert.equal(downloads, 2, "nothing is downloaded twice");
+        assert.equal((db.prepare("SELECT count(*) n FROM attachments").get() as { n: number }).n, 2);
+
+        await assert.rejects(() => executeAgentTool(db, tools, "save_pictures", { count: 0 }, turn), "a count below one is refused");
+        await assert.rejects(() => executeAgentTool(db, tools, "save_pictures", { count: 5 }, turn), "and so is one above four");
+      });
+
+      it("fails the call when no picture could be fetched, and reports the one that failed beside the one that did not", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const context = quietGroup(db, "thread_save_gone");
+        fileInbound(db, context.threadId, "[Picture attached — it could not be viewed]", "SB_gone", [`${receipt}?gone`]);
+        const pictureFetcher: typeof fetch = async () => new Response("expired", { status: 404 });
+        const turn: ToolTurnContext = { ...context, pictureFetcher };
+        // A call that keeps nothing is a failed call, so the turn does not count it as a record it changed.
+        await assert.rejects(() => executeAgentTool(db, tools, "save_pictures", { count: null }, turn), /No picture could be saved/);
+        assert.equal((db.prepare("SELECT count(*) n FROM attachments").get() as { n: number }).n, 0);
+        assert.equal(readdirSync(scratch).length, 0);
+        assert.deepEqual(turn.turnAttachmentIds ?? [], []);
+
+        // Two in one message: the newest is gone, the one before it is not.
+        fileInbound(db, context.threadId, "[Image: first]\n[Image: second]", "SB_two", [`${receipt}?one`, `${receipt}?two`]);
+        const flaky: typeof fetch = async input => String(input).endsWith("?two")
+          ? new Response("expired", { status: 410 })
+          : new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const partial = await executeAgentTool(db, tools, "save_pictures", { count: 2 }, { ...context, pictureFetcher: flaky }) as Saved;
+        assert.deepEqual(partial.saved.map(item => item.description), ["first"]);
+        assert.equal(partial.failed.length, 1);
+      });
+
+      it("takes the last picture of the newest message, and skips a deleted one and anything over a week old", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const context = quietGroup(db, "thread_save_order");
+        const pictureFetcher: typeof fetch = async () => new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const old = fileInbound(db, context.threadId, "[Image: ancient]", "SB_ancient", [`${receipt}?ancient`]);
+        db.prepare("UPDATE channel_messages SET created_at=? WHERE id=?").run(new Date(Date.now() - 8 * 86_400_000).toISOString(), old);
+        fileInbound(db, context.threadId, "[Image: a]\n[Image: b]\n[Image: c]", "SB_three", [`${receipt}?a`, `${receipt}?b`, `${receipt}?c`]);
+
+        const one = await executeAgentTool(db, tools, "save_pictures", { count: null }, { ...context, pictureFetcher }) as Saved;
+        assert.deepEqual(one.saved.map(item => item.description), ["c"], "the one sent last");
+        const two = await executeAgentTool(db, tools, "save_pictures", { count: 2 }, { ...context, pictureFetcher }) as Saved;
+        assert.deepEqual(two.saved.map(item => item.description), ["c", "b"]);
+        const all = await executeAgentTool(db, tools, "save_pictures", { count: 4 }, { ...context, pictureFetcher }) as Saved;
+        assert.deepEqual(all.saved.map(item => item.description), ["c", "b", "a"], "and the week-old one is not reached");
+
+        // Deleting one from the gallery keeps it out of the next request, though its link still works.
+        deleteAttachment(db, one.saved[0].id);
+        const after = await executeAgentTool(db, tools, "save_pictures", { count: 4 }, { ...context, pictureFetcher }) as Saved;
+        assert.deepEqual(after.saved.map(item => item.description), ["b", "a"]);
+      });
+
+      it("reports the memories that hold the picture, whether it was linked now or kept on arrival, and links a reworded memory but not a retagged one", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const context = quietGroup(db, "thread_save_report");
+        fileInbound(db, context.threadId, "[Image: ticket]", "SB_ticket2", [`${receipt}?ticket`]);
+        const pictureFetcher: typeof fetch = async () => new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const turn: ToolTurnContext = { ...context, pictureFetcher };
+        const reworded = await executeAgentTool(db, tools, "create_memory", { title: "A", content: "a", kind: "note" }, turn) as { id: string };
+        const other = await executeAgentTool(db, tools, "create_memory", { title: "B", content: "b", kind: "note" }, { ...context }) as { id: string };
+        await executeAgentTool(db, tools, "update_memory", { id: other.id, patch: { tags: ["x"] } }, turn);
+        await executeAgentTool(db, tools, "update_memory", { id: reworded.id, patch: { content: "a again" } }, turn);
+        assert.deepEqual(turn.memoriesWritten, [reworded.id], "listed once, and a tag change is not a write about the picture");
+
+        const first = await executeAgentTool(db, tools, "save_pictures", { count: null }, turn) as Saved;
+        assert.deepEqual(first.attached_to_memory_ids, [reworded.id]);
+        const again = await executeAgentTool(db, tools, "save_pictures", { count: null }, turn) as Saved;
+        assert.deepEqual(again.attached_to_memory_ids, [reworded.id], "already attached is still attached");
+      });
+
+      it("refuses an app-composed turn, and attaches nothing to a group's memory from the owner's own chat", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const pictureFetcher: typeof fetch = async () => new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const { area, context: group } = groupContext(db, "thread_save_group_memory");
+        const owner = ownerContext(db, "thread_save_owner");
+        fileInbound(db, owner.threadId, "[Image: private]", "SB_private2", [`${receipt}?private`]);
+        await assert.rejects(
+          () => executeAgentTool(db, tools, "save_pictures", { count: null }, { ...owner, pictureFetcher, internal: true, appTurn: "follow_up_x" }),
+          /the app writing/,
+        );
+
+        const turn: ToolTurnContext = { ...owner, pictureFetcher };
+        const misfiled = await executeAgentTool(db, tools, "create_memory", {
+          title: "Misfiled", content: "x", kind: "note", life_area_id: area.id,
+        }, turn) as { id: string };
+        const result = await executeAgentTool(db, tools, "save_pictures", { count: null }, turn) as Saved;
+        assert.deepEqual(result.attached_to_memory_ids, [], "the owner's private picture is not handed to the group's memory");
+        const read = await executeAgentTool(db, tools, "get_memory", { id: misfiled.id }, group) as { attachments: unknown[] };
+        assert.deepEqual(read.attachments, []);
+      });
+
+      it("never reaches a picture sent in another chat", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const context = quietGroup(db, "thread_save_mine");
+        const other = groupContext(db, "thread_save_other").context;
+        fileInbound(db, other.threadId, "[Image: their receipt]", "SB_theirs", [`${receipt}?theirs`]);
+        let downloads = 0;
+        const pictureFetcher: typeof fetch = async () => { downloads += 1; return new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } }); };
+        await assert.rejects(
+          () => executeAgentTool(db, tools, "save_pictures", { count: null }, { ...context, pictureFetcher }),
+          /No picture has been sent in this chat/,
+        );
+        assert.equal(downloads, 0);
+        assert.equal((db.prepare("SELECT count(*) n FROM attachments").get() as { n: number }).n, 0);
+      });
     });
 
     it("writes a picture again when its file is gone or cut short, and ties a message that has no provider id", () => {
