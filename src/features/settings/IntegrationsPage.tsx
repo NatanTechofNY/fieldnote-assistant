@@ -154,8 +154,20 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
     onSuccess: (updated) => { refresh(); notify(`Messages now send through ${providerLabel[updated.smsProvider]}`); },
     onError: (mutationError: Error) => notify(mutationError.message),
   });
+  /*
+   * The server takes the whole notification record in one PUT, and the schedule
+   * and the group chats now live on separate tabs. Each save therefore sends
+   * its own fields over what the server already has, never the other tab's
+   * unsaved edits, so a half-finished change on one tab cannot be persisted by
+   * pressing save on the other.
+   */
+  const saved = (): Parameters<typeof api.updateNotifications>[0] => {
+    const { optedOutAt: _optedOutAt, smsProvider: _smsProvider, ...rest } = data.notifications;
+    return rest;
+  };
   const preferences = useMutation({
     mutationFn: () => api.updateNotifications({
+      ...saved(),
       smsEnabled,
       recipientPhone: recipientPhone || null,
       timezone,
@@ -166,12 +178,15 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
       linkTodayPage,
       quietHoursStart: quietStart || null,
       quietHoursEnd: quietEnd || null,
-      trustedContacts,
-      groupAllowAll,
       eveningCheckinTime: eveningEnabled ? eveningTime : null,
       eveningCheckinPrompt: eveningAsk.trim() || null,
     }),
     onSuccess: () => { refresh(); notify("Messaging schedule saved"); },
+    onError: (mutationError: Error) => notify(mutationError.message),
+  });
+  const groupAccess = useMutation({
+    mutationFn: () => api.updateNotifications({ ...saved(), trustedContacts, groupAllowAll }),
+    onSuccess: () => { refresh(); notify("Group chat access saved"); },
     onError: (mutationError: Error) => notify(mutationError.message),
   });
   // Contacts are staged here and saved with the rest of the schedule, so a typo
@@ -281,7 +296,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
     },
     {
       id: "groups", label: "Group chats", icon: Users,
-      status: data.notifications.smsProvider === "sendblue" ? `${trustedContacts.length} trusted` : "Needs iMessage",
+      status: data.sendblue.configured ? `${trustedContacts.length} trusted` : "Needs iMessage",
     },
     { id: "connections", label: "Connections", icon: Plug, status: `${connectedServices} of 2` },
     { id: "advanced", label: "Advanced", icon: Wrench },
@@ -754,8 +769,8 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             </div>
             <div className="delivery-footer">
               <span><Database size={12}/>Saved with the SMS schedule</span>
-              <button className="button primary" disabled={preferences.isPending} onClick={() => preferences.mutate()}>
-                {preferences.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save who can talk
+              <button className="button primary" disabled={groupAccess.isPending} onClick={() => groupAccess.mutate()}>
+                {groupAccess.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save who can talk
               </button>
             </div>
           </div>

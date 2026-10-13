@@ -1849,6 +1849,29 @@ it("saves the owner's Soul and tags preference memories", async () => {
   expect(await screen.findByText("Tagged 2 memories as preferences")).toBeInTheDocument();
 });
 
+it("saves each tab's own fields only, so staged edits on the other tab are not persisted", async () => {
+  window.localStorage.clear();
+  notificationSaves.length = 0;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/settings?tab=schedule"]}><App /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  // An unsaved edit on Schedule...
+  fireEvent.change(await screen.findByPlaceholderText("+17185551234"), { target: { value: "+17185550000" } });
+  // ...is not sent when the group tab saves.
+  await openTab(/Group chats/);
+  fireEvent.change(screen.getByPlaceholderText("Sarah"), { target: { value: "Sarah" } });
+  fireEvent.change(screen.getByPlaceholderText("+17185550123"), { target: { value: "+17185550123" } });
+  await userEvent.click(screen.getByRole("button", { name: /Add trusted contact/ }));
+  await userEvent.click(screen.getByRole("button", { name: /Save who can talk/ }));
+  await waitFor(() => expect(notificationSaves).toHaveLength(1));
+  expect(notificationSaves[0].trustedContacts).toEqual([{ phone: "+17185550123", name: "Sarah" }]);
+  expect(notificationSaves[0].recipientPhone).toBe(null);
+});
+
 /**
  * Everything per group lives in the Group chats section: who may talk there,
  * and each group's check-ins. A switch saves at once with the remembered time.
