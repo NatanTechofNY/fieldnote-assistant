@@ -44,7 +44,7 @@ function SweepList({ sweeps, timezone }: { sweeps: SweepRun[]; timezone: string 
   return <ol className="background-sweeps">
     {sweeps.map(sweep => <li key={sweep.id} className={sweep.status === "failed" ? "failed" : undefined}>
       <div className="background-sweep-head">
-        <time>{friendlyDate(sweep.at, timezone)}</time>
+        <time title={`Read messages through ${friendlyDate(sweep.at, timezone)}`}>{friendlyDate(sweep.ranAt, timezone)}</time>
         <span className="badge">{sweep.status === "failed" ? "failed" : sweep.status === "sent" ? kept(sweep) : sweep.status}</span>
       </div>
       {sweep.status === "failed" && sweep.error && <p className="background-error">{sweep.error}</p>}
@@ -57,6 +57,34 @@ function SweepList({ sweeps, timezone }: { sweeps: SweepRun[]; timezone: string 
       {sweep.status === "sent" && !sweep.changes.length && sweep.summary && <p className="background-summary">{sweep.summary}</p>}
     </li>)}
   </ol>;
+}
+
+function nextSweepText(next: BackgroundChat["nextSweep"], timezone: string): string {
+  if (!next) return "Starts once this chat has messages";
+  if (next.at === null) {
+    const more = next.needed - next.pendingMessages;
+    return `After ${more} more ${more === 1 ? "message" : "messages"} (${next.pendingMessages} of ${next.needed} new so far)`;
+  }
+  return Date.parse(next.at) <= Date.now()
+    ? "Due now; it runs as soon as the assistant is idle"
+    : `Not before ${friendlyDate(next.at, timezone)}`;
+}
+
+function SweepTimes({ chat, timezone }: { chat: BackgroundChat; timezone: string }) {
+  return <dl className="background-times">
+    <div title="The last time a sweep went through this chat, whether or not it found anything to keep">
+      <dt>Last read</dt>
+      <dd>{chat.lastReadAt ? friendlyDate(chat.lastReadAt, timezone) : "Never"}</dd>
+    </div>
+    <div title="The last time a sweep saved or changed a memory. Most reads keep nothing new, so this is usually older than the last read">
+      <dt>Last kept a fact</dt>
+      <dd>{chat.lastKeptAt ? friendlyDate(chat.lastKeptAt, timezone) : "Never"}</dd>
+    </div>
+    <div title="A sweep reads a chat once it has been quiet for twenty minutes after four or more new messages, and at most one runs every five minutes">
+      <dt>Next sweep</dt>
+      <dd>{nextSweepText(chat.nextSweep, timezone)}</dd>
+    </div>
+  </dl>;
 }
 
 function ChatCard({ chat, timezone }: { chat: BackgroundChat; timezone: string }) {
@@ -78,13 +106,12 @@ function ChatCard({ chat, timezone }: { chat: BackgroundChat; timezone: string }
         <strong>{chat.name}</strong>
         <small>{chat.kind === "owner" ? "Your own chat" : "Group chat"}</small>
       </div>
-      <span className="background-last">{last
-        ? <>Last read {friendlyDate(last.at, timezone)} · {kept(last)}</>
-        : "Not read yet"}</span>
+      <span className="background-last">{chat.lastReadAt ? <>Last read {friendlyDate(chat.lastReadAt, timezone)}{last ? <> · {kept(last)}</> : null}</> : "Not read yet"}</span>
     </header>
 
     <section>
       <h4><Brain size={13}/>Memory sweeps</h4>
+      <SweepTimes chat={chat} timezone={timezone}/>
       <SweepList sweeps={chat.sweeps} timezone={timezone}/>
     </section>
 

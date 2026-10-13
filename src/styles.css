@@ -2072,6 +2072,9 @@ tr:hover .attach-button,
 .background-sweeps ul li { display:flex; align-items:baseline; gap:7px; font-size:12px; }
 .background-sweeps a { color:var(--text); text-decoration:none; }
 .background-sweeps a:hover { color:var(--accent); }
+.background-times { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px 16px; margin:0 0 10px; }
+.background-times dt { color:var(--text-tertiary); font-size:11px; }
+.background-times dd { margin:2px 0 0; font-size:12px; color:var(--text-secondary); }
 .background-sweep-head { display:flex; align-items:center; gap:8px; }
 .background-sweep-head time { color:var(--text-tertiary); font-size:11px; }
 .background-sweep-head .badge { margin-left:auto; }

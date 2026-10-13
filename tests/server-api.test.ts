@@ -13513,7 +13513,7 @@ describe("background activity", () => {
     const body = (await api.get("/api/activity/background").expect(200)).body.data as {
       chats: Array<{
         id: string; kind: string; name: string; soul: string | null; profile: string | null; profileState: string;
-        sweeps: Array<{ status: string; summary: string | null; changes: Array<{ action: string; memoryId: string | null; title: string }> }>;
+        sweeps: Array<{ at: string; ranAt: string; status: string; summary: string | null; changes: Array<{ action: string; memoryId: string | null; title: string }> }>;
       }>;
       digests: Array<{ kind: string; label: string | null; draft: string | null }>;
     };
@@ -13529,7 +13529,78 @@ describe("background activity", () => {
     ], "a refused write kept nothing");
     assert.deepEqual([group.sweeps[0].status, group.sweeps[0].summary], ["sent", "Kept two facts."]);
     assert.deepEqual(body.digests.map(({ kind, label, draft }) => [kind, label, draft]), [["daily_digest", "2030-01-14", "Good morning."]]);
+    assert.equal(group.sweeps[0].ranAt, later, "the sweep shows when it ran; `at` is the newest message it read");
+    assert.equal(group.sweeps[0].at, stamp);
     assert.equal((db.prepare("SELECT total_changes() n").get() as { n: number }).n, before.n, "a read writes nothing");
+  });
+
+  it("reports a chat's last read and last kept over all its sweeps, not only the listed ones", async () => {
+    const { db, api } = fixture();
+    const t0 = "2030-01-14T12:00:00.000Z";
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_l',?,'sms','group:l','cnv_l',?,?),('thread_sweep_l',?,'sms','sweep:thread_l','cnv_sl',?,?)
+    `).run(USER_ID, t0, t0, USER_ID, t0, t0);
+    ensureGroupLifeArea(db, "thread_l", "Lifetime");
+    const dispatch = db.prepare(`
+      INSERT INTO scheduled_dispatches(id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at)
+      VALUES(?,?,'memory_sweep',?,?,?,1,?,?)
+    `);
+    // One early sweep kept a fact; ten later ones found nothing, and the newest one failed.
+    for (let i = 0; i < 10; i++) {
+      const at = new Date(Date.parse(t0) + (i + 1) * 3_600_000).toISOString();
+      dispatch.run(`d_${i}`, USER_ID, `memory_sweep:thread_l:m${i}`, at, "sent", at, at);
+    }
+    const failedAt = "2030-01-15T12:00:00.000Z";
+    dispatch.run("d_failed", USER_ID, "memory_sweep:thread_l:mf", failedAt, "failed", failedAt, failedAt);
+    const keptAt = "2030-01-14T12:30:00.000Z";
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('tool_k','thread_sweep_l','outbound','tool','create_memory','delivered',?,?,?),
+            ('tool_refused','thread_sweep_l','outbound','tool','create_memory','delivered',?,?,?)
+    `).run(
+      JSON.stringify({ input: {}, output: { success: true, data: { id: "m", title: "Kept" } } }), keptAt, keptAt,
+      JSON.stringify({ input: {}, output: { success: false, error: "No" } }), failedAt, failedAt,
+    );
+    const group = ((await api.get("/api/activity/background").expect(200)).body.data as {
+      chats: Array<{ kind: string; sweeps: unknown[]; lastReadAt: string | null; lastKeptAt: string | null }>;
+    }).chats.find(chat => chat.kind === "group")!;
+    assert.equal(group.sweeps.length, 8, "the list is bounded");
+    assert.equal(group.lastReadAt, new Date(Date.parse(t0) + 10 * 3_600_000).toISOString(), "the newest finished sweep, not the failed one");
+    assert.equal(group.lastKeptAt, keptAt, "an older write is still found, and a refused one is not a write");
+  });
+
+  it("says when a chat's next sweep can start, or how many messages it still needs", async () => {
+    const { db, api } = fixture();
+    const t0 = "2030-01-14T12:00:00.000Z";
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_n',?,'sms','group:n','cnv_n',?,?)
+    `).run(USER_ID, t0, t0);
+    ensureGroupLifeArea(db, "thread_n", "Next");
+    const say = (id: string, at: string) => db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES(?,'thread_n','inbound','user','hi','received','{}',?,?)
+    `).run(id, at, at);
+    const outlook = async () => ((await api.get("/api/activity/background").expect(200)).body.data as {
+      chats: Array<{ kind: string; nextSweep: { pendingMessages: number; needed: number; at: string | null } | null }>;
+    }).chats.find(chat => chat.kind === "group")!.nextSweep;
+    const base = Date.now();
+    const recent = (minutes: number) => new Date(base - minutes * 60_000).toISOString();
+
+    say("m1", recent(60)); say("m2", recent(59)); say("m3", recent(58));
+    assert.deepEqual(await outlook(), { pendingMessages: 3, needed: 4, at: null });
+
+    say("m4", recent(30));
+    // Quiet twenty minutes after the newest message.
+    assert.equal((await outlook())!.at, new Date(Date.parse(recent(30)) + 20 * 60_000).toISOString());
+
+    // A sweep that ran a minute ago holds every chat back five minutes from then.
+    db.prepare(`
+      INSERT INTO scheduled_dispatches(id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at)
+      VALUES('d_elsewhere',?,'memory_sweep','memory_sweep:thread_other:m',?,'sent',1,?,?)
+    `).run(USER_ID, recent(90), recent(1), recent(1));
+    assert.equal((await outlook())!.at, new Date(Date.parse(recent(1)) + 5 * 60_000).toISOString());
   });
 
   it("gives each sweep the rows of its own run, even when their windows overlap", async () => {
