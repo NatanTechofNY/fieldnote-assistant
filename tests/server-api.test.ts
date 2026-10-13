@@ -13470,7 +13470,7 @@ describe("background activity", () => {
     const body = (await api.get("/api/activity/background").expect(200)).body.data as {
       chats: Array<{
         id: string; kind: string; name: string; soul: string | null; profile: string | null; profileState: string;
-        sweeps: Array<{ status: string; summary: string | null; changes: Array<{ action: string; memoryId: string | null; title: string }> }>;
+        sweeps: Array<{ at: string; ranAt: string; status: string; summary: string | null; changes: Array<{ action: string; memoryId: string | null; title: string }> }>;
       }>;
       digests: Array<{ kind: string; label: string | null; draft: string | null }>;
     };
