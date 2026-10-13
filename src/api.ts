@@ -193,7 +193,6 @@ export const api = {
       }),
     }),
   reminders: () => request<Reminder[]>("/reminders"),
-  dueReminders: () => request<Reminder[]>("/reminders/due"),
   createReminder: (input: { todo_id: string; reminder_at: string; slot?: "primary" | "extra" }) =>
     request<Reminder>("/reminders", { method: "POST", body: JSON.stringify(input) }),
   updateReminder: (id: string, reminder_at: string) =>

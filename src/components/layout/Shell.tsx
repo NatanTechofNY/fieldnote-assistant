@@ -8,7 +8,6 @@ import { CommandPalette } from "../search/CommandPalette";
 import { AgentPanelContext, useAgentPanel, useAgentPanelState } from "../../lib/agent-panel";
 import { useDemoMode } from "../../lib/demo-mode";
 import { useGlobalShortcuts } from "../../lib/use-global-shortcuts";
-import { ReminderWatcher } from "../ReminderWatcher";
 import { ThemeToggle } from "../ui";
 import { AgentPanel } from "./AgentPanel";
 import { ConversationHistoryPage } from "../../features/history/ConversationHistoryPage";
@@ -100,7 +99,6 @@ function ShellBody() {
         <Route path="/setup" element={<SetupPage />} />
       </Routes></main>
       <AskLauncher onSearch={openSearch} />
-      <ReminderWatcher />
       <AgentPanel />
       {searchOpen && <CommandPalette
         onClose={() => setSearchOpen(false)}
