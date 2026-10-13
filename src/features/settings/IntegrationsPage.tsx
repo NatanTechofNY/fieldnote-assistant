@@ -32,7 +32,7 @@ const themeStatus: Record<ThemePreference, string> = {
 const providerLabel: Record<SmsProvider, string> = { twilio: "Twilio", sendblue: "Sendblue" };
 
 /** The tab ids, in the order they run across the menu; `?tab=` carries one of them. */
-const SETTINGS_TAB_IDS = ["general", "assistant", "messaging", "groups", "connections", "advanced"] as const;
+const SETTINGS_TAB_IDS = ["general", "organize", "assistant", "messaging", "schedule", "groups", "connections", "advanced"] as const;
 type SettingsTabId = (typeof SETTINGS_TAB_IDS)[number];
 
 /** Sections used to open and close, remembered here; they are always open now. */
@@ -268,11 +268,16 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   const connectedServices = [data.granola.configured, data.atlassian.configured].filter(Boolean).length;
   const tabs: SettingsTabDef[] = [
     { id: "general", label: "General", icon: SlidersHorizontal },
+    { id: "organize", label: "Organize", icon: Circle },
     { id: "assistant", label: "Assistant", icon: Bot, status: briefCount ? `${briefCount} ${briefCount === 1 ? "brief" : "briefs"}` : undefined },
     {
       id: "messaging", label: "Messaging", icon: MessagesSquare,
       status: activeConnection.configured ? providerLabel[activeProvider] : "Not connected",
       attention: !activeConnection.configured,
+    },
+    {
+      id: "schedule", label: "Schedule", icon: Clock3,
+      status: !smsEnabled ? "Paused" : digestEnabled ? humanTime(digestTime) : "Delivery on",
     },
     {
       id: "groups", label: "Group chats", icon: Users,
@@ -338,6 +343,8 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             {taskPreferences.isPending && <LoaderCircle className="spin" size={13}/>}
           </label>
         </SettingsSection>
+        </div>}
+        {visited.has("organize") && <div className="settings-stack" hidden={activeTab !== "organize"}>
         <SettingsSection
           sectionId="classifications"
           title="Classifications"
@@ -530,6 +537,8 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             </div>
           </div>}
         </SettingsSection>
+        </div>}
+        {visited.has("schedule") && <div className="settings-stack" hidden={activeTab !== "schedule"}>
         <SettingsSection
           sectionId="delivery-schedule"
           title="Delivery schedule"

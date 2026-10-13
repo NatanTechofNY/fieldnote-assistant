@@ -1640,7 +1640,8 @@ it("renders secure messaging and event integration settings", async () => {
   expect(window.localStorage.getItem("fieldnote:settings-sections")).toBeNull();
   await openTab(/Messaging/);
   expect(screen.getByText("Message provider")).toBeInTheDocument();
-  expect(screen.getByText("Delivery schedule")).toBeInTheDocument();
+  // The schedule is not a provider setting; it has a tab of its own.
+  expect(screen.queryByText("Delivery schedule")).not.toBeInTheDocument();
   expect(screen.getByText("Twilio SMS")).toBeInTheDocument();
   expect(screen.queryByDisplayValue(/secret/i)).not.toBeInTheDocument();
   // Sendblue is the other half of the toggle, and its form replaces Twilio's.
@@ -1651,6 +1652,8 @@ it("renders secure messaging and event integration settings", async () => {
   // the only place they are announced.
   expect(screen.getByText(/reply with a tapback instead of a message/)).toBeInTheDocument();
   expect(screen.getByLabelText("API key ID")).toHaveValue("");
+  await openTab(/Schedule/);
+  expect(screen.getByText("Delivery schedule")).toBeInTheDocument();
   // Every section is open: the schedule's controls are there without a click.
   expect(screen.getByRole("button", { name: /Save SMS schedule/ })).toBeVisible();
   await openTab(/Connections/);
@@ -1730,7 +1733,7 @@ it("badges a group chat's classification and renames it inline", async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=organize"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
@@ -1754,7 +1757,7 @@ it("saves the owner's evening check-in time with the SMS schedule", async () => 
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings?tab=messaging"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=schedule"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
@@ -1858,7 +1861,7 @@ it("schedules a group's check-ins, and a copy to the owner, from the Group chats
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=organize"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
@@ -3134,7 +3137,7 @@ it("keeps the settings tabs in the address and moves between them with the arrow
   renderAt("/settings?tab=connections");
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
   const tabs = screen.getAllByRole("tab").filter(tab => tab.id.startsWith("settings-tab-"));
-  expect(tabs).toHaveLength(6);
+  expect(tabs).toHaveLength(8);
   const connections = screen.getByRole("tab", { name: /Connections/ });
   expect(connections).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", connections.id);
@@ -3152,6 +3155,18 @@ it("keeps the settings tabs in the address and moves between them with the arrow
   expect(screen.getByRole("tab", { name: /Advanced/ })).toHaveAttribute("aria-selected", "true");
   await userEvent.keyboard("{Home}");
   expect(screen.getByText("Appearance")).toBeInTheDocument();
+});
+
+it("gives the schedule and the classifications tabs of their own", async () => {
+  renderAt("/settings");
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  expect(screen.getByText("Appearance")).toBeInTheDocument();
+  expect(screen.queryByText("Classifications")).not.toBeInTheDocument();
+  await openTab(/Organize/);
+  expect(await screen.findByText("Classifications")).toBeVisible();
+  await openTab(/Schedule/);
+  expect(await screen.findByText("Delivery schedule")).toBeVisible();
+  expect(screen.getByRole("tab", { name: /Schedule/ })).toHaveTextContent(/Delivery on|Paused|\d/);
 });
 
 it("gives group chats a tab of their own, apart from the message provider", async () => {
