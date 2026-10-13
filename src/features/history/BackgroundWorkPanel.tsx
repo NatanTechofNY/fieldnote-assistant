@@ -71,16 +71,14 @@ function nextSweepText(next: BackgroundChat["nextSweep"], timezone: string): str
 }
 
 function SweepTimes({ chat, timezone }: { chat: BackgroundChat; timezone: string }) {
-  const lastRead = chat.sweeps.find(sweep => sweep.status === "sent");
-  const lastKept = chat.sweeps.find(sweep => sweep.status === "sent" && sweep.changes.length > 0);
   return <dl className="background-times">
     <div title="The last time a sweep went through this chat, whether or not it found anything to keep">
       <dt>Last read</dt>
-      <dd>{lastRead ? friendlyDate(lastRead.ranAt, timezone) : "Never"}</dd>
+      <dd>{chat.lastReadAt ? friendlyDate(chat.lastReadAt, timezone) : "Never"}</dd>
     </div>
     <div title="The last time a sweep saved or changed a memory. Most reads keep nothing new, so this is usually older than the last read">
       <dt>Last kept a fact</dt>
-      <dd>{lastKept ? friendlyDate(lastKept.ranAt, timezone) : "Never"}</dd>
+      <dd>{chat.lastKeptAt ? friendlyDate(chat.lastKeptAt, timezone) : "Never"}</dd>
     </div>
     <div title="A sweep reads a chat once it has been quiet for twenty minutes after four or more new messages, and at most one runs every five minutes">
       <dt>Next sweep</dt>
@@ -108,9 +106,7 @@ function ChatCard({ chat, timezone }: { chat: BackgroundChat; timezone: string }
         <strong>{chat.name}</strong>
         <small>{chat.kind === "owner" ? "Your own chat" : "Group chat"}</small>
       </div>
-      <span className="background-last">{last
-        ? <>Last read {friendlyDate(last.ranAt, timezone)} · {kept(last)}</>
-        : "Not read yet"}</span>
+      <span className="background-last">{chat.lastReadAt ? <>Last read {friendlyDate(chat.lastReadAt, timezone)}{last ? <> · {kept(last)}</> : null}</> : "Not read yet"}</span>
     </header>
 
     <section>

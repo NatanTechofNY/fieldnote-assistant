@@ -767,6 +767,7 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
         id: "owner", kind: "owner", name: "You", soul: "- Dry humour.", profile: "People: wife Sarah.",
         profileUpdatedAt: "2026-07-28T09:00:00.000Z", profileState: "stale", lastProfileRun: null,
         nextSweep: { pendingMessages: 1, needed: 4, at: null },
+        lastReadAt: "2026-07-28T10:00:00.000Z", lastKeptAt: "2026-07-20T10:00:00.000Z",
         sweeps: [{
           id: "sweep_1", at: "2026-07-28T09:40:00.000Z", ranAt: "2026-07-28T10:00:00.000Z", status: "sent", error: null, summary: "Kept one fact.",
           changes: [{ action: "created", memoryId: "memory_1", title: "Sarah's birthday" }],
@@ -775,6 +776,7 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
         id: "area_group", kind: "group", name: "Sarah & me", soul: null, profile: null, profileUpdatedAt: null,
         profileState: "empty", lastProfileRun: null, sweeps: [],
         nextSweep: { pendingMessages: 5, needed: 4, at: "2099-01-01T12:00:00.000Z" },
+        lastReadAt: null, lastKeptAt: null,
       }],
       digests: [{
         id: "message_brief_request", kind: "digest_brief", label: "Morning Jira sweep", at: "2026-07-28T11:00:00.000Z",

@@ -13534,6 +13534,42 @@ describe("background activity", () => {
     assert.equal((db.prepare("SELECT total_changes() n").get() as { n: number }).n, before.n, "a read writes nothing");
   });
 
+  it("reports a chat's last read and last kept over all its sweeps, not only the listed ones", async () => {
+    const { db, api } = fixture();
+    const t0 = "2030-01-14T12:00:00.000Z";
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_l',?,'sms','group:l','cnv_l',?,?),('thread_sweep_l',?,'sms','sweep:thread_l','cnv_sl',?,?)
+    `).run(USER_ID, t0, t0, USER_ID, t0, t0);
+    ensureGroupLifeArea(db, "thread_l", "Lifetime");
+    const dispatch = db.prepare(`
+      INSERT INTO scheduled_dispatches(id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at)
+      VALUES(?,?,'memory_sweep',?,?,?,1,?,?)
+    `);
+    // One early sweep kept a fact; ten later ones found nothing, and the newest one failed.
+    for (let i = 0; i < 10; i++) {
+      const at = new Date(Date.parse(t0) + (i + 1) * 3_600_000).toISOString();
+      dispatch.run(`d_${i}`, USER_ID, `memory_sweep:thread_l:m${i}`, at, "sent", at, at);
+    }
+    const failedAt = "2030-01-15T12:00:00.000Z";
+    dispatch.run("d_failed", USER_ID, "memory_sweep:thread_l:mf", failedAt, "failed", failedAt, failedAt);
+    const keptAt = "2030-01-14T12:30:00.000Z";
+    db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES('tool_k','thread_sweep_l','outbound','tool','create_memory','delivered',?,?,?),
+            ('tool_refused','thread_sweep_l','outbound','tool','create_memory','delivered',?,?,?)
+    `).run(
+      JSON.stringify({ input: {}, output: { success: true, data: { id: "m", title: "Kept" } } }), keptAt, keptAt,
+      JSON.stringify({ input: {}, output: { success: false, error: "No" } }), failedAt, failedAt,
+    );
+    const group = ((await api.get("/api/activity/background").expect(200)).body.data as {
+      chats: Array<{ kind: string; sweeps: unknown[]; lastReadAt: string | null; lastKeptAt: string | null }>;
+    }).chats.find(chat => chat.kind === "group")!;
+    assert.equal(group.sweeps.length, 8, "the list is bounded");
+    assert.equal(group.lastReadAt, new Date(Date.parse(t0) + 10 * 3_600_000).toISOString(), "the newest finished sweep, not the failed one");
+    assert.equal(group.lastKeptAt, keptAt, "an older write is still found, and a refused one is not a write");
+  });
+
   it("says when a chat's next sweep can start, or how many messages it still needs", async () => {
     const { db, api } = fixture();
     const t0 = "2030-01-14T12:00:00.000Z";

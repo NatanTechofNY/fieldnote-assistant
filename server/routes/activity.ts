@@ -143,6 +143,29 @@ function sweepRuns(db: Db, threadId: string): SweepRun[] {
   });
 }
 
+/**
+ * When a thread was last read and last written to by a sweep, over all of its
+ * history rather than the few runs listed: a read is the newest sweep that
+ * finished, a write the newest memory a sweep saved or changed, which a run
+ * that failed afterwards may still have made.
+ */
+function sweepLifetime(db: Db, threadId: string): { lastReadAt: string | null; lastKeptAt: string | null } {
+  const read = db.prepare(`
+    SELECT max(updated_at) at FROM scheduled_dispatches
+    WHERE kind='memory_sweep' AND idempotency_key>=? AND idempotency_key<? AND status='sent'
+  `).get(...keyRange(`memory_sweep:${threadId}`)) as { at: string | null };
+  const sweepThread = db.prepare("SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address=?")
+    .get(USER_ID, `sweep:${threadId}`) as { id: string } | undefined;
+  const kept = sweepThread
+    ? db.prepare(`
+      SELECT max(created_at) at FROM channel_messages
+      WHERE thread_id=? AND role='tool' AND content IN ('create_memory','update_memory')
+        AND json_extract(metadata_json,'$.output.success')=1
+    `).get(sweepThread.id) as { at: string | null }
+    : { at: null };
+  return { lastReadAt: read.at, lastKeptAt: kept.at };
+}
+
 type ProfileRun = { at: string; status: string; note: string | null };
 
 function lastProfileRun(db: Db, owner: string): ProfileRun | null {
@@ -165,6 +188,8 @@ export type BackgroundChat = {
   lastProfileRun: ProfileRun | null;
   sweeps: SweepRun[];
   nextSweep: SweepOutlook | null;
+  lastReadAt: string | null;
+  lastKeptAt: string | null;
 };
 
 export type DigestDraft = {
@@ -235,6 +260,7 @@ export function registerActivityRoutes({ app, db }: RouteContext): void {
       lastProfileRun: lastProfileRun(db, USER_ID),
       sweeps: ownerThread ? sweepRuns(db, ownerThread.id) : [],
       nextSweep: ownerThread ? sweepOutlook(db, ownerThread.id) : null,
+      ...(ownerThread ? sweepLifetime(db, ownerThread.id) : { lastReadAt: null, lastKeptAt: null }),
     }, ...areas.map(area => {
       const stored = groupProfile(db, area.id);
       return {
@@ -248,6 +274,7 @@ export function registerActivityRoutes({ app, db }: RouteContext): void {
         lastProfileRun: lastProfileRun(db, area.id),
         sweeps: sweepRuns(db, area.thread_id),
         nextSweep: sweepOutlook(db, area.thread_id),
+        ...sweepLifetime(db, area.thread_id),
       };
     })];
     return success(res, { chats, digests: digestDrafts(db) });

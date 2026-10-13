@@ -434,6 +434,9 @@ export interface BackgroundChat {
   sweeps: SweepRun[];
   /** Null when the chat has no thread yet. `at` is null while too few new messages have come in for a sweep. */
   nextSweep: { pendingMessages: number; needed: number; at: string | null } | null;
+  /** When a sweep last finished reading this chat, and last saved or changed a memory, over all of its history. */
+  lastReadAt: string | null;
+  lastKeptAt: string | null;
 }
 
 export interface DigestDraft {
