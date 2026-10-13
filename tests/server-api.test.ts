@@ -14085,6 +14085,44 @@ describe("hosted pages", () => {
     assert.equal(getTodo(db, hidden.id)?.status, "pending");
   });
 
+  it("files a page researched on the web under a group on the next ask, as a shared copy", async () => {
+    const { db } = pageFixture();
+    const { areaId } = groupTurn(db, "thread_research");
+    // The researched page is the owner's first; a turn that used the web cannot name the group.
+    const researching = { ...ownerTurn(db, "plan Lisbon for thread_research"), readPages: true, readWeb: true };
+    const trip = await run(db, "create_page", {
+      title: "Lisbon", blocks: [{ type: "itinerary", items: ["9am | Belem Tower opens"] }, { type: "link", url: "https://example.com/belem", text: "Opening hours" }],
+    }, researching);
+    assert.equal(trip.audience, "owner");
+    await assert.rejects(
+      run(db, "create_page", { from_page_id: trip.id, thread_id: "thread_research", audience: "shared" }, researching), /read a web page/,
+    );
+    // Next turn, nothing read: the copy goes into the group, shared, so its members can open it.
+    const copy = await run(db, "create_page", { from_page_id: trip.id, thread_id: "thread_research", audience: "shared" }, ownerTurn(db, "put it in thread_research"));
+    assert.deepEqual([copy.audience, copy.life_area_id], ["shared", areaId]);
+    // Without audience the copy would stay private under the group, where nobody in it could open it.
+    const quiet = await run(db, "create_page", { from_page_id: trip.id, thread_id: "thread_research" }, ownerTurn(db, "put it in thread_research"));
+    assert.equal(quiet.audience, "owner");
+  });
+
+  it("holds a page to forty pictures, and keeps a removed group's pictures off the owner's pages", async () => {
+    const { api, db } = pageFixture();
+    ownerTurn(db);
+    const jpeg = (n: number) => Buffer.from([0xff, 0xd8, 0xff, n]);
+    const stage = (threadId: string, handle: string, n: number) => stageAttachment(db, {
+      threadId, providerMessageId: handle, sourceUrl: `https://cdn.sendblue.example/${handle}.jpg`, contentType: "image/jpeg", bytes: jpeg(n),
+    });
+    const own = Array.from({ length: 41 }, (_, index) => stage("thread_owner_pages", `SB_many_${index}`, index).id);
+    assert.match((await api.post("/api/pages").send({ blocks: [{ type: "image", attachment_ids: own.slice(0, 20) }, { type: "image", attachment_ids: own.slice(20) }] }).expect(400)).body.error, /at most 40 pictures/);
+    await api.post("/api/pages").send({ blocks: [{ type: "image", attachment_ids: own.slice(0, 40) }] }).expect(201);
+
+    // A group whose area was removed leaves pictures with no area; they are still the group's, not the owner's.
+    const { areaId } = groupTurn(db, "thread_gone");
+    const orphan = stage("thread_gone", "SB_orphan", 99);
+    db.prepare("UPDATE life_areas SET thread_id=NULL WHERE id=?").run(areaId);
+    assert.match((await api.post("/api/pages").send({ blocks: [{ type: "image", attachment_ids: [orphan.id] }] }).expect(400)).body.error, /group chat/);
+  });
+
   it("holds public input to what a page can take: odd notice codes, names, and a crowd", async () => {
     const { api, db } = pageFixture();
     const poll = await makePoll(api);

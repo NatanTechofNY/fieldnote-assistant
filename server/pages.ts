@@ -332,8 +332,12 @@ export function assertRecordsAllowed(blocks: PageBlock[], audience: PageAudience
  */
 export function pictureProblem(db: Db, attachmentId: string, audience: PageAudience, lifeAreaId: string | null): string | null {
   const picture = getAttachment(db, attachmentId);
-  if (!picture) return `Picture ${attachmentId} was not found. Use an attachment id from get_memory or this turn's pictures.`;
-  const area = picture.life_area_id ?? null;
+  if (!picture) {
+    return `Picture ${attachmentId} was not found. Use an attachment id from get_memory or this turn's pictures; if it was deleted, take it out of the block.`;
+  }
+  // A group's picture whose group has since been removed has no area, but it is still not the owner's own.
+  const thread = db.prepare("SELECT address FROM channel_threads WHERE id=?").get(picture.thread_id) as { address: string } | undefined;
+  const area = picture.life_area_id ?? (thread?.address.startsWith("group:") ? "group-without-area" : null);
   if (area !== (lifeAreaId ?? null)) {
     return lifeAreaId
       ? `Picture ${attachmentId} was sent in a different chat than this group's page, so it cannot go on it.`

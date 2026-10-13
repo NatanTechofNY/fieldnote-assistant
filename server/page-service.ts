@@ -46,9 +46,14 @@ function scopeFor(db: Db, origin: PageOrigin, threadId: string | null | undefine
   return { lifeAreaId: null, threadId: origin.threadId ?? null, groupId: null, groupName: null };
 }
 
+const MAX_PAGE_PICTURES = 40;
+
 /** Saved pictures on a page must be the page's own chat's, and never the owner's on a page anyone can open. */
 export function assertPagePictures(db: Db, blocks: PageBlock[], audience: PageAudience, lifeAreaId: string | null): void {
-  for (const attachmentId of pageAttachmentIds(blocks)) {
+  const ids = pageAttachmentIds(blocks);
+  // Each one is looked up whenever the page is drawn, so a page holds a bounded number.
+  if (ids.length > MAX_PAGE_PICTURES) throw new PageError(`A page can show at most ${MAX_PAGE_PICTURES} pictures; this one names ${ids.length}`);
+  for (const attachmentId of ids) {
     const problem = pictureProblem(db, attachmentId, audience, lifeAreaId);
     if (problem) throw new PageError(problem);
   }
