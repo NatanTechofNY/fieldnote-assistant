@@ -2,6 +2,7 @@ import { USER_ID } from "../db.ts";
 import { success } from "../http.ts";
 import { getNotificationPreferences } from "../integrations.ts";
 import { groupProfile, groupProfileStatus, ownerProfile, ownerProfileStatus, type ProfileState } from "../profile.ts";
+import { sweepOutlook, type SweepOutlook } from "../memory-sweep.ts";
 import { groupVoice, ownerSoul } from "../soul.ts";
 import type { Db } from "../types.ts";
 import type { RouteContext } from "./context.ts";
@@ -34,7 +35,10 @@ type SweepChange = { action: "created" | "updated"; memoryId: string | null; tit
 
 export type SweepRun = {
   id: string;
+  /** When the newest message it read was sent. */
   at: string;
+  /** When the sweep itself ran. */
+  ranAt: string;
   status: string;
   error: string | null;
   summary: string | null;
@@ -130,6 +134,7 @@ function sweepRuns(db: Db, threadId: string): SweepRun[] {
     return {
       id: dispatch.id,
       at: dispatch.scheduled_for,
+      ranAt: dispatch.updated_at,
       status: dispatch.status,
       error: dispatch.last_error,
       summary,
@@ -159,6 +164,7 @@ export type BackgroundChat = {
   profileState: ProfileState;
   lastProfileRun: ProfileRun | null;
   sweeps: SweepRun[];
+  nextSweep: SweepOutlook | null;
 };
 
 export type DigestDraft = {
@@ -228,6 +234,7 @@ export function registerActivityRoutes({ app, db }: RouteContext): void {
       profileState: ownerProfileStatus(db),
       lastProfileRun: lastProfileRun(db, USER_ID),
       sweeps: ownerThread ? sweepRuns(db, ownerThread.id) : [],
+      nextSweep: ownerThread ? sweepOutlook(db, ownerThread.id) : null,
     }, ...areas.map(area => {
       const stored = groupProfile(db, area.id);
       return {
@@ -240,6 +247,7 @@ export function registerActivityRoutes({ app, db }: RouteContext): void {
         profileState: groupProfileStatus(db, area.id),
         lastProfileRun: lastProfileRun(db, area.id),
         sweeps: sweepRuns(db, area.thread_id),
+        nextSweep: sweepOutlook(db, area.thread_id),
       };
     })];
     return success(res, { chats, digests: digestDrafts(db) });

@@ -27,7 +27,7 @@ import { isSmsProviderConnected, plainText, sendSms, startTypingIndicator } from
 import { openSubtasks, reopenStepsForNextOccurrence, syncOccurrenceCompletion } from "./todo-status.ts";
 import { isTransientFailure, TransientFailure } from "./transient.ts";
 import { sendQueuedUnthreadedResends } from "./unthreaded-resend.ts";
-import { composeMemorySweepTurn, sweepCandidates } from "./memory-sweep.ts";
+import { composeMemorySweepTurn, SWEEP_SPACING_MS, sweepCandidates } from "./memory-sweep.ts";
 import { speakerNameInGroup } from "./group-members.ts";
 import { groupAddress, groupIdOfAddress, isReactionText } from "./group-thread.ts";
 import { runPageJobs } from "./page-worker.ts";
@@ -961,7 +961,6 @@ async function refreshProfileOvernight(
 /** A sweep is background work: it never starts with a reply due soon, and never runs long. */
 const SWEEP_YIELD_MS = 30_000;
 const SWEEP_RECENT_INBOUND_MS = 2 * 60_000;
-const SWEEP_SPACING_MS = 5 * 60_000;
 const SWEEP_MAX_ROUNDS = 6;
 const SWEEP_BUDGET_MS = 60_000;
 

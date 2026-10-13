@@ -13486,7 +13486,42 @@ describe("background activity", () => {
     ], "a refused write kept nothing");
     assert.deepEqual([group.sweeps[0].status, group.sweeps[0].summary], ["sent", "Kept two facts."]);
     assert.deepEqual(body.digests.map(({ kind, label, draft }) => [kind, label, draft]), [["daily_digest", "2030-01-14", "Good morning."]]);
+    assert.equal(group.sweeps[0].ranAt, later, "the sweep shows when it ran; `at` is the newest message it read");
+    assert.equal(group.sweeps[0].at, stamp);
     assert.equal((db.prepare("SELECT total_changes() n").get() as { n: number }).n, before.n, "a read writes nothing");
+  });
+
+  it("says when a chat's next sweep can start, or how many messages it still needs", async () => {
+    const { db, api } = fixture();
+    const t0 = "2030-01-14T12:00:00.000Z";
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_n',?,'sms','group:n','cnv_n',?,?)
+    `).run(USER_ID, t0, t0);
+    ensureGroupLifeArea(db, "thread_n", "Next");
+    const say = (id: string, at: string) => db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,status,metadata_json,created_at,updated_at)
+      VALUES(?,'thread_n','inbound','user','hi','received','{}',?,?)
+    `).run(id, at, at);
+    const outlook = async () => ((await api.get("/api/activity/background").expect(200)).body.data as {
+      chats: Array<{ kind: string; nextSweep: { pendingMessages: number; needed: number; at: string | null } | null }>;
+    }).chats.find(chat => chat.kind === "group")!.nextSweep;
+    const base = Date.now();
+    const recent = (minutes: number) => new Date(base - minutes * 60_000).toISOString();
+
+    say("m1", recent(60)); say("m2", recent(59)); say("m3", recent(58));
+    assert.deepEqual(await outlook(), { pendingMessages: 3, needed: 4, at: null });
+
+    say("m4", recent(30));
+    // Quiet twenty minutes after the newest message.
+    assert.equal((await outlook())!.at, new Date(Date.parse(recent(30)) + 20 * 60_000).toISOString());
+
+    // A sweep that ran a minute ago holds every chat back five minutes from then.
+    db.prepare(`
+      INSERT INTO scheduled_dispatches(id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at)
+      VALUES('d_elsewhere',?,'memory_sweep','memory_sweep:thread_other:m',?,'sent',1,?,?)
+    `).run(USER_ID, recent(90), recent(1), recent(1));
+    assert.equal((await outlook())!.at, new Date(Date.parse(recent(1)) + 5 * 60_000).toISOString());
   });
 
   it("gives each sweep the rows of its own run, even when their windows overlap", async () => {

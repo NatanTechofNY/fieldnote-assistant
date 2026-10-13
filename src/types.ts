@@ -412,7 +412,10 @@ export interface ChannelConversation {
 /** One read of a chat by the memory sweep: what it kept or changed. */
 export interface SweepRun {
   id: string;
+  /** When the newest message it read was sent. */
   at: string;
+  /** When the sweep itself ran. */
+  ranAt: string;
   status: "pending" | "processing" | "sent" | "failed";
   error: string | null;
   summary: string | null;
@@ -429,6 +432,8 @@ export interface BackgroundChat {
   profileState: "current" | "stale" | "empty";
   lastProfileRun: { at: string; status: string; note: string | null } | null;
   sweeps: SweepRun[];
+  /** Null when the chat has no thread yet. `at` is null while too few new messages have come in for a sweep. */
+  nextSweep: { pendingMessages: number; needed: number; at: string | null } | null;
 }
 
 export interface DigestDraft {
