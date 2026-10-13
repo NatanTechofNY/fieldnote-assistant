@@ -207,6 +207,7 @@ export interface NotificationPreferencesRow {
   opted_out_at: string | null;
   trusted_contacts_json: string;
   group_allow_all: 0 | 1;
+  link_today_page: 0 | 1;
   evening_checkin_time: string | null;
   evening_checkin_prompt: string | null;
   created_at: string;

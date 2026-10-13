@@ -2,7 +2,7 @@
 
 ## How a tool call actually executes
 
-The agent has **47 tools**: 46 declared `client_side` in [`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json), plus one hosted search tool declared in [`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json).
+The agent has **53 tools**: 52 declared `client_side` in [`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json), plus one hosted search tool declared in [`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json).
 
 Despite the `client_side` type, none of them run in a browser. All 46 resolve to a single function, `executeAgentTool()` in [`server/tool-executor.ts`](../server/tool-executor.ts), which talks to SQLite (or, for Atlassian, Sendblue, Bright Data, and GIPHY, straight out to that provider's API). Only the transport differs:
 
@@ -65,6 +65,12 @@ The fixed local identity is `USER_ID` (`process.env.DEMO_USER_ID || "devcon-demo
 | `send_image` | **write** (SMS media) | — |
 | `update_soul` | **write** | `PUT /api/integrations/soul`, or `PATCH /api/life-areas/:id` `soul` in a group |
 | `update_group_settings` | **write** | `PATCH /api/life-areas/:id` (`reply_mode`, `assistant_nickname`) |
+| `create_page` | **write** | `POST /api/pages` |
+| `update_page` | **write** | `PATCH /api/pages/:id` |
+| `list_pages` | read | `GET /api/pages` |
+| `get_poll_results` | read | `GET /api/pages/:id/results` |
+| `revoke_page` | **write** | `DELETE /api/pages/:id` |
+| `send_to_contact` | **write** (SMS) | — |
 | `personal_data_search` | read | hosted by Algolia |
 
 `delete_todo`, `delete_memory`, and `delete_reminder` all require `confirmed === true` and throw otherwise.
@@ -226,6 +232,23 @@ What the owner asked for can still carry their private records into the group th
 **The owner's digests read only the owner's own records.** On a `daily_digest` or `digest_brief` turn (`ownRecordsOnly()`), `list_todos`, `get_agenda`, and `get_reflection_evidence` leave out everything filed under a group chat's area (`OWN_AREA_CLAUSE`), and the completion carries `algolia.searchParameters` that exclude each group's `life_area_id` from the todo and memory indices and each group's `threadId` from the messages index. A group's work is reported by its own morning note and evening question instead. The one thing these turns do get from a group is `group_todos_done` on `get_reflection_evidence`: the id, a short title, completion time, and chat name of tasks completed there in the window, without notes, and not necessarily finished by the owner. Asked on the owner's own line, or from the app, nothing is fenced — the REST routes and `POST /api/reflections/*` are unchanged.
 
 Inbound texts carry `reply_to` and `thread_originator` when the user replied inside a thread. The worker reads both onto the turn, they are stored in the inbound row's `metadata_json`, and `threadHistory()` prefixes that turn with a quote of the parent — the `thread_originator` row, since Sendblue's `reply_to` is only the message before it in the chat (often a tapback, or a line outside the thread), used only when there is no originator — so `"that one"` attaches to the message the user picked rather than the one above it. The stored content and its Algolia projection keep the text the user actually sent.
+
+## Hosted pages
+
+Six tools publish and manage web pages at an unguessable link, `/p/<slug>`; the REST routes in [`server/routes/shared-pages.ts`](../server/routes/shared-pages.ts) are their UI counterparts and share the same code ([`server/page-service.ts`](../server/page-service.ts)). A page is a list of typed **blocks** (`heading`, `text`, `checklist`, `link`, `image`, `todos`, `poll`, `availability`, `live_checklist`, `progress`, `countdown`, `itinerary`, `stats`, `habits`, `rotation`, `mood_chart`, `mood_heatmap`) that safe server templates turn into HTML; the agent never writes HTML. Blocks that show records (`todos`, `habits`, `mood_*`, `live_checklist`, `progress`) read SQLite each time the page is opened, so a page is live.
+
+- `create_page({ template, title, blocks, items, slots, when, todo_id, audience, thread_id, closes_at, expires_in_days, from_page_id, shift_days })` makes a page from a template (`today`, `week`, `pick_a_time`, `shopping_list`, `group_week_review`, `chore_rotation`, `trip`, `weekly_review`, `project`, `meeting_prep`, `jira_status`, `habits`, `mood_heatmap`), from blocks, or by duplicating `from_page_id`. `items` and `slots` mean different things per template; the tool's parameter descriptions list them. It returns the URL; a shared page also shows a QR code of its own link in its footer.
+- `update_page` edits blocks in place. A poll option keeps its votes if its words survive the edit (option ids are `o` plus the first six hex digits of the SHA-1 of the lowercased label).
+- `get_poll_results` returns who voted for what, and `revoke_page` makes the link answer 404.
+- `send_to_contact` texts a trusted contact, by name, a line that carries a page link. It is owner-only and refuses to carry a link to an owner page.
+
+**Audience.** A page is `owner` or `shared`. An `owner` page needs a signed-in session: an anonymous visitor is redirected to `/login?next=/p/<slug>`. A `shared` page is public to anyone with the link, which is why it can never hold the owner's private records unless it is filed under a group's life area (then it reads that area only). Templates that read the owner's records (`weekly_review`, `project`, `meeting_prep`, `jira_status`, `habits`, `mood_heatmap`) are owner-only, and a group turn refuses them. `/p/*` is the only public prefix besides `/api/health` and `/api/webhooks/*`.
+
+**Group scope.** From a group chat, `create_page` files the page under the group's area and thread, `update_page`, `list_pages`, `get_poll_results`, and `revoke_page` reach only that area's pages (`scopedPage`), and `send_to_contact` is refused (`OWNER_ONLY_TOOLS`).
+
+**Public writes.** A page's visitors can type a name (`POST /p/:slug/name`), vote, or tick a shared checklist step. Names are remembered in an `fn_voter` cookie, one vote per name per question, and a checklist tick only succeeds for a subtask of the block's own todo. These routes are rate-limited per IP and send a strict CSP (no script runs on a page).
+
+**Follow-through.** The worker closes a poll whose `closes_at` has passed by texting its result to the chat it was made in once (`results_posted_at`), nudges the people who have not voted once (`nudged_at`), and echoes votes and ticks back to the chat as they arrive (`page_events.echoed_at`). The digest can carry a link to today's page (Settings → Notifications → "Link today's page"), and a group can get a week-in-review page on Sunday evening (Settings → Group chats). Each of these claims its row before sending and reverts it if the send fails.
 
 ## Shopping
 

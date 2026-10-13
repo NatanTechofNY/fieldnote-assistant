@@ -212,6 +212,8 @@ export const lifeAreaPatch = lifeAreaCreate.partial().extend({
   checkin_copy_to_owner: z.boolean().optional(),
   /** Whether pictures sent in this group are kept as files; off, they are still read but not stored. */
   keep_pictures: z.boolean().optional(),
+  /** Whether the group is posted a week-in-review page on Sunday evening. */
+  weekly_review_page: z.boolean().optional(),
   /** The owner's wording for each ask; null returns to the default. */
   morning_checkin_prompt: checkinPrompt.nullable().optional(),
   evening_checkin_prompt: checkinPrompt.nullable().optional(),
@@ -351,6 +353,8 @@ export const notificationInput = z.object({
   quietHoursEnd: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
   trustedContacts: z.array(trustedContact).max(25).default([]),
   groupAllowAll: z.boolean().default(false),
+  /** Whether the morning briefing links to a page of today's todos. */
+  linkTodayPage: z.boolean().default(false),
   /** Local time of the owner's own evening check-in; null or absent leaves it off. */
   eveningCheckinTime: clockTime.nullable().default(null),
   /** The owner's wording for their evening ask; null or absent uses the default. */
@@ -463,6 +467,74 @@ const resultLimit = (max: number) => z.coerce.number().int().min(1).max(max).nul
 export const PRODUCT_CATEGORIES = [
   "pain-fever", "cold-flu", "cough-throat", "allergy", "stomach", "sick-day", "sleep",
 ] as const;
+
+/* Hosted pages ----------------------------------------------------------------
+ * One flat block shape rather than a union: Agent Studio's strict mode wants
+ * every property present on every object, so the published schema is this one
+ * object with a nullable field per use. `normalizeBlocks` in `server/pages.ts`
+ * then holds each type to the fields it actually needs. */
+export const PAGE_BLOCK_TYPES = [
+  "heading", "text", "checklist", "link", "image", "todos", "poll", "availability",
+  "live_checklist", "progress", "countdown", "itinerary", "stats", "habits",
+  "rotation", "mood_chart", "mood_heatmap",
+] as const;
+
+export const PAGE_TEMPLATES = [
+  "today", "week", "pick_a_time", "shopping_list", "group_week_review", "chore_rotation", "trip",
+  "weekly_review", "project", "meeting_prep", "jira_status", "habits", "mood_heatmap",
+] as const;
+
+export const TODO_BLOCK_RANGES = ["today", "week", "overdue", "done_week"] as const;
+
+const pageLine = z.string().trim().min(1).max(200);
+
+export const pageBlockInput = z.object({
+  type: z.enum(PAGE_BLOCK_TYPES),
+  id: z.string().trim().min(1).max(60).nullable().optional(),
+  text: z.string().trim().max(2000).nullable().optional(),
+  items: z.array(pageLine).max(40).nullable().optional(),
+  slots: z.array(pageLine).max(12).nullable().optional(),
+  url: z.string().trim().url().max(2000).nullable().optional(),
+  range: z.enum(TODO_BLOCK_RANGES).nullable().optional(),
+  multi: z.boolean().nullable().optional(),
+  closes_at: nullableIso,
+  when: nullableIso,
+  todo_id: nullableId,
+  days: z.coerce.number().int().min(7).max(366).nullable().optional(),
+}).strict();
+
+const pageTitle = z.string().trim().min(1).max(120);
+const pageExpiry = z.coerce.number().int().min(1).max(90).nullable().optional();
+
+/** What `create_page` and `POST /api/pages` both take: a template, hand-written blocks, or a copy of an earlier page. */
+export const pageCreate = z.object({
+  template: z.enum(PAGE_TEMPLATES).nullable().optional(),
+  title: pageTitle.nullable().optional(),
+  blocks: z.array(pageBlockInput).max(40).nullable().optional(),
+  items: z.array(pageLine).max(40).nullable().optional(),
+  slots: z.array(pageLine).max(12).nullable().optional(),
+  when: nullableIso,
+  todo_id: nullableId,
+  closes_at: nullableIso,
+  audience: z.enum(["owner", "shared"]).nullable().optional(),
+  /** A group's thread_id from list_group_chats: files the page under that group, from the owner's own chat. */
+  thread_id: nullableId,
+  expires_in_days: pageExpiry,
+  from_page_id: nullableId,
+  shift_days: z.coerce.number().int().min(-365).max(365).nullable().optional(),
+}).strict().refine(
+  input => Boolean(input.template || input.blocks?.length || input.from_page_id),
+  "Pass a template, blocks, or from_page_id",
+);
+
+export const pageUpdate = z.object({
+  title: pageTitle.nullable().optional(),
+  blocks: z.array(pageBlockInput).max(40).nullable().optional(),
+  expires_in_days: pageExpiry,
+}).strict().refine(
+  input => input.title != null || input.blocks != null || input.expires_in_days != null,
+  "No changes provided",
+);
 
 export const toolInput = {
   list_life_areas: z.object({}),
@@ -655,6 +727,23 @@ export const toolInput = {
   }),
   // Whether a cap applies depends on whose Soul it is, which the executor knows and this schema does not.
   update_soul: z.object({ soul: groupSoulText }),
+  create_page: pageCreate,
+  update_page: z.object({
+    id: entityId,
+    title: pageTitle.nullable().optional(),
+    blocks: z.array(pageBlockInput).max(40).nullable().optional(),
+    expires_in_days: pageExpiry,
+  }).strict().refine(
+    input => input.title != null || input.blocks != null || input.expires_in_days != null,
+    "No changes provided",
+  ),
+  list_pages: z.object({ include_expired: z.boolean().nullable().optional() }).strict(),
+  revoke_page: z.object({ id: entityId }).strict(),
+  get_poll_results: z.object({ id: entityId }).strict(),
+  send_to_contact: z.object({
+    name: z.string().trim().min(1).max(60),
+    text: z.string().trim().min(1).max(1500),
+  }).strict(),
   update_group_settings: z.object({
     reply_mode: z.enum(["normal", "named_only"]).nullable().optional(),
     // "" clears the nickname; null leaves it alone.

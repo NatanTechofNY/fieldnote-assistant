@@ -33,8 +33,8 @@ database is a correctness bug, not a performance tradeoff. This is also why the 
 single replica.
 
 **Routes are auth-gated by registration order.** `server/routes/auth.ts` is registered first, so
-anything mounted after it is protected by default. Only `/api/health` and `/api/webhooks/*` are
-exempt, in the check at the top of that file. Adding a public route means editing that exemption
+anything mounted after it is protected by default. Only `/api/health`, `/api/webhooks/*`, and the
+hosted pages under `/p/*` are exempt, in the check at the top of that file. Adding a public route means editing that exemption
 deliberately — think about what it hands an unauthenticated caller.
 
 **Agent tools bypass the REST API.** They execute in `server/tool-executor.ts`, reached from the
@@ -50,6 +50,14 @@ A new tool, a new list, or a new index the hosted search tool can reach has to h
 question asked in a group answers from the owner's private records. The cross-chat tools
 (`list_group_chats`, `send_to_group`, `react_in_group`) are in `OWNER_ONLY_TOOLS` for the same reason:
 a group must never reach the owner's other groups.
+
+**Hosted pages are public by link.** `/p/*` serves pages without a session, so what a page may show
+is decided in `server/pages.ts` and `server/page-service.ts`, not by the gate: a `shared` page cannot
+hold the owner's records unless it is filed under a group's life area, owner-reading templates are
+in `OWNER_ONLY_TEMPLATES`, and an `owner` page redirects an anonymous visitor to sign in. A new block
+type that reads a record belongs in `RECORD_BLOCKS`; a new public route needs the same rate limit and
+headers as the others in `server/routes/public-pages.ts`. Page tools live in `server/tool-executor.ts`
+and `server/routes/shared-pages.ts` together, and read pages through `scopedPage`.
 
 **Tool schemas are contract-tested.** `tests/server-api.test.ts` asserts that the tools published
 in `agent-studio/tools/client-tools.json` are exactly the keys of `toolInput` in

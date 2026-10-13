@@ -1,5 +1,6 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import type { Request } from "express";
+import { escapeHtml } from "./html.ts";
 import type { Db } from "./types.ts";
 
 export const SESSION_COOKIE = "fieldnote_session";
@@ -180,12 +181,6 @@ export function safeNextPath(value: unknown): string {
   if (typeof value !== "string") return "/";
   if (!value.startsWith("/") || value.startsWith("//")) return "/";
   return value;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => (
-    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character] as string
-  ));
 }
 
 export function loginPage(options: { next: string; error?: string }): string {

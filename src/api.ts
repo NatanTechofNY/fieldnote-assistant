@@ -1,8 +1,8 @@
 import type {
   AgentTurnMemory, AttachmentPage, BackgroundActivity, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
-  ExternalEvent, Health, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
+  ExternalEvent, Health, HostedPage, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoComment, TodoCompletion, TodoStatus,
-  UniversalSearchResult,
+  PageBlockResult, UniversalSearchResult,
 } from "./types";
 
 type ApiEnvelope<T> = { success: true; data: T } | { success: false; error: string };
@@ -104,7 +104,7 @@ export const api = {
     request<LifeArea>("/life-areas", { method: "POST", body: JSON.stringify(input) }),
   updateLifeArea: (id: string, input: {
     name?: string; color?: string;
-    morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean; keep_pictures?: boolean;
+    morning_checkin_time?: string | null; evening_checkin_time?: string | null; checkin_copy_to_owner?: boolean; keep_pictures?: boolean; weekly_review_page?: boolean;
     morning_checkin_prompt?: string | null; evening_checkin_prompt?: string | null;
     soul?: string | null; assistant_nickname?: string | null; reply_mode?: ReplyMode;
   }) =>
@@ -291,6 +291,11 @@ export const api = {
       body: JSON.stringify(input),
     }),
   disconnectAtlassian: () => request<{ disconnected: true }>("/integrations/atlassian", { method: "DELETE" }),
+  pages: (includeExpired = false) => request<HostedPage[]>(`/pages${includeExpired ? "?include_expired=1" : ""}`),
+  createPage: (input: { template: string; title?: string }) =>
+    request<HostedPage>("/pages", { method: "POST", body: JSON.stringify(input) }, TOOL_TIMEOUT_MS),
+  revokePage: (id: string) => request<HostedPage>(`/pages/${id}`, { method: "DELETE" }),
+  pageResults: (id: string) => request<PageBlockResult[]>(`/pages/${id}/results`),
   digestBriefs: () => request<DigestBrief[]>("/digest-briefs"),
   createDigestBrief: (input: {
     name: string;

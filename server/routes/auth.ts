@@ -68,8 +68,13 @@ export function registerAuthRoutes({ app, db }: RouteContext): void {
     }
 
     res.locals.authenticated = false;
-    // Platform health checks and provider webhooks cannot present credentials.
-    if (req.path.startsWith("/api/webhooks/") || req.path === "/api/health") return next();
+    // Platform health checks and provider webhooks cannot present credentials. `/p/*` is the hosted
+    // pages people are sent links to: they have no account, so each route there decides for itself
+    // (shared pages are open to the link; owner pages redirect to sign-in) and `routes/public-pages.ts`
+    // bounds what an unauthenticated caller can do.
+    if (req.path.startsWith("/api/webhooks/") || req.path === "/api/health" || req.path.startsWith("/p/")) {
+      return next();
+    }
     if (req.path.startsWith("/api/")) {
       return res.status(401).json({ success: false, error: "Authentication required" });
     }

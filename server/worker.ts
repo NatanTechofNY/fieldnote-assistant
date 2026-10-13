@@ -30,6 +30,9 @@ import { sendQueuedUnthreadedResends } from "./unthreaded-resend.ts";
 import { composeMemorySweepTurn, sweepCandidates } from "./memory-sweep.ts";
 import { speakerNameInGroup } from "./group-members.ts";
 import { groupAddress, groupIdOfAddress, isReactionText } from "./group-thread.ts";
+import { runPageJobs } from "./page-worker.ts";
+import { ensureTodayPage } from "./page-service.ts";
+import { sweepPages, tryPublicPageUrl } from "./pages.ts";
 import { readSendblueInbound, type StopTypingIndicator } from "./sendblue-service.ts";
 import type { Db, DigestBriefRow, ExternalEventRow, ReminderRow, TodoRow } from "./types.ts";
 
@@ -734,7 +737,7 @@ async function deliverDailyDigest(
   search: SearchWriter,
   recipient: string,
   date: string,
-  digest: { timezone: string; includeTodos: boolean; includeOverdue: boolean },
+  digest: { timezone: string; includeTodos: boolean; includeOverdue: boolean; linkTodayPage?: boolean },
   runAgent: typeof runSmsAgent,
   send: typeof sendSms,
 ): Promise<void> {
@@ -759,8 +762,11 @@ async function deliverDailyDigest(
       gif: true,
       userMessageMetadata: { kind: "daily_digest", date },
     });
-    const sent = await send(db, recipient, response.text, withGif(response));
-    recordOutboundChannelMessage(db, "sms", recipient, response.text, sent.sid, sent.status, {
+    // The owner's own page of today's todos, when they asked for one and there is an address to link to.
+    const todayUrl = digest.linkTodayPage ? tryPublicPageUrl(db, (await ensureTodayPage(db, date)).slug) : null;
+    const text = todayUrl ? `${response.text}\n\nToday's page: ${todayUrl}` : response.text;
+    const sent = await send(db, recipient, text, withGif(response));
+    recordOutboundChannelMessage(db, "sms", recipient, text, sent.sid, sent.status, {
       kind: "daily_digest",
       date,
       ...gifMetadata(response),
@@ -1225,6 +1231,7 @@ async function runMaintenance(db: Db, search: SearchWriter): Promise<void> {
   db.prepare("DELETE FROM index_jobs WHERE status='done' AND updated_at<?").run(cutoff);
   db.prepare("DELETE FROM scheduled_dispatches WHERE status='sent' AND updated_at<?").run(cutoff);
   pruneSettledExternalEvents(db, INBOUND_SOURCES.map(entry => entry.source), cutoff);
+  sweepPages(db);
   const pending = db.prepare(`
     SELECT count(*) count FROM index_jobs WHERE status IN ('pending','failed')
   `).get() as { count: number };
@@ -1417,6 +1424,7 @@ export async function runWorkerOnce(
           timezone: preferences.timezone,
           includeTodos: preferences.digestIncludeTodos,
           includeOverdue: preferences.digestIncludeOverdue,
+          linkTodayPage: preferences.linkTodayPage,
         },
         runAgent,
         send,
@@ -1449,6 +1457,14 @@ export async function runWorkerOnce(
           await deliverGroupCheckin(db, search, "evening", area, recipient, local, preferences.timezone, runAgent, send);
         }
       }
+    }
+  }
+  // Pages tell their chat when a poll closes, who still owes a vote, and what was ticked off.
+  if (recipient) {
+    try {
+      await runPageJobs(db, { send, quiet, local });
+    } catch (error) {
+      console.error("Page jobs failed", error);
     }
   }
   // Nothing is sent, so no recipient or quiet hours come into it. Only in its

@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type {
@@ -381,6 +381,53 @@ CREATE TABLE IF NOT EXISTS memory_attachments (
   PRIMARY KEY(memory_id, attachment_id)
 );
 CREATE INDEX IF NOT EXISTS memory_attachments_attachment ON memory_attachments(attachment_id);
+-- Hosted pages (see server/pages.ts). SQLite is the only home of these rows:
+-- they are not searched, so nothing here is queued for indexing. A page is
+-- read through an unguessable slug; 'owner' pages additionally need a session.
+CREATE TABLE IF NOT EXISTS shared_pages (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL CHECK(kind IN ('today','week','custom','poll')),
+  template TEXT,
+  title TEXT NOT NULL,
+  blocks_json TEXT NOT NULL DEFAULT '[]',
+  audience TEXT NOT NULL DEFAULT 'owner' CHECK(audience IN ('owner','shared')),
+  life_area_id TEXT REFERENCES life_areas(id) ON DELETE CASCADE,
+  thread_id TEXT REFERENCES channel_threads(id) ON DELETE SET NULL,
+  group_id TEXT,
+  dedupe_key TEXT UNIQUE,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  results_posted_at TEXT,
+  nudged_at TEXT,
+  echoed_at TEXT,
+  view_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS shared_pages_user ON shared_pages(user_id, created_at);
+CREATE TABLE IF NOT EXISTS page_votes (
+  page_id TEXT NOT NULL REFERENCES shared_pages(id) ON DELETE CASCADE,
+  block_id TEXT NOT NULL,
+  voter_name TEXT NOT NULL,
+  voter_name_key TEXT NOT NULL,
+  option_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(page_id, block_id, voter_name_key)
+);
+-- What happened on a page that the chat it was sent to has not been told yet.
+CREATE TABLE IF NOT EXISTS page_events (
+  id TEXT PRIMARY KEY,
+  page_id TEXT NOT NULL REFERENCES shared_pages(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('vote','check','claim')),
+  actor TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  echoed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS page_events_pending ON page_events(page_id, echoed_at);
 `;
 
 function columns(db: Db, table: string): Set<string> {
@@ -964,6 +1011,22 @@ export function openDatabase(filename = process.env.DATABASE_PATH || resolve("da
     }
     db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(18,?)").run(now());
   }
+  const hostedPagesApplied = db.prepare(
+    "SELECT 1 found FROM schema_migrations WHERE version=19",
+  ).get();
+  if (!hostedPagesApplied) {
+    // The tables come from the canonical schema above; what an existing install needs is the
+    // opt-in to link today's page from the morning briefing and the group's Sunday review.
+    db.transaction(() => {
+      if (!columns(db, "notification_preferences").has("link_today_page")) {
+        db.exec("ALTER TABLE notification_preferences ADD COLUMN link_today_page INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!columns(db, "life_areas").has("weekly_review_page")) {
+        db.exec("ALTER TABLE life_areas ADD COLUMN weekly_review_page INTEGER NOT NULL DEFAULT 0");
+      }
+      db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(19,?)").run(now());
+    })();
+  }
   // Set once a todo has been followed up on, so a dropped thread is raised once, not every morning.
   if (!columns(db, "todos").has("followed_up_at")) db.exec("ALTER TABLE todos ADD COLUMN followed_up_at TEXT");
   // A todo moved to a new time — by the tool or the app — can be asked about
@@ -1499,7 +1562,7 @@ export function syncTodoReminders(db: Db, todo: TodoRow): void {
 export function resetDatabase(db: Db): void {
   db.transaction(() => {
     for (const table of [
-      "scheduled_dispatches", "external_events", "group_members", "channel_messages", "channel_threads",
+      "page_events", "page_votes", "shared_pages", "scheduled_dispatches", "external_events", "group_members", "channel_messages", "channel_threads",
       "reflection_selections", "reflection_exclusions", "index_jobs", "reminders", "todo_completions", "messages", "conversations", "memories", "todos", "categories",
     ]) {
       db.prepare(`DELETE FROM ${table}`).run();
@@ -1561,6 +1624,14 @@ export function seedDatabase(db: Db): { seeded: true } {
         id,conversation_id,role,content,tool_name,tool_args_json,tool_result_json,created_at
       ) VALUES(?,?,'assistant',?,NULL,NULL,NULL,?)
     `).run("message_welcome", "conversation_current", "How can I help today?", timestamp);
+    // A sample poll, so the hosted-pages screen is not empty on a fresh install.
+    db.prepare(`
+      INSERT INTO shared_pages(
+        id,user_id,slug,kind,template,title,blocks_json,audience,expires_at,created_at,updated_at
+      ) VALUES(?,?,?,'poll',NULL,?,?,'shared',?,?,?)
+    `).run("page_seed_poll", USER_ID, randomBytes(16).toString("base64url"), "Where should we eat?", JSON.stringify([
+      { type: "poll", id: "poll1", text: "Where should we eat on Friday?", items: ["Tacos", "Pizza", "Ramen"] },
+    ]), new Date(Date.now() + 7 * 86_400_000).toISOString(), timestamp, timestamp);
     queueIndexJob(db, "todo", "todo_welcome");
     queueIndexJob(db, "todo", "todo_cat_medicine");
     queueIndexJob(db, "memory", "memory_welcome");

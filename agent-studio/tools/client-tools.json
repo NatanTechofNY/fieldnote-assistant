@@ -1654,5 +1654,318 @@
         "additionalProperties": false
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_page",
+      "description": "Builds a hosted page and returns its link, from a template or your own blocks (lists, polls, availability, live todos). Private from the owner's chat unless it takes votes; in a group, shared.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": ["string", "null"],
+            "enum": ["today", "week", "pick_a_time", "shopping_list", "group_week_review", "chore_rotation", "trip", "weekly_review", "project", "meeting_prep", "jira_status", "habits", "mood_heatmap", null],
+            "description": "A ready-made page, or null to compose blocks yourself"
+          },
+          "title": {
+            "type": ["string", "null"],
+            "description": "Page title; null for the template's own"
+          },
+          "blocks": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": ["heading", "text", "checklist", "link", "image", "todos", "poll", "availability", "live_checklist", "progress", "countdown", "itinerary", "stats", "habits", "rotation", "mood_chart", "mood_heatmap"],
+                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); todos use range; live_checklist/progress use todo_id; countdown uses when"
+                },
+                "id": {
+                  "type": ["string", "null"],
+                  "description": "Stable id for a poll, availability, or live_checklist block when editing a page, so its votes stay; null for new"
+                },
+                "text": {
+                  "type": ["string", "null"],
+                  "description": "The heading, paragraph, poll question, caption, or label"
+                },
+                "items": {
+                  "type": ["array", "null"],
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Checklist lines, itinerary stops, stats as 'Label: value', or poll options"
+                },
+                "slots": {
+                  "type": ["array", "null"],
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Time slots for an availability grid, e.g. 'Sat 2pm'"
+                },
+                "url": {
+                  "type": ["string", "null"],
+                  "description": "https URL for a link or image block"
+                },
+                "range": {
+                  "type": ["string", "null"],
+                  "enum": ["today", "week", "overdue", "done_week", null],
+                  "description": "Which todos a todos block shows"
+                },
+                "multi": {
+                  "type": ["boolean", "null"],
+                  "description": "Poll: allow more than one choice"
+                },
+                "closes_at": {
+                  "type": ["string", "null"],
+                  "description": "ISO time a poll or availability grid stops taking votes; null for open-ended"
+                },
+                "when": {
+                  "type": ["string", "null"],
+                  "description": "ISO time a countdown block counts down to"
+                },
+                "todo_id": {
+                  "type": ["string", "null"],
+                  "description": "The parent todo a live_checklist or progress block follows"
+                },
+                "days": {
+                  "type": ["integer", "null"],
+                  "description": "Days of history a habits, mood_chart, or mood_heatmap block covers, 7 to 366"
+                }
+              },
+              "required": ["type", "id", "text", "items", "slots", "url", "range", "multi", "closes_at", "when", "todo_id", "days"],
+              "additionalProperties": false
+            },
+            "description": "Blocks in order"
+          },
+          "items": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "string"
+            },
+            "description": "Template input. pick_a_time: days like 'Thu Oct 15'. shopping_list: the items. chore_rotation: 2+ people. trip: itinerary lines like 'Fri 7pm | Dinner'. meeting_prep: attendee names"
+          },
+          "slots": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "string"
+            },
+            "description": "Template input. pick_a_time: times like '6pm'. trip: the packing list"
+          },
+          "when": {
+            "type": ["string", "null"],
+            "description": "ISO time a trip or countdown points to"
+          },
+          "todo_id": {
+            "type": ["string", "null"],
+            "description": "Parent todo a project page follows"
+          },
+          "closes_at": {
+            "type": ["string", "null"],
+            "description": "ISO time voting closes"
+          },
+          "audience": {
+            "type": ["string", "null"],
+            "enum": ["owner", "shared", null],
+            "description": "owner opens only when signed in; shared opens for anyone with the link. null picks by content"
+          },
+          "thread_id": {
+            "type": ["string", "null"],
+            "description": "A group's thread_id from list_group_chats, to file the page under that group from the owner's chat; null otherwise"
+          },
+          "expires_in_days": {
+            "type": ["integer", "null"],
+            "description": "Days the link stays live, 1 to 90; null for the default"
+          },
+          "from_page_id": {
+            "type": ["string", "null"],
+            "description": "Copy an earlier page's blocks as a fresh page with no votes"
+          },
+          "shift_days": {
+            "type": ["integer", "null"],
+            "description": "With from_page_id, move its dates by this many days"
+          }
+        },
+        "required": ["template", "title", "blocks", "items", "slots", "when", "todo_id", "closes_at", "audience", "thread_id", "expires_in_days", "from_page_id", "shift_days"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_page",
+      "description": "Edits a page behind the same link: new title, replaced blocks, or a new expiry. Votes stay for options whose words are unchanged. Pass the page's full block list when changing blocks.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The page id from create_page or list_pages"
+          },
+          "title": {
+            "type": ["string", "null"],
+            "description": "New title; null to keep"
+          },
+          "blocks": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": ["heading", "text", "checklist", "link", "image", "todos", "poll", "availability", "live_checklist", "progress", "countdown", "itinerary", "stats", "habits", "rotation", "mood_chart", "mood_heatmap"],
+                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); todos use range; live_checklist/progress use todo_id; countdown uses when"
+                },
+                "id": {
+                  "type": ["string", "null"],
+                  "description": "Stable id for a poll, availability, or live_checklist block when editing a page, so its votes stay; null for new"
+                },
+                "text": {
+                  "type": ["string", "null"],
+                  "description": "The heading, paragraph, poll question, caption, or label"
+                },
+                "items": {
+                  "type": ["array", "null"],
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Checklist lines, itinerary stops, stats as 'Label: value', or poll options"
+                },
+                "slots": {
+                  "type": ["array", "null"],
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Time slots for an availability grid, e.g. 'Sat 2pm'"
+                },
+                "url": {
+                  "type": ["string", "null"],
+                  "description": "https URL for a link or image block"
+                },
+                "range": {
+                  "type": ["string", "null"],
+                  "enum": ["today", "week", "overdue", "done_week", null],
+                  "description": "Which todos a todos block shows"
+                },
+                "multi": {
+                  "type": ["boolean", "null"],
+                  "description": "Poll: allow more than one choice"
+                },
+                "closes_at": {
+                  "type": ["string", "null"],
+                  "description": "ISO time a poll or availability grid stops taking votes; null for open-ended"
+                },
+                "when": {
+                  "type": ["string", "null"],
+                  "description": "ISO time a countdown block counts down to"
+                },
+                "todo_id": {
+                  "type": ["string", "null"],
+                  "description": "The parent todo a live_checklist or progress block follows"
+                },
+                "days": {
+                  "type": ["integer", "null"],
+                  "description": "Days of history a habits, mood_chart, or mood_heatmap block covers, 7 to 366"
+                }
+              },
+              "required": ["type", "id", "text", "items", "slots", "url", "range", "multi", "closes_at", "when", "todo_id", "days"],
+              "additionalProperties": false
+            },
+            "description": "Blocks in order"
+          },
+          "expires_in_days": {
+            "type": ["integer", "null"],
+            "description": "Days from now the link stays live, 1 to 90; null to keep"
+          }
+        },
+        "required": ["id", "title", "blocks", "expires_in_days"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_pages",
+      "description": "Lists pages with their links, audience, views, and blocks. Use before editing or when asked what was shared. In a group, only the group's own pages.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "include_expired": {
+            "type": ["boolean", "null"],
+            "description": "Include expired or revoked pages; null for live ones only"
+          }
+        },
+        "required": ["include_expired"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "revoke_page",
+      "description": "Turns a page's link off. Anyone opening it sees that it is gone.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The page id from list_pages"
+          }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_poll_results",
+      "description": "Reads a page's poll or availability results: who voted for what and which option leads. Use to answer 'who has voted' or 'what won'.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The page id from list_pages or create_page"
+          }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "send_to_contact",
+      "description": "Texts one of the owner's trusted contacts directly (not a group), by the name saved in Settings, when the owner asks from their own chat. Use to send a shared page link.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The contact's name as saved under Trusted contacts"
+          },
+          "text": {
+            "type": "string",
+            "description": "The message, up to 1500 characters",
+            "maxLength": 1500
+          }
+        },
+        "required": ["name", "text"],
+        "additionalProperties": false
+      }
+    }
   }
 ]

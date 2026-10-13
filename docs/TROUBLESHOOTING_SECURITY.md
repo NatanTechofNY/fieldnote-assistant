@@ -112,6 +112,15 @@ Confirm built-in Agent Studio automatic memory is disabled. Then verify that the
 - Replace the fixed identity with authenticated record-level restrictions before multi-user deployment.
 - Do not trust Agent Studio instructions as an access-control mechanism.
 
+### Hosted pages
+
+- `/p/*` is exempt from the sign-in gate on purpose, and nothing else is except `/api/health` and `/api/webhooks/*`. The REST routes that manage pages (`/api/pages`) stay behind the gate.
+- Slugs are 128 random bits; a slug that does not match the format is rejected before the database is touched, and a missing, revoked, or expired page answers the same 404.
+- An `owner` page redirects an anonymous visitor to sign in; a `shared` page can show private records only when it is filed under a group's life area, and then only that area's.
+- Pages are rendered from typed blocks with every value escaped, links are `https` only, and the response sends `Content-Security-Policy: default-src 'none'` (inline styles and `https:`/`data:` images only), `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `nosniff`, and `no-store`. There is no script on a page.
+- The public write routes (name, vote, check) are rate-limited per IP, accept one vote per name per question, and a checklist tick only reaches a subtask of the block's own todo.
+- Revoke a link from the Pages screen (or `revoke_page`); the link then answers 404. A page also expires on its own.
+
 ### Input and output handling
 
 - Validate tool arguments server-side even when `strict` is true.

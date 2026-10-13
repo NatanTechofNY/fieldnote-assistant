@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AtSign, Copy, ImageDown, LoaderCircle, MessageSquareText, Moon, PenLine, RefreshCw, Sparkles, Sun } from "lucide-react";
+import { AtSign, Copy, FileText, ImageDown, LoaderCircle, MessageSquareText, Moon, PenLine, RefreshCw, Sparkles, Sun } from "lucide-react";
 import { api } from "../../api";
 import type { IntegrationState, LifeArea, ReplyMode } from "../../types";
 import { AskEditor } from "./AskEditor";
@@ -12,6 +12,7 @@ type CheckinPatch = {
   evening_checkin_time?: string | null;
   checkin_copy_to_owner?: boolean;
   keep_pictures?: boolean;
+  weekly_review_page?: boolean;
   morning_checkin_prompt?: string | null;
   evening_checkin_prompt?: string | null;
   soul?: string | null;
@@ -107,6 +108,19 @@ export function GroupChatSettings({ notify, imessage, defaults }: {
           />
           <ImageDown size={12} aria-hidden="true"/>
           <span>Save pictures</span>
+        </label>
+        <label
+          className={`life-area-checkin ${group.weekly_review_page ? "on" : ""}`}
+          title="Sunday evening, the group is sent a page of the week's finished and open tasks"
+        >
+          <input
+            type="checkbox"
+            checked={Boolean(group.weekly_review_page)}
+            aria-label={`Post a week in review for ${group.name}`}
+            onChange={event => checkin.mutate({ id: group.id, weekly_review_page: event.target.checked })}
+          />
+          <FileText size={12} aria-hidden="true"/>
+          <span>Week in review</span>
         </label>
       </div>
       <details className="checkin-wording">

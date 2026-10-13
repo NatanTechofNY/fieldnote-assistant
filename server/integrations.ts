@@ -100,6 +100,8 @@ export type NotificationPreferences = {
   trustedContacts: TrustedContact[];
   /** Whether any participant of a group that includes the recipient may talk to the assistant. */
   groupAllowAll: boolean;
+  /** Whether the morning briefing ends with a link to a page of today's todos. */
+  linkTodayPage: boolean;
   /** Local `HH:MM` the owner is asked how the day went, or null for never. */
   eveningCheckinTime: string | null;
   /** The owner's wording for that evening ask, or null for the default. */
@@ -393,6 +395,7 @@ export function getNotificationPreferences(db: Db): NotificationPreferences {
     optedOutAt: row.opted_out_at,
     trustedContacts: parseTrustedContacts(row.trusted_contacts_json),
     groupAllowAll: Boolean(row.group_allow_all),
+    linkTodayPage: Boolean(row.link_today_page),
     eveningCheckinTime: row.evening_checkin_time ?? null,
     eveningCheckinPrompt: row.evening_checkin_prompt ?? null,
   };
@@ -449,11 +452,11 @@ export type NotificationPreferencesInput =
   Omit<
     NotificationPreferences,
     | "optedOutAt" | "digestIncludeTodos" | "digestIncludeOverdue" | "smsProvider"
-    | "trustedContacts" | "groupAllowAll" | "eveningCheckinTime" | "eveningCheckinPrompt"
+    | "trustedContacts" | "groupAllowAll" | "linkTodayPage" | "eveningCheckinTime" | "eveningCheckinPrompt"
   >
   & Partial<Pick<
     NotificationPreferences,
-    "digestIncludeTodos" | "digestIncludeOverdue" | "trustedContacts" | "groupAllowAll" | "eveningCheckinTime" | "eveningCheckinPrompt"
+    "digestIncludeTodos" | "digestIncludeOverdue" | "trustedContacts" | "groupAllowAll" | "linkTodayPage" | "eveningCheckinTime" | "eveningCheckinPrompt"
   >>;
 
 export function saveNotificationPreferences(
@@ -464,7 +467,7 @@ export function saveNotificationPreferences(
     UPDATE notification_preferences SET sms_enabled=?,recipient_phone=?,timezone=?,
       daily_digest_enabled=?,daily_digest_time=?,digest_include_todos=?,digest_include_overdue=?,
       quiet_hours_start=?,quiet_hours_end=?,trusted_contacts_json=?,group_allow_all=?,evening_checkin_time=?,
-      evening_checkin_prompt=?,
+      evening_checkin_prompt=?,link_today_page=?,
       opted_out_at=CASE WHEN ?=1 THEN NULL ELSE opted_out_at END,updated_at=?
     WHERE user_id=?
   `).run(
@@ -481,6 +484,7 @@ export function saveNotificationPreferences(
     Number(preferences.groupAllowAll ?? false),
     preferences.eveningCheckinTime ?? null,
     preferences.eveningCheckinPrompt ?? null,
+    Number(preferences.linkTodayPage ?? false),
     Number(preferences.smsEnabled),
     now(),
     USER_ID,

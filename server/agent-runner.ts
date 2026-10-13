@@ -189,7 +189,9 @@ const WRITE_TOOLS = new Set([
   // user's side, and a retried turn that cannot see the first one sends a
   // second. The same goes for a bubble sent mid-turn.
   "react_to_message", "send_message", "send_image",
-  "send_to_group", "react_in_group",
+  "send_to_group", "react_in_group", "send_to_contact",
+  // A page is a link in someone's chat; a retried turn that cannot see the first makes a second.
+  "create_page", "update_page", "revoke_page",
   // Naming the group twice is harmless, but a retry should know it was done.
   "name_group_chat",
   "remember_group_member",
@@ -205,7 +207,7 @@ const WRITE_TOOLS = new Set([
  */
 const GESTURE_TOOLS = new Set([
   "react_to_message", "reply_in_thread", "send_product_cards", "send_message", "stay_quiet", "find_gif", "send_image",
-  "send_to_group", "react_in_group",
+  "send_to_group", "react_in_group", "send_to_contact",
 ]);
 
 /**
