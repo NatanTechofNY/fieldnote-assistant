@@ -1,5 +1,8 @@
 import type { AlgoliaSync } from "./algolia.ts";
-import { attachmentJson, attachmentsForMemory, linkMemoryAttachments } from "./attachments.ts";
+import {
+  attachmentFileIntact, attachmentForLink, attachmentJson, attachmentsForMemory, attachmentsFull, getAttachment,
+  linkMemoryAttachments, setAttachmentDescription, stageForMessage, storableType,
+} from "./attachments.ts";
 import {
   getConfluencePage, getJiraIssue, listConfluenceComments, listConfluencePages,
   listConfluenceSpaces, listJiraBoards, listJiraIssues, listJiraUsers,
@@ -14,7 +17,7 @@ import {
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
-import { withoutMediaLines } from "./image-input.ts";
+import { fetchPicture, PICTURE_FETCH_TIMEOUT_MS, pictureDescriptions, withoutMediaLines } from "./image-input.ts";
 import { assertSendableImage, giphyConfig, imagesInMarkdown, isRememberedImage, rememberImages, searchGifs } from "./image-output.ts";
 import { refreshRosterMemory, rememberGroupMember } from "./group-members.ts";
 import { entryDay, eveningEntryFor, eveningOccurredAt, isEveningEntry } from "./group-journal.ts";
@@ -362,6 +365,13 @@ export type ToolTurnContext = {
    * this turn's own thread are ever linked.
    */
   turnAttachmentIds?: string[];
+  /**
+   * The memories this turn has created or reworded, so a picture `save_pictures`
+   * keeps afterwards is attached to them too, whatever order the two were called in.
+   */
+  memoriesWritten?: string[];
+  /** How `save_pictures` downloads a picture; the global `fetch` unless a test supplies one. */
+  pictureFetcher?: typeof fetch;
   /** Set by `reply_in_thread`, read by the caller once the turn ends. */
   replyToMessageHandle?: string;
   /**
@@ -1274,6 +1284,65 @@ export async function executeAgentTool(
     search.flushSoon();
     return { channel: "sms", sent: true, message_handle: delivered.sid, status: delivered.status };
   }
+  if (name === "save_pictures") {
+    /*
+     * Keeps pictures because someone asked, whether or not the chat keeps them
+     * on arrival (a group can turn that off). Only this turn's own thread is
+     * read, so a group can never save, or be handed, another chat's pictures.
+     * The newest pictures sent here are the ones meant: the message being
+     * answered when it carries one, otherwise the picture asked about.
+     */
+    if (!context?.threadId) throw new Error("This is not a text conversation; pictures are kept from the chat they were sent in");
+    const wanted = (input.count as number | null | undefined) ?? 1;
+    const sent = db.prepare(`
+      SELECT id,content,metadata_json FROM channel_messages
+      WHERE thread_id=? AND direction='inbound' AND role='user'
+        AND json_array_length(COALESCE(json_extract(metadata_json,'$.mediaUrls'),'[]'))>0
+      ORDER BY created_at DESC,rowid DESC LIMIT 10
+    `).all(context.threadId) as Array<{ id: string; content: string; metadata_json: string }>;
+    const picks: Array<{ messageId: string; url: string; seen: ReturnType<typeof pictureDescriptions>[number] }> = [];
+    for (const message of sent) {
+      const urls = (JSON.parse(message.metadata_json).mediaUrls as unknown[]).filter((url): url is string => typeof url === "string");
+      const seen = pictureDescriptions(message.content, urls);
+      urls.forEach((url, index) => picks.push({ messageId: message.id, url, seen: seen[index] }));
+      if (picks.length >= wanted) break;
+    }
+    if (!picks.length) throw new Error("No picture has been sent in this chat recently");
+    const saved: AttachmentRow[] = [];
+    const failed: Array<{ reason: string }> = [];
+    for (const pick of picks.slice(0, wanted)) {
+      try {
+        let row = attachmentForLink(db, pick.messageId, pick.url);
+        if (!row || !attachmentFileIntact(db, row)) {
+          const picture = await fetchPicture(pick.url, context.pictureFetcher ?? fetch, AbortSignal.timeout(PICTURE_FETCH_TIMEOUT_MS));
+          if (!picture.bytes || !storableType(picture.type)) throw new Error("that attachment is not a picture that can be kept");
+          if (attachmentsFull(db, picture.bytes.length)) throw new Error("the storage limit for pictures is reached");
+          row = stageForMessage(db, pick.messageId, pick.url, picture);
+          if (!row) throw new Error("it could not be filed");
+        }
+        if (!row.description && pick.seen) {
+          setAttachmentDescription(db, row.id, pick.seen.description, pick.seen.kind);
+          row = getAttachment(db, row.id) ?? row;
+        }
+        saved.push(row);
+      } catch (error) {
+        failed.push({ reason: `A picture could not be saved: ${error instanceof Error ? error.message : "unknown error"}` });
+      }
+    }
+    const ids = saved.map(row => row.id);
+    const attachedTo: string[] = [];
+    if (ids.length) {
+      // A memory written later in the turn picks these up from the turn's list; one already written is linked now.
+      context.turnAttachmentIds = [...new Set([...context.turnAttachmentIds ?? [], ...ids])];
+      for (const memoryId of context.memoriesWritten ?? []) {
+        if (linkMemoryAttachments(db, memoryId, ids, context.threadId)) attachedTo.push(memoryId);
+      }
+      // What a picture says is text its sender did not write, as in an `[Image: …]` line.
+      if (saved.some(row => row.description)) context.readUntrusted = true;
+      search.flushSoon();
+    }
+    return { saved: saved.map(row => attachmentJson(row)), failed, attached_to_memory_ids: attachedTo };
+  }
 
   /*
    * The shopping tools read a demo catalog rather than the user's records. They
@@ -1790,6 +1859,7 @@ export async function executeAgentTool(
       // The pictures this turn was sent are kept with the record they produced.
       if (context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
     })();
+    if (context) context.memoriesWritten = [...context.memoriesWritten ?? [], memoryId];
     search.flushSoon();
     return memoryWithPictures(db, getMemory(db, memoryId) as MemoryRow);
   }
@@ -1835,6 +1905,9 @@ export async function executeAgentTool(
       ownMoodOnly: ownMoodOnly(context),
       allowedNames: context?.burstSpeakerNames,
     });
+    // Rewording a memory can be about a picture; retagging an old note in the
+    // same turn is not, and must not pin the turn's receipt to it.
+    const reworded = value("title", current.title) !== current.title || value("content", current.content) !== current.content;
     db.transaction(() => {
       db.prepare(`
         UPDATE memories SET kind=?,title=?,content=?,mood_label=?,mood_score=?,moods_json=?,category_id=?,
@@ -1849,11 +1922,9 @@ export async function executeAgentTool(
         JSON.stringify(value("tags", JSON.parse(current.tags_json))), now(), memoryId, USER_ID,
       );
       queueIndexJob(db, "memory", memoryId);
-      // Rewording a memory can be about a picture; retagging an old note in the
-      // same turn is not, and must not pin the turn's receipt to it.
-      const reworded = value("title", current.title) !== current.title || value("content", current.content) !== current.content;
       if (reworded && context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
     })();
+    if (reworded && context) context.memoriesWritten = [...context.memoriesWritten ?? [], memoryId];
     search.flushSoon();
     return memoryWithPictures(db, getMemory(db, memoryId) as MemoryRow);
   }

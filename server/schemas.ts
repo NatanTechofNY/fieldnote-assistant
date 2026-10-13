@@ -727,6 +727,7 @@ export const toolInput = {
     url: z.string().trim().url().max(2000),
     caption: z.string().trim().max(300).nullable().optional(),
   }),
+  save_pictures: z.object({ count: z.number().int().min(1).max(4).nullable().optional() }).strict(),
   // Whether a cap applies depends on whose Soul it is, which the executor knows and this schema does not.
   update_soul: z.object({ soul: groupSoulText }),
   create_page: pageCreate,

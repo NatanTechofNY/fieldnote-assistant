@@ -300,6 +300,21 @@ export function withoutMediaLines(text: string): string {
   return text.split("\n").filter(line => !MEDIA_LINE.test(line.trim())).join("\n");
 }
 
+/**
+ * What the app wrote down about each of a message's `urls`, in order: the
+ * description and whether it was a document. `withMediaLines` puts one line per
+ * link last, so the line for a link is the one at its place from the end. A
+ * picture not looked at (or one that could not be) has no description yet.
+ */
+export function pictureDescriptions(text: string, urls: string[]): Array<{ description: string; kind: "photo" | "document" } | undefined> {
+  const rows = text.split("\n");
+  const start = Math.max(rows.length - urls.length, 0);
+  return urls.map((_, index) => {
+    const match = /^\[Image( \(document\))?: ([\s\S]*)\]$/.exec(rows[start + index]?.trim() ?? "");
+    return match ? { description: match[2], kind: match[1] ? "document" : "photo" } : undefined;
+  });
+}
+
 /** Whether the text carries a picture's description, which quotes words the sender did not write. */
 export function hasImageDescription(text: string): boolean {
   return text.split("\n").some(line => /^\[Image(?: \(document\))?: /.test(line.trim()));
