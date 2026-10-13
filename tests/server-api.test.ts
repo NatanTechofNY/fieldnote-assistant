@@ -8299,18 +8299,90 @@ describe("Sendblue provider", () => {
         await assert.rejects(() => executeAgentTool(db, tools, "save_pictures", { count: 5 }, turn), "and so is one above four");
       });
 
-      it("reports a picture that cannot be fetched and stores nothing for it", async () => {
+      it("fails the call when no picture could be fetched, and reports the one that failed beside the one that did not", async () => {
         keepFilesInScratch();
         const { db } = fixture();
         const context = quietGroup(db, "thread_save_gone");
         fileInbound(db, context.threadId, "[Picture attached — it could not be viewed]", "SB_gone", [`${receipt}?gone`]);
         const pictureFetcher: typeof fetch = async () => new Response("expired", { status: 404 });
-        const result = await executeAgentTool(db, tools, "save_pictures", { count: null }, { ...context, pictureFetcher }) as Saved;
-        assert.deepEqual(result.saved, []);
-        assert.equal(result.failed.length, 1);
-        assert.match(result.failed[0].reason, /could not be saved/);
+        const turn: ToolTurnContext = { ...context, pictureFetcher };
+        // A call that keeps nothing is a failed call, so the turn does not count it as a record it changed.
+        await assert.rejects(() => executeAgentTool(db, tools, "save_pictures", { count: null }, turn), /No picture could be saved/);
         assert.equal((db.prepare("SELECT count(*) n FROM attachments").get() as { n: number }).n, 0);
         assert.equal(readdirSync(scratch).length, 0);
+        assert.deepEqual(turn.turnAttachmentIds ?? [], []);
+
+        // Two in one message: the newest is gone, the one before it is not.
+        fileInbound(db, context.threadId, "[Image: first]\n[Image: second]", "SB_two", [`${receipt}?one`, `${receipt}?two`]);
+        const flaky: typeof fetch = async input => String(input).endsWith("?two")
+          ? new Response("expired", { status: 410 })
+          : new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const partial = await executeAgentTool(db, tools, "save_pictures", { count: 2 }, { ...context, pictureFetcher: flaky }) as Saved;
+        assert.deepEqual(partial.saved.map(item => item.description), ["first"]);
+        assert.equal(partial.failed.length, 1);
+      });
+
+      it("takes the last picture of the newest message, and skips a deleted one and anything over a week old", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const context = quietGroup(db, "thread_save_order");
+        const pictureFetcher: typeof fetch = async () => new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const old = fileInbound(db, context.threadId, "[Image: ancient]", "SB_ancient", [`${receipt}?ancient`]);
+        db.prepare("UPDATE channel_messages SET created_at=? WHERE id=?").run(new Date(Date.now() - 8 * 86_400_000).toISOString(), old);
+        fileInbound(db, context.threadId, "[Image: a]\n[Image: b]\n[Image: c]", "SB_three", [`${receipt}?a`, `${receipt}?b`, `${receipt}?c`]);
+
+        const one = await executeAgentTool(db, tools, "save_pictures", { count: null }, { ...context, pictureFetcher }) as Saved;
+        assert.deepEqual(one.saved.map(item => item.description), ["c"], "the one sent last");
+        const two = await executeAgentTool(db, tools, "save_pictures", { count: 2 }, { ...context, pictureFetcher }) as Saved;
+        assert.deepEqual(two.saved.map(item => item.description), ["c", "b"]);
+        const all = await executeAgentTool(db, tools, "save_pictures", { count: 4 }, { ...context, pictureFetcher }) as Saved;
+        assert.deepEqual(all.saved.map(item => item.description), ["c", "b", "a"], "and the week-old one is not reached");
+
+        // Deleting one from the gallery keeps it out of the next request, though its link still works.
+        deleteAttachment(db, one.saved[0].id);
+        const after = await executeAgentTool(db, tools, "save_pictures", { count: 4 }, { ...context, pictureFetcher }) as Saved;
+        assert.deepEqual(after.saved.map(item => item.description), ["b", "a"]);
+      });
+
+      it("reports the memories that hold the picture, whether it was linked now or kept on arrival, and links a reworded memory but not a retagged one", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const context = quietGroup(db, "thread_save_report");
+        fileInbound(db, context.threadId, "[Image: ticket]", "SB_ticket2", [`${receipt}?ticket`]);
+        const pictureFetcher: typeof fetch = async () => new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const turn: ToolTurnContext = { ...context, pictureFetcher };
+        const reworded = await executeAgentTool(db, tools, "create_memory", { title: "A", content: "a", kind: "note" }, turn) as { id: string };
+        const other = await executeAgentTool(db, tools, "create_memory", { title: "B", content: "b", kind: "note" }, { ...context }) as { id: string };
+        await executeAgentTool(db, tools, "update_memory", { id: other.id, patch: { tags: ["x"] } }, turn);
+        await executeAgentTool(db, tools, "update_memory", { id: reworded.id, patch: { content: "a again" } }, turn);
+        assert.deepEqual(turn.memoriesWritten, [reworded.id], "listed once, and a tag change is not a write about the picture");
+
+        const first = await executeAgentTool(db, tools, "save_pictures", { count: null }, turn) as Saved;
+        assert.deepEqual(first.attached_to_memory_ids, [reworded.id]);
+        const again = await executeAgentTool(db, tools, "save_pictures", { count: null }, turn) as Saved;
+        assert.deepEqual(again.attached_to_memory_ids, [reworded.id], "already attached is still attached");
+      });
+
+      it("refuses an app-composed turn, and attaches nothing to a group's memory from the owner's own chat", async () => {
+        keepFilesInScratch();
+        const { db } = fixture();
+        const pictureFetcher: typeof fetch = async () => new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg" } });
+        const { area, context: group } = groupContext(db, "thread_save_group_memory");
+        const owner = ownerContext(db, "thread_save_owner");
+        fileInbound(db, owner.threadId, "[Image: private]", "SB_private2", [`${receipt}?private`]);
+        await assert.rejects(
+          () => executeAgentTool(db, tools, "save_pictures", { count: null }, { ...owner, pictureFetcher, internal: true, appTurn: "follow_up_x" }),
+          /the app writing/,
+        );
+
+        const turn: ToolTurnContext = { ...owner, pictureFetcher };
+        const misfiled = await executeAgentTool(db, tools, "create_memory", {
+          title: "Misfiled", content: "x", kind: "note", life_area_id: area.id,
+        }, turn) as { id: string };
+        const result = await executeAgentTool(db, tools, "save_pictures", { count: null }, turn) as Saved;
+        assert.deepEqual(result.attached_to_memory_ids, [], "the owner's private picture is not handed to the group's memory");
+        const read = await executeAgentTool(db, tools, "get_memory", { id: misfiled.id }, group) as { attachments: unknown[] };
+        assert.deepEqual(read.attachments, []);
       });
 
       it("never reaches a picture sent in another chat", async () => {

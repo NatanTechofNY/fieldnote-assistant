@@ -1,6 +1,6 @@
 import type { AlgoliaSync } from "./algolia.ts";
 import {
-  attachmentFileIntact, attachmentForLink, attachmentJson, attachmentsForMemory, attachmentsFull, getAttachment,
+  attachmentFileIntact, attachmentForLink, attachmentJson, DELETED_PICTURE_LINE, attachmentsForMemory, attachmentsFull, getAttachment,
   linkMemoryAttachments, setAttachmentDescription, stageForMessage, storableType,
 } from "./attachments.ts";
 import {
@@ -17,7 +17,7 @@ import {
   isDerivedReminder, parseRecurrence, planRecurrenceWrite, recurrenceJson, type RecurrenceRule,
 } from "./recurrence.ts";
 import { fiscalQuarterRange, type FiscalQuarter } from "./fiscal-quarter.ts";
-import { fetchPicture, PICTURE_FETCH_TIMEOUT_MS, pictureDescriptions, withoutMediaLines } from "./image-input.ts";
+import { fetchPicture, PICTURE_FETCH_TIMEOUT_MS, pictureDescriptions, pictureLines, withoutMediaLines } from "./image-input.ts";
 import { assertSendableImage, giphyConfig, imagesInMarkdown, isRememberedImage, rememberImages, searchGifs } from "./image-output.ts";
 import { refreshRosterMemory, rememberGroupMember } from "./group-members.ts";
 import { entryDay, eveningEntryFor, eveningOccurredAt, isEveningEntry } from "./group-journal.ts";
@@ -47,6 +47,10 @@ import type { AttachmentRow, Db, MemoryRow, StoreProductRow, TodoRow, TodoStatus
 import {
   assertPublicUrl, linksIn, readWebPage, rememberResults, searchWeb, takeWebCall, wasReturned, webConfig, WebServiceError,
 } from "./web-service.ts";
+
+/** How far back `save_pictures` looks for the picture someone means, and how long one call may spend fetching. */
+const SAVE_PICTURES_WINDOW_MS = 7 * 86_400_000;
+const SAVE_PICTURES_BUDGET_MS = 30_000;
 
 /** How far back a link someone pasted in the thread stays readable. */
 const SHARED_LINK_WINDOW_MS = 24 * 60 * 60_000;
@@ -1293,54 +1297,82 @@ export async function executeAgentTool(
      * answered when it carries one, otherwise the picture asked about.
      */
     if (!context?.threadId) throw new Error("This is not a text conversation; pictures are kept from the chat they were sent in");
+    if (context.internal || context.appTurn) throw new Error("This turn is the app writing, not a person; pictures are kept only when someone asks");
     const wanted = (input.count as number | null | undefined) ?? 1;
+    const since = new Date(Date.now() - SAVE_PICTURES_WINDOW_MS).toISOString();
     const sent = db.prepare(`
       SELECT id,content,metadata_json FROM channel_messages
-      WHERE thread_id=? AND direction='inbound' AND role='user'
+      WHERE thread_id=? AND direction='inbound' AND role='user' AND created_at>=?
+        AND metadata_json LIKE '%"mediaUrls"%'
         AND json_array_length(COALESCE(json_extract(metadata_json,'$.mediaUrls'),'[]'))>0
       ORDER BY created_at DESC,rowid DESC LIMIT 10
-    `).all(context.threadId) as Array<{ id: string; content: string; metadata_json: string }>;
+    `).all(context.threadId, since) as Array<{ id: string; content: string; metadata_json: string }>;
+    // Newest first, and within a message from its last picture back: "the newest" is the one sent last.
     const picks: Array<{ messageId: string; url: string; seen: ReturnType<typeof pictureDescriptions>[number] }> = [];
     for (const message of sent) {
       const urls = (JSON.parse(message.metadata_json).mediaUrls as unknown[]).filter((url): url is string => typeof url === "string");
+      const lines = pictureLines(message.content, urls);
       const seen = pictureDescriptions(message.content, urls);
-      urls.forEach((url, index) => picks.push({ messageId: message.id, url, seen: seen[index] }));
+      for (let index = urls.length - 1; index >= 0; index -= 1) {
+        // A picture the owner deleted from the gallery stays deleted, whatever its provider link still serves.
+        if (lines[index]?.trim() === DELETED_PICTURE_LINE) continue;
+        picks.push({ messageId: message.id, url: urls[index], seen: seen[index] });
+      }
       if (picks.length >= wanted) break;
     }
-    if (!picks.length) throw new Error("No picture has been sent in this chat recently");
+    if (!picks.length) throw new Error(`No picture has been sent in this chat in the last ${SAVE_PICTURES_WINDOW_MS / 86_400_000} days that can still be saved`);
     const saved: AttachmentRow[] = [];
     const failed: Array<{ reason: string }> = [];
+    // One allowance for the call, as when pictures are kept on arrival, so dead links cannot add up to a long wait.
+    const budget = AbortSignal.timeout(SAVE_PICTURES_BUDGET_MS);
     for (const pick of picks.slice(0, wanted)) {
+      if (budget.aborted) {
+        failed.push({ reason: "ran out of time before this picture could be fetched" });
+        continue;
+      }
+      let row: AttachmentRow | undefined;
       try {
-        let row = attachmentForLink(db, pick.messageId, pick.url);
+        row = attachmentForLink(db, pick.messageId, pick.url);
         if (!row || !attachmentFileIntact(db, row)) {
-          const picture = await fetchPicture(pick.url, context.pictureFetcher ?? fetch, AbortSignal.timeout(PICTURE_FETCH_TIMEOUT_MS));
+          const picture = await fetchPicture(
+            pick.url, context.pictureFetcher ?? fetch, AbortSignal.any([AbortSignal.timeout(PICTURE_FETCH_TIMEOUT_MS), budget]),
+          );
           if (!picture.bytes || !storableType(picture.type)) throw new Error("that attachment is not a picture that can be kept");
           if (attachmentsFull(db, picture.bytes.length)) throw new Error("the storage limit for pictures is reached");
           row = stageForMessage(db, pick.messageId, pick.url, picture);
           if (!row) throw new Error("it could not be filed");
+          // Converting and writing a photo is synchronous work; let the server answer a request between two of them.
+          await new Promise(resolve => setImmediate(resolve));
         }
-        if (!row.description && pick.seen) {
+      } catch (error) {
+        failed.push({ reason: error instanceof Error ? error.message : "unknown error" });
+        continue;
+      }
+      // The picture is kept at this point; a description that cannot be written does not make it unsaved.
+      if (!row.description && pick.seen) {
+        try {
           setAttachmentDescription(db, row.id, pick.seen.description, pick.seen.kind);
           row = getAttachment(db, row.id) ?? row;
+        } catch (error) {
+          console.warn("Saving a picture's description failed:", error instanceof Error ? error.message : error);
         }
-        saved.push(row);
-      } catch (error) {
-        failed.push({ reason: `A picture could not be saved: ${error instanceof Error ? error.message : "unknown error"}` });
       }
+      saved.push(row);
     }
+    // Nothing kept is a failed call, not a write: no record changed, and a retry may fetch again.
+    if (!saved.length) throw new Error(`No picture could be saved: ${[...new Set(failed.map(item => item.reason))].join("; ")}`);
     const ids = saved.map(row => row.id);
     const attachedTo: string[] = [];
-    if (ids.length) {
-      // A memory written later in the turn picks these up from the turn's list; one already written is linked now.
-      context.turnAttachmentIds = [...new Set([...context.turnAttachmentIds ?? [], ...ids])];
-      for (const memoryId of context.memoriesWritten ?? []) {
-        if (linkMemoryAttachments(db, memoryId, ids, context.threadId)) attachedTo.push(memoryId);
-      }
-      // What a picture says is text its sender did not write, as in an `[Image: …]` line.
-      if (saved.some(row => row.description)) context.readUntrusted = true;
-      search.flushSoon();
+    // A memory written later in the turn picks these up from the turn's list; one already written is linked now.
+    context.turnAttachmentIds = [...new Set([...context.turnAttachmentIds ?? [], ...ids])];
+    for (const memoryId of new Set(context.memoriesWritten ?? [])) {
+      linkMemoryAttachments(db, memoryId, ids, context.threadId);
+      // Linking counts only new rows, and a picture kept on arrival may already be there: report what the memory holds.
+      if (attachmentsForMemory(db, memoryId).some(picture => ids.includes(picture.id))) attachedTo.push(memoryId);
     }
+    // What a picture says is text its sender did not write, as in an `[Image: …]` line.
+    if (saved.some(row => row.description)) context.readUntrusted = true;
+    search.flushSoon();
     return { saved: saved.map(row => attachmentJson(row)), failed, attached_to_memory_ids: attachedTo };
   }
 
@@ -1859,7 +1891,7 @@ export async function executeAgentTool(
       // The pictures this turn was sent are kept with the record they produced.
       if (context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
     })();
-    if (context) context.memoriesWritten = [...context.memoriesWritten ?? [], memoryId];
+    if (context) context.memoriesWritten = [...new Set([...context.memoriesWritten ?? [], memoryId])];
     search.flushSoon();
     return memoryWithPictures(db, getMemory(db, memoryId) as MemoryRow);
   }
@@ -1924,7 +1956,7 @@ export async function executeAgentTool(
       queueIndexJob(db, "memory", memoryId);
       if (reworded && context?.threadId) linkMemoryAttachments(db, memoryId, context.turnAttachmentIds ?? [], context.threadId);
     })();
-    if (reworded && context) context.memoriesWritten = [...context.memoriesWritten ?? [], memoryId];
+    if (reworded && context) context.memoriesWritten = [...new Set([...context.memoriesWritten ?? [], memoryId])];
     search.flushSoon();
     return memoryWithPictures(db, getMemory(db, memoryId) as MemoryRow);
   }

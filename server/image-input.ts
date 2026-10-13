@@ -301,16 +301,23 @@ export function withoutMediaLines(text: string): string {
 }
 
 /**
- * What the app wrote down about each of a message's `urls`, in order: the
- * description and whether it was a document. `withMediaLines` puts one line per
- * link last, so the line for a link is the one at its place from the end. A
- * picture not looked at (or one that could not be) has no description yet.
+ * The line the app wrote for each of a message's `urls`, in order. `withMediaLines`
+ * puts one line per link last, so the line for a link is the one at its place from the end.
  */
-export function pictureDescriptions(text: string, urls: string[]): Array<{ description: string; kind: "photo" | "document" } | undefined> {
+export function pictureLines(text: string, urls: string[]): Array<string | undefined> {
   const rows = text.split("\n");
   const start = Math.max(rows.length - urls.length, 0);
-  return urls.map((_, index) => {
-    const match = /^\[Image( \(document\))?: ([\s\S]*)\]$/.exec(rows[start + index]?.trim() ?? "");
+  return urls.map((_, index) => rows[start + index]);
+}
+
+/**
+ * What the app wrote down about each of a message's `urls`, in order: the
+ * description and whether it was a document. A picture not looked at (or one
+ * that could not be) has no description yet.
+ */
+export function pictureDescriptions(text: string, urls: string[]): Array<{ description: string; kind: "photo" | "document" } | undefined> {
+  return pictureLines(text, urls).map(line => {
+    const match = /^\[Image( \(document\))?: ([\s\S]*)\]$/.exec(line?.trim() ?? "");
     return match ? { description: match[2], kind: match[1] ? "document" : "photo" } : undefined;
   });
 }
