@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { archiveReactionText, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
+import { archiveReactionText, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames, indexedCommentBodies, TODO_COMMENTS_INDEXED, TODO_COMMENTS_INDEXED_BYTES } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling, safeNextPath } from "../server/auth.ts";
@@ -9942,12 +9942,18 @@ describe("Sendblue provider", () => {
       } finally { stub.restore(); }
     });
 
-    it("stops gathering a burst once its first message has waited long enough", async () => {
+    it("stops gathering a burst once the worker has been filing it long enough", async () => {
       const { db, api } = await establishedGroup();
       const sends: string[] = [];
-      await post(api, groupMessage(WIFE, "first question"));
+      const first = groupMessage(WIFE, "first question");
+      await post(api, first);
       await post(api, groupMessage(WIFE, "second question"));
-      db.prepare("UPDATE external_events SET created_at=? WHERE json_extract(payload_json,'$.content')='first question'")
+      await post(api, groupMessage(WIFE, "third question"));
+      // The worker began filing this burst twenty seconds ago: the first is already folded into the second.
+      const address = `group:${GROUP}`;
+      foldIntoNextTurn(db, address, "first question", first.message_handle, undefined, {}, groupMessage(WIFE, "second question").message_handle);
+      db.prepare("UPDATE external_events SET status='processed' WHERE json_extract(payload_json,'$.content')='first question'").run();
+      db.prepare("UPDATE channel_messages SET created_at=? WHERE json_extract(metadata_json,'$.foldedInto') IS NOT NULL")
         .run(new Date(Date.now() - 20_000).toISOString());
       const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
       try {
@@ -9958,7 +9964,20 @@ describe("Sendblue provider", () => {
         };
         await runWorkerOnce(db, fakeSearch(db), workerWith(numbered, sends));
       } finally { stub.restore(); }
-      assert.equal(sends.length, 2, "the first message is answered on its own rather than waiting on a burst that keeps growing");
+      assert.equal(sends.length, 2, "the burst that has been gathering past the bound is answered rather than growing further");
+    });
+
+    it("folds texts that are old on arrival, because only the burst's own age counts", async () => {
+      const { db, api } = await establishedGroup();
+      const sends: string[] = [];
+      await post(api, groupMessage(WIFE, "first question"));
+      await post(api, groupMessage(WIFE, "second question"));
+      db.prepare("UPDATE external_events SET created_at=?").run(new Date(Date.now() - 20 * 60_000).toISOString());
+      const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+      try {
+        await runWorkerOnce(db, fakeSearch(db), workerWith(answering("one answer"), sends));
+      } finally { stub.restore(); }
+      assert.deepEqual(sends, ["one answer"], "a backlog is answered once, not once per text");
     });
   });
 
