@@ -8,7 +8,7 @@ import { USER_ID } from "./db.ts";
 import { groupIdOfAddress } from "./group-thread.ts";
 import { assertSendableImage } from "./image-output.ts";
 import {
-  createPage, getPage, getPageBySlug, hasVoting, normalizeBlocks, PageError, pageBlocks, updatePage,
+  createPage, getPage, getPageBySlug, hasVoting, normalizeBlocks, PageError, pageBlocks, pageIsLive, updatePage,
   type PageAudience, type PageBlock, type PageRow,
 } from "./pages.ts";
 import { OWNER_ONLY_TEMPLATES, templates, type TemplateScope } from "./page-templates/index.ts";
@@ -117,6 +117,12 @@ export async function createPageFromInput(
   // A page made in a group is the group's; one made for people to answer is shared by nature.
   if (scope.lifeAreaId && origin.group) audience = "shared";
   audience ??= (hasVoting(blocks) || blocks.some(block => block.type === "live_checklist" || block.type === "rotation")) ? "shared" : "owner";
+  // A poll is answered by other people, and a chat is told its link: it cannot sit behind the owner's sign-in.
+  if (hasVoting(blocks)) audience = "shared";
+  // Whatever way it was made (a template, or a copy of one), what is read from the owner's records stays the owner's.
+  if (template && OWNER_ONLY_TEMPLATES.has(template as never) && (audience === "shared" || scope.lifeAreaId)) {
+    throw new PageError("That page draws on the owner's private records, so it can only be the owner's own and cannot be shared or filed under a group");
+  }
   await assertPageImages(blocks);
   const page = createPage(db, {
     title, blocks, kind, template, audience,
@@ -126,7 +132,25 @@ export async function createPageFromInput(
 }
 
 export async function updatePageFromInput(db: Db, row: PageRow, input: z.infer<typeof pageUpdate>): Promise<PageRow> {
-  const blocks = input.blocks ? normalizeBlocks(input.blocks as Array<z.infer<typeof pageBlockInput>>) : null;
+  // A block sent back without its id keeps the one it had, matched by kind and words, so votes stay with the question
+  // they were cast on when blocks are added or reordered around it.
+  const existing = pageBlocks(row).filter(block => block.id);
+  const claimed = new Set((input.blocks ?? []).map(block => block.id).filter(Boolean));
+  const taken = new Set([...existing.map(old => old.id), ...claimed]);
+  const incoming = (input.blocks ?? []).map(block => {
+    if (block.id) return block;
+    const same = existing.find(old => !claimed.has(old.id) && old.type === block.type && old.text === block.text);
+    if (same) {
+      claimed.add(same.id);
+      return { ...block, id: same.id };
+    }
+    // A new block never takes an id a block of the page has had, so a removed block's votes cannot pass to it.
+    let number = 1;
+    while (taken.has(`${block.type}${number}`)) number += 1;
+    taken.add(`${block.type}${number}`);
+    return { ...block, id: `${block.type}${number}` };
+  });
+  const blocks = input.blocks ? normalizeBlocks(incoming as Array<z.infer<typeof pageBlockInput>>) : null;
   if (blocks) await assertPageImages(blocks);
   return updatePage(db, row, { title: input.title, blocks, expiresInDays: input.expires_in_days });
 }
@@ -135,7 +159,10 @@ export async function updatePageFromInput(db: Db, row: PageRow, input: z.infer<t
 export async function ensureTodayPage(db: Db, date: string): Promise<PageRow> {
   const key = `today:${date}`;
   const existing = db.prepare("SELECT slug FROM shared_pages WHERE dedupe_key=?").get(key) as { slug: string } | undefined;
-  if (existing) return getPageBySlug(db, existing.slug) as PageRow;
+  const found = existing && getPageBySlug(db, existing.slug);
+  // An expired page is not one to link to; a revoked one has let go of its key.
+  if (found && pageIsLive(found)) return found;
+  if (found) db.prepare("UPDATE shared_pages SET dedupe_key=NULL WHERE id=?").run(found.id);
   const built = await templates.today(db, { lifeAreaId: null, threadId: null, groupId: null, groupName: null }, {});
   return createPage(db, {
     title: built.title, blocks: built.blocks, kind: "today", template: "today", audience: "owner",
@@ -151,7 +178,10 @@ export async function ensureGroupReviewPage(
 ): Promise<PageRow> {
   const key = `group_week_review:${area.id}:${date}`;
   const existing = db.prepare("SELECT slug FROM shared_pages WHERE dedupe_key=?").get(key) as { slug: string } | undefined;
-  if (existing) return getPageBySlug(db, existing.slug) as PageRow;
+  const found = existing && getPageBySlug(db, existing.slug);
+  // An expired page is not one to link to; a revoked one has let go of its key.
+  if (found && pageIsLive(found)) return found;
+  if (found) db.prepare("UPDATE shared_pages SET dedupe_key=NULL WHERE id=?").run(found.id);
   const built = await templates.group_week_review(db, {
     lifeAreaId: area.id, threadId: area.thread_id, groupId: area.groupId, groupName: area.name,
   }, {});

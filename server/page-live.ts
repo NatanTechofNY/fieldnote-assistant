@@ -74,6 +74,9 @@ function scopedParent(db: Db, page: PageRow, todoId: string | undefined): TodoRo
   return own ? todo : undefined;
 }
 
+/** A step the page may show or change: a group's page reaches only the steps filed in the group's own area. */
+const inFence = (page: PageRow, step: TodoRow): boolean => !page.life_area_id || step.life_area_id === page.life_area_id;
+
 export type ChecklistItem = LiveTodo & { claimed_by: string | null };
 
 export function checklistItems(db: Db, page: PageRow, block: PageBlock): { title: string; items: ChecklistItem[] } | null {
@@ -81,8 +84,9 @@ export function checklistItems(db: Db, page: PageRow, block: PageBlock): { title
   if (!parent) return null;
   const rows = db.prepare(`
     SELECT id,title,status,priority,due_at,completed_at FROM todos
-    WHERE user_id=? AND parent_id=? AND status<>'cancelled' ORDER BY created_at,rowid LIMIT ?
-  `).all(USER_ID, parent.id, LIST_LIMIT) as LiveTodo[];
+    WHERE user_id=? AND parent_id=? AND status<>'cancelled' AND (? IS NULL OR life_area_id IS ?)
+    ORDER BY created_at,rowid LIMIT ?
+  `).all(USER_ID, parent.id, page.life_area_id, page.life_area_id, LIST_LIMIT) as LiveTodo[];
   const claim = db.prepare(`
     SELECT author_name,body FROM todo_comments WHERE todo_id=? AND body LIKE 'Claimed by %' ORDER BY created_at DESC,rowid DESC LIMIT 1
   `);
@@ -102,8 +106,9 @@ export function progressOf(db: Db, page: PageRow, block: PageBlock): Progress | 
   if (!parent) return null;
   const rows = db.prepare(`
     SELECT id,title,status,priority,due_at,completed_at FROM todos
-    WHERE user_id=? AND parent_id=? AND status<>'cancelled' ORDER BY created_at,rowid LIMIT ?
-  `).all(USER_ID, parent.id, LIST_LIMIT) as LiveTodo[];
+    WHERE user_id=? AND parent_id=? AND status<>'cancelled' AND (? IS NULL OR life_area_id IS ?)
+    ORDER BY created_at,rowid LIMIT ?
+  `).all(USER_ID, parent.id, page.life_area_id, page.life_area_id, LIST_LIMIT) as LiveTodo[];
   return {
     title: block.text || parent.title,
     notes: parent.notes,
@@ -128,7 +133,7 @@ export function toggleChecklistItem(
   const block = pageBlocks(page).find(candidate => candidate.id === input.blockId && candidate.type === "live_checklist");
   const parent = block && scopedParent(db, page, block.todo_id);
   const step = parent ? getTodo(db, input.todoId) : undefined;
-  if (!block || !parent || !step || step.parent_id !== parent.id || step.status === "cancelled") {
+  if (!block || !parent || !step || step.parent_id !== parent.id || !inFence(page, step) || step.status === "cancelled") {
     throw new PageError("That item is not on this list");
   }
   const done = step.status !== "done";
@@ -157,11 +162,11 @@ export function claimChecklistItem(
   const block = pageBlocks(page).find(candidate => candidate.id === input.blockId && candidate.type === "live_checklist");
   const parent = block && scopedParent(db, page, block.todo_id);
   const step = parent ? getTodo(db, input.todoId) : undefined;
-  if (!block || !parent || !step || step.parent_id !== parent.id || step.status === "cancelled") {
+  if (!block || !parent || !step || step.parent_id !== parent.id || !inFence(page, step) || step.status === "cancelled") {
     throw new PageError("That item is not on this list");
   }
   db.transaction(() => {
-    insertTodoComment(db, { todoId: step.id, body: `Claimed by ${input.actor}`, author: "agent", authorName: input.actor });
+    insertTodoComment(db, { todoId: step.id, body: `Claimed by ${input.actor}`, author: "agent", authorName: `${input.actor} (shared page)` });
     addPageEvent(db, page.id, "claim", input.actor, step.title);
   })();
   return { title: step.title };

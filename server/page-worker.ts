@@ -16,7 +16,7 @@ import { recordOutboundChannelMessage } from "./agent-runner.ts";
 import { ensureGroupReviewPage } from "./page-service.ts";
 import {
   closeoutText, echoText, markEchoed, nudgeText, pagesAwaitingResults, pagesToNudge, pendingEchoes,
-  tryPublicPageUrl, type PageRow,
+  closePollsNow, tryPublicPageUrl, type PageRow,
 } from "./pages.ts";
 import type { Db } from "./types.ts";
 
@@ -42,7 +42,22 @@ async function say(
   page: PageRow,
 ): Promise<void> {
   const sent = await send(db, destination.address, text, destination.groupId ? { groupId: destination.groupId } : undefined);
-  recordOutboundChannelMessage(db, "sms", destination.address, text, sent.sid, sent.status, { kind, pageId: page.id });
+  // The text is out. Failing to file it must not read as a failed send, or the claim would be given back and it would go twice.
+  try {
+    recordOutboundChannelMessage(db, "sms", destination.address, text, sent.sid, sent.status, { kind, pageId: page.id });
+  } catch (error) {
+    console.warn(`Sent "${page.title}" but could not file it:`, error instanceof Error ? error.message : error);
+  }
+}
+
+/** A send that keeps failing is tried again after longer and longer, then given up on, rather than every minute for good. */
+const failures = new Map<string, { count: number; retryAt: number }>();
+const MAX_SEND_FAILURES = 5;
+const RETRY_BASE_MS = 2 * 60 * 1000;
+
+/** For tests: forget what has failed. */
+export function resetPageJobFailures(): void {
+  failures.clear();
 }
 
 /** Sets a page column before the send and puts it back if the send fails. */
@@ -52,11 +67,18 @@ async function claimed(
   column: "results_posted_at" | "nudged_at",
   work: () => Promise<void>,
 ): Promise<void> {
+  const key = `${page.id}:${column}`;
+  const failed = failures.get(key);
+  if (failed && failed.retryAt > Date.now()) return;
   db.prepare(`UPDATE shared_pages SET ${column}=? WHERE id=?`).run(new Date().toISOString(), page.id);
   try {
     await work();
+    failures.delete(key);
   } catch (error) {
-    db.prepare(`UPDATE shared_pages SET ${column}=NULL WHERE id=?`).run(page.id);
+    const count = (failed?.count ?? 0) + 1;
+    failures.set(key, { count, retryAt: Date.now() + RETRY_BASE_MS * 2 ** (count - 1) });
+    // The last try leaves the claim in place: the text is given up on, not repeated for good.
+    if (count < MAX_SEND_FAILURES) db.prepare(`UPDATE shared_pages SET ${column}=NULL WHERE id=?`).run(page.id);
     throw error;
   }
 }
@@ -79,6 +101,8 @@ export async function runPageJobs(db: Db, options: PageJobOptions): Promise<void
       const destination = destinationOf(db, page);
       try {
         await claimed(db, page, "results_posted_at", async () => {
+          // A poll everyone answered stops taking votes now, so the text is true of the page it links to.
+          closePollsNow(db, page);
           // A chat the app cannot text still counts as told: the result is on the page.
           if (destination) await say(db, send, destination, closeoutText(db, page), "poll_results", page);
         });

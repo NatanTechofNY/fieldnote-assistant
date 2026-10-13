@@ -96,6 +96,9 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get("tab");
   const activeTab: SettingsTabId = SETTINGS_TAB_IDS.find(id => id === requestedTab) ?? "general";
+  // A tab already opened stays mounted, hidden, so what was typed in it (a Soul being edited, a brief's wording) survives a visit elsewhere.
+  const [visited, setVisited] = useState(() => new Set<string>([activeTab]));
+  if (!visited.has(activeTab)) setVisited(new Set(visited).add(activeTab));
   const selectTab = (id: string) => setSearchParams(previous => {
     const next = new URLSearchParams(previous);
     next.set("tab", id);
@@ -285,7 +288,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
     </div>}
     <section className="settings-shell">
       <SettingsTabs tabs={tabs} active={activeTab} onSelect={selectTab}>
-        {activeTab === "general" && <>
+        {visited.has("general") && <div className="settings-stack" hidden={activeTab !== "general"}>
         <SettingsSection
           sectionId="appearance"
           title="Appearance"
@@ -340,8 +343,8 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
         >
           <LifeAreasSettings notify={notify}/>
         </SettingsSection>
-        </>}
-        {activeTab === "assistant" && <>
+        </div>}
+        {visited.has("assistant") && <div className="settings-stack" hidden={activeTab !== "assistant"}>
         <SettingsSection
           sectionId="soul"
           title="Soul"
@@ -410,8 +413,8 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             notify={notify}
           />
         </SettingsSection>
-        </>}
-        {activeTab === "messaging" && <>
+        </div>}
+        {visited.has("messaging") && <div className="settings-stack" hidden={activeTab !== "messaging"}>
         <SettingsSection
           sectionId="sms-connection"
           title="Message provider"
@@ -756,8 +759,8 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             <GroupChatSettings notify={notify} imessage={data.notifications.smsProvider === "sendblue"} defaults={data.checkinDefaults}/>
           </div>
         </SettingsSection>
-        </>}
-        {activeTab === "connections" && <>
+        </div>}
+        {visited.has("connections") && <div className="settings-stack" hidden={activeTab !== "connections"}>
         <SettingsSection
           sectionId="meeting-notes"
           title="Meeting notes"
@@ -807,10 +810,10 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             refresh={refresh}
           />
         </SettingsSection>
-        </>}
-        {activeTab === "advanced" && <>
+        </div>}
+        {visited.has("advanced") && <div className="settings-stack" hidden={activeTab !== "advanced"}>
         <UnderHoodSettings notify={notify}/>
-        </>}
+        </div>}
       </SettingsTabs>
     </section>
     {toast && <Toast>{toast}</Toast>}

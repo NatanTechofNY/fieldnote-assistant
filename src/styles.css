@@ -1476,6 +1476,7 @@ tr:hover .attach-button,
    Only the Sendblue panel stacks it, and each paragraph is a separate fact. */
 .integration-copy + .integration-copy { margin-top:8px; }
 .settings-stack { display:grid; gap:10px; max-width:960px; }
+.settings-stack[hidden] { display:none; }
 .life-area-settings-list { display:grid; margin:12px 0; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
 .life-area-setting { display:grid; grid-template-columns:10px minmax(0,1fr) auto auto; align-items:center; gap:10px; padding:8px 11px; border-top:1px solid var(--border); background:var(--surface); }
 .life-area-settings-list > .life-area-setting:first-child { border-top:0; }

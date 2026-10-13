@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNowStrict } from "date-fns";
 import { Ban, CalendarRange, Check, ChartColumn, Copy, ExternalLink, Eye, Lock, Plus, Users } from "lucide-react";
@@ -36,9 +36,12 @@ export function PagesPage() {
   const [filter, setFilter] = useState<Filter>("active");
   const [openResults, setOpenResults] = useState<string | null>(null);
   const [toast, setToast] = useState("");
+  const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
   const notify = (message: string) => {
     setToast(message);
-    setTimeout(() => setToast(""), 3500);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 3500);
   };
   const { data: pages = [], isLoading, error } = useQuery({
     queryKey: ["pages", filter],
@@ -62,7 +65,8 @@ export function PagesPage() {
       await navigator.clipboard.writeText(link);
       notify("Link copied");
     } catch {
-      notify(link);
+      // The address is not put on screen: in demo mode it would show what the mask hides.
+      notify("Could not copy the link; open the page and copy it from the address bar");
     }
   };
   return <div className="page">
@@ -73,7 +77,7 @@ export function PagesPage() {
     />
     <div className="pages-toolbar">
       <div className="tabs">{FILTERS.map(([value, label]) =>
-        <button key={value} type="button" className={`tab ${filter === value ? "active" : ""}`} onClick={() => setFilter(value)}>{label}</button>)}
+        <button key={value} type="button" className={`tab ${filter === value ? "active" : ""}`} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}</button>)}
       </div>
       <div className="pages-new">
         <button type="button" className="button ghost" disabled={create.isPending} onClick={() => create.mutate("today")}>

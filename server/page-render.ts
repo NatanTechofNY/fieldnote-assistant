@@ -106,9 +106,11 @@ const NOTICES: Record<string, { kind: "ok" | "error"; text: string }> = {
   closed: { kind: "error", text: "This poll has closed." },
   option: { kind: "error", text: "Pick an option first." },
   gone: { kind: "error", text: "That is no longer on this page." },
+  full: { kind: "error", text: "This page has all the answers it can take." },
   slow: { kind: "error", text: "Too many tries. Wait a few minutes and try again." },
 };
-export const noticeFor = (code: unknown): RenderContext["notice"] => (typeof code === "string" ? NOTICES[code] : undefined);
+export const noticeFor = (code: unknown): RenderContext["notice"] =>
+  (typeof code === "string" && Object.hasOwn(NOTICES, code) ? NOTICES[code] : undefined);
 
 /* Text --------------------------------------------------------------------- */
 
@@ -381,8 +383,16 @@ function description(blocks: PageBlock[], page: PageRow): string {
   return text?.text?.slice(0, 160) || `${page.title}: shared from Fieldnote`;
 }
 
+/** A page's link never changes, so its code is drawn once. */
+const qrCache = new Map<string, string>();
+
 export async function qrSvg(url: string): Promise<string> {
-  return QRCode.toString(url, { type: "svg", margin: 0, errorCorrectionLevel: "M" });
+  const cached = qrCache.get(url);
+  if (cached) return cached;
+  const svg = await QRCode.toString(url, { type: "svg", margin: 0, errorCorrectionLevel: "M" });
+  if (qrCache.size >= 200) qrCache.delete(qrCache.keys().next().value as string);
+  qrCache.set(url, svg);
+  return svg;
 }
 
 export async function renderPage(db: Db, page: PageRow, ctx: RenderContext): Promise<string> {

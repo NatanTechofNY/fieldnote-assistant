@@ -8,7 +8,7 @@ import { syncAgentStudioTools } from "../server/agent-studio.ts";
 import { archiveReactionText, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames, indexedCommentBodies, TODO_COMMENTS_INDEXED, TODO_COMMENTS_INDEXED_BYTES } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
-import { resetThrottling } from "../server/auth.ts";
+import { resetThrottling, safeNextPath } from "../server/auth.ts";
 import { countTodoComments, ensureGroupLifeArea, getTodo, getTodoComments, insertTodoComment, loadStoreCatalog, openDatabase, queueIndexJob, readStoreCatalog, USER_ID } from "../server/db.ts";
 import { currentFiscalQuarter, fiscalQuarterRange } from "../server/fiscal-quarter.ts";
 import { reflectionPeriod } from "../server/reflection-period.ts";
@@ -74,8 +74,10 @@ import { toolInput } from "../server/schemas.ts";
 import { z } from "zod";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { executeAgentTool, resetBrowserTurnState, type ToolTurnContext } from "../server/tool-executor.ts";
-import { runPageJobs } from "../server/page-worker.ts";
-import { createPage, getPage, optionId, sweepPages } from "../server/pages.ts";
+import { resetPageJobFailures, runPageJobs } from "../server/page-worker.ts";
+import { ensureTodayPage } from "../server/page-service.ts";
+import { pageCalendar } from "../server/page-ics.ts";
+import { closePollsNow, createPage, getPage, MAX_VOTERS, optionId, pageIsLive, revokePage, sweepPages } from "../server/pages.ts";
 import { resetPageWriteThrottle } from "../server/routes/public-pages.ts";
 import { resetWebState } from "../server/web-service.ts";
 import { pullGifLine, rememberImages } from "../server/image-output.ts";
@@ -13702,6 +13704,9 @@ describe("hosted pages", () => {
     // The owner sees every page, and can file one under a group from their own chat.
     const owner = ownerTurn(db);
     assert.equal((await run(db, "list_pages", { include_expired: null }, owner)).pages.length, 1);
+    // Naming a group takes what posting there takes: the owner has to have named it.
+    await assert.rejects(run(db, "create_page", { template: "shopping_list", items: ["Eggs"], thread_id: "thread_work_pages" }, owner), /has to name the group/);
+    owner.inboundText = "start a shopping list for thread_work_pages";
     const filed = await run(db, "create_page", {
       template: "shopping_list", items: ["Eggs", "Flour"], thread_id: "thread_work_pages",
     }, owner);
@@ -13745,6 +13750,7 @@ describe("hosted pages", () => {
     }
 
     // One page with every kind of block.
+    owner.inboundText = "make it for thread_templates";
     const everything = await run(db, "create_page", {
       title: "Everything", audience: "shared", thread_id: "thread_templates",
       blocks: [
@@ -13832,6 +13838,121 @@ describe("hosted pages", () => {
     const after = sent.length;
     await runPageJobs(db, { send, quiet: false, local });
     assert.equal(sent.length, after, "an echoed vote is echoed once");
+  });
+
+  it("keeps what a group can reach to the group's own shared pages and steps", async () => {
+    const { api, db } = pageFixture();
+    const { context: group, areaId } = groupTurn(db, "thread_fence");
+    const owner = ownerTurn(db, "make it for thread_fence");
+
+    // An owner-only snapshot cannot be filed under a group, shared, or copied into either.
+    await assert.rejects(run(db, "create_page", { template: "meeting_prep", items: ["Sarah"], thread_id: "thread_fence" }, owner), /owner/i);
+    const prep = await run(db, "create_page", { template: "meeting_prep", items: ["Sarah"] }, owner);
+    assert.equal(prep.audience, "owner");
+    await assert.rejects(run(db, "create_page", { from_page_id: prep.id, audience: "shared" }, owner), /owner/i);
+    await assert.rejects(run(db, "create_page", { from_page_id: prep.id, thread_id: "thread_fence" }, owner), /owner/i);
+
+    // A private page filed under the group is still the owner's: the group neither lists nor reads it.
+    const quiet = await run(db, "create_page", {
+      title: "Notes", audience: "owner", thread_id: "thread_fence", blocks: [{ type: "text", text: "just for me" }],
+    }, owner);
+    assert.equal(quiet.life_area_id, areaId);
+    assert.deepEqual((await run(db, "list_pages", { include_expired: null }, group)).pages, []);
+    await assert.rejects(run(db, "update_page", { id: quiet.id, title: "Mine now" }, group), /Page not found/);
+
+    // A poll is for other people, so it is shared whatever was asked.
+    const poll = await run(db, "create_page", { audience: "owner", blocks: [{ type: "poll", text: "Where?", items: ["a", "b"] }] }, owner);
+    assert.equal(poll.audience, "shared");
+
+    // Naming a group takes the owner's own words, and a turn that read something foreign cannot.
+    await assert.rejects(run(db, "create_page", { template: "shopping_list", items: ["Eggs"], thread_id: "thread_fence" }, ownerTurn(db, "hello")), /has to name the group/);
+    await assert.rejects(
+      run(db, "create_page", { template: "shopping_list", items: ["Eggs"], thread_id: "thread_fence" }, { ...owner, readPages: true }),
+      /read a web page/,
+    );
+
+    // A shared checklist shows and changes only the steps filed in the group's own area.
+    const parent = await run(db, "create_todo", { title: "Move house", subtasks: [{ title: "Pack kitchen" }, { title: "Private errand" }] }, group);
+    db.prepare("UPDATE todos SET life_area_id='area_personal' WHERE title='Private errand'").run();
+    const list = await run(db, "create_page", { blocks: [{ type: "live_checklist", todo_id: parent.id }, { type: "progress", todo_id: parent.id }] }, group);
+    const html = (await api.get(`/p/${slugOf(list.url)}`).expect(200)).text;
+    assert.match(html, /Pack kitchen/);
+    assert.doesNotMatch(html, /Private errand/);
+    const hidden = db.prepare("SELECT id FROM todos WHERE title='Private errand'").get() as { id: string };
+    const blockId = (list.blocks as Array<{ id: string; type: string }>).find(block => block.type === "live_checklist")!.id;
+    const denied = await api.post(`/p/${slugOf(list.url)}/check`).type("form").send({ block: blockId, todo: hidden.id, name: "Sarah" }).expect(303);
+    assert.match(denied.headers.location, /n=gone/);
+    assert.equal(getTodo(db, hidden.id)?.status, "pending");
+  });
+
+  it("holds public input to what a page can take: odd notice codes, names, and a crowd", async () => {
+    const { api, db } = pageFixture();
+    const poll = await makePoll(api);
+    const slug = slugOf(poll.url);
+    const blockId = poll.blocks[0].id;
+    for (const code of ["constructor", "__proto__", "toString"]) await api.get(`/p/${slug}?n=${code}`).expect(200);
+
+    const vote = (name: string) => api.post(`/p/${slug}/vote`).type("form").send({ block: blockId, name, option: optionId("Tacos") });
+    await vote("Click https://evil.example/x now").expect(303);
+    const names = (await api.get(`/api/pages/${poll.id}/results`).expect(200)).body.data[0].voters as string[];
+    assert.ok(names.every(name => !/[:/@<>"]/.test(name)), `a name carries no link or address: ${names}`);
+
+    const insert = db.prepare("INSERT INTO page_votes(page_id,block_id,voter_name,voter_name_key,option_ids_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)");
+    for (let index = 0; index < MAX_VOTERS; index += 1) insert.run(poll.id, blockId, `Guest ${index}`, `guest ${index}`, JSON.stringify([optionId("Tacos")]), "now", "now");
+    assert.match((await vote("One more").expect(303)).headers.location, /n=full/);
+    assert.match((await vote("Guest 3").expect(303)).headers.location, /n=voted/, "someone already on the page can still change their answer");
+
+    assert.equal(safeNextPath("/\\evil.example"), "/");
+    assert.equal(safeNextPath("/p/abc"), "/p/abc");
+    assert.ok(pageCalendar(db, createPage(db, {
+      title: "Dinner\rBEGIN:VEVENT", audience: "shared", blocks: [{ type: "countdown", text: "Dinner\rATTENDEE:x", when: "2031-05-01T19:00:00.000Z" }],
+    }))?.includes("\r\nATTENDEE") === false);
+  });
+
+  it("closes a poll for good when its result goes out, and keeps its page open past the close", async () => {
+    const { api, db } = pageFixture();
+    const owner = ownerTurn(db);
+    const closes = new Date(Date.now() + 3 * 86_400_000).toISOString();
+    const made = await run(db, "create_page", {
+      expires_in_days: 1, blocks: [{ type: "poll", text: "Where?", items: ["Tacos", "Pizza"], closes_at: closes }],
+    }, owner);
+    assert.ok(Date.parse(getPage(db, made.id)!.expires_at) > Date.parse(closes), "the link outlives the poll's close");
+
+    closePollsNow(db, getPage(db, made.id)!);
+    const late = await api.post(`/p/${slugOf(made.url)}/vote`).type("form").send({ block: made.blocks[0].id, name: "Dev", option: optionId("Pizza") }).expect(303);
+    assert.match(late.headers.location, /n=closed/);
+
+    // Reordering blocks around a poll keeps the poll's votes.
+    const kept = await run(db, "create_page", { blocks: [{ type: "poll", text: "Lunch?", items: ["a", "b"] }] }, owner);
+    await api.post(`/p/${slugOf(kept.url)}/vote`).type("form").send({ block: kept.blocks[0].id, name: "Sarah", option: optionId("a") }).expect(303);
+    await run(db, "update_page", { id: kept.id, blocks: [{ type: "poll", text: "Brunch?", items: ["x", "y"] }, { type: "poll", text: "Lunch?", items: ["a", "b"] }] }, owner);
+    const results = (await api.get(`/api/pages/${kept.id}/results`).expect(200)).body.data as Array<{ question: string; voters: string[] }>;
+    assert.deepEqual(results.find(result => result.question === "Lunch?")?.voters, ["Sarah"]);
+    assert.deepEqual(results.find(result => result.question === "Brunch?")?.voters, []);
+  });
+
+  it("makes a fresh briefing page after one is revoked, and retries a failed text later rather than every minute", async () => {
+    const { db } = pageFixture();
+    const first = await ensureTodayPage(db, "2030-01-15");
+    assert.equal((await ensureTodayPage(db, "2030-01-15")).slug, first.slug);
+    revokePage(db, first);
+    const second = await ensureTodayPage(db, "2030-01-15");
+    assert.notEqual(second.slug, first.slug);
+    assert.ok(pageIsLive(second));
+
+    resetPageJobFailures();
+    const owner = ownerTurn(db);
+    const made = await run(db, "create_page", {
+      blocks: [{ type: "poll", text: "Where?", items: ["a", "b"], closes_at: new Date(Date.now() - 60_000).toISOString() }],
+    }, owner);
+    let attempts = 0;
+    const send = (async () => { attempts += 1; throw new Error("provider down"); }) as unknown as Parameters<typeof runPageJobs>[1]["send"];
+    const local = { date: "2030-01-15", time: "12:00" };
+    await runPageJobs(db, { send, quiet: false, local });
+    await runPageJobs(db, { send, quiet: false, local });
+    assert.equal(attempts, 1, "a failed text waits before it is tried again");
+    assert.equal(getPage(db, made.id)?.results_posted_at, null, "and is still owed");
+    resetPageJobFailures();
   });
 
   it("sweeps pages a week after they expire, with their votes", async () => {

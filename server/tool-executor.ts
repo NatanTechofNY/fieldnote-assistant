@@ -588,7 +588,8 @@ function scopedTodo(db: Db, todoId: string, scope: GroupScope | undefined): Todo
 /** A page as the turn may see it: in a group, only the group's own, and any other is as good as missing. */
 function scopedPage(db: Db, pageId: string, scope: GroupScope | undefined): PageRow | undefined {
   const row = getPage(db, pageId);
-  if (row && scope && row.life_area_id !== scope.lifeAreaId) return undefined;
+  // A group reaches only pages that are the group's and shared: a private one filed under its area is still the owner's.
+  if (row && scope && (row.life_area_id !== scope.lifeAreaId || row.audience !== "shared")) return undefined;
   return row;
 }
 
@@ -1078,6 +1079,13 @@ export async function executeAgentTool(
    * group from reading, editing, or even finding a page that is not its own.
    */
   if (name === "create_page") {
+    // A page filed under a group is texted to that group when its poll closes, so naming a group here
+    // takes what posting there takes: the owner's own line, naming the group, on a turn that read nothing foreign.
+    if (!scope) {
+      const source = typeof input.from_page_id === "string" ? getPage(db, input.from_page_id) : undefined;
+      const target = typeof input.thread_id === "string" ? input.thread_id : !input.thread_id && source?.group_id ? source.thread_id : null;
+      if (target) crossChatTurn(db, context, target);
+    }
     const { page, wroteTodos } = await createPageFromInput(db, input as never, pageOrigin(context));
     if (wroteTodos) search.flushSoon();
     return pageResult(db, page);
@@ -1088,7 +1096,9 @@ export async function executeAgentTool(
     return pageResult(db, await updatePageFromInput(db, row, input as never));
   }
   if (name === "list_pages") {
-    const rows = listPages(db, { includeExpired: input.include_expired === true, lifeAreaId: scope?.lifeAreaId });
+    const rows = listPages(db, {
+      includeExpired: input.include_expired === true, lifeAreaId: scope?.lifeAreaId, audience: scope ? "shared" : undefined,
+    });
     return { pages: rows.map(row => pageResult(db, row)) };
   }
   if (name === "revoke_page") {

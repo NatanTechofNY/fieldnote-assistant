@@ -37,7 +37,7 @@ export function labelInstant(day: string, slot: string | null, timezone: string,
 }
 
 const stamp = (date: Date): string => date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-const escapeText = (value: string): string => value.replace(/[\\;,]/g, match => `\\${match}`).replace(/\r?\n/g, "\\n");
+const escapeText = (value: string): string => value.replace(/[\\;,]/g, match => `\\${match}`).replace(/\r\n|\r|\n/g, "\\n");
 
 export function pageCalendar(db: Db, page: PageRow): string | null {
   if (!pageIsLive(page)) return null;

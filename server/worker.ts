@@ -763,7 +763,15 @@ async function deliverDailyDigest(
       userMessageMetadata: { kind: "daily_digest", date },
     });
     // The owner's own page of today's todos, when they asked for one and there is an address to link to.
-    const todayUrl = digest.linkTodayPage ? tryPublicPageUrl(db, (await ensureTodayPage(db, date)).slug) : null;
+    // The link is a nicety: if making it fails, the briefing still goes out without it.
+    let todayUrl: string | null = null;
+    if (digest.linkTodayPage) {
+      try {
+        todayUrl = tryPublicPageUrl(db, (await ensureTodayPage(db, date)).slug);
+      } catch (error) {
+        console.warn("Could not make today's page for the briefing:", error instanceof Error ? error.message : error);
+      }
+    }
     const text = todayUrl ? `${response.text}\n\nToday's page: ${todayUrl}` : response.text;
     const sent = await send(db, recipient, text, withGif(response));
     recordOutboundChannelMessage(db, "sms", recipient, text, sent.sid, sent.status, {

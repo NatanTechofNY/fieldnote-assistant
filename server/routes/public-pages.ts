@@ -22,13 +22,18 @@ import type { RouteContext } from "./context.ts";
 
 const SLUG = /^[A-Za-z0-9_-]{22}$/;
 const VOTER_COOKIE = "fn_voter";
-const WRITES_PER_WINDOW = 30;
+const WRITES_PER_WINDOW = 60;
 const WINDOW_MS = 10 * 60 * 1000;
 const writes = new Map<string, number[]>();
 
-/** Writes per caller, counted separately from sign-in failures so a family on one wifi can all vote. */
+/**
+ * Writes per page and caller, counted separately from sign-in failures. The
+ * caller is the socket peer (`req.ip` follows X-Forwarded-For, which anyone can
+ * set), so behind a proxy everyone shares one peer; keying on the page as well
+ * keeps one busy or abusive link from silencing every other.
+ */
 function tooManyWrites(req: Request): boolean {
-  const key = throttleKey(req);
+  const key = `${req.params.slug ?? ""}|${throttleKey(req)}`;
   const cutoff = Date.now() - WINDOW_MS;
   const recent = (writes.get(key) ?? []).filter(at => at > cutoff);
   if (writes.size > 2000) {
@@ -50,7 +55,7 @@ export function resetPageWriteThrottle(): void {
 /** A signed-in owner. With no password set everyone is "authenticated", so nobody counts as the owner. */
 const signedInOwner = (res: Response): boolean => authEnabled() && res.locals.authenticated === true;
 
-const formCode = (error: PageError): string => (["name", "closed", "option"].includes(error.code) ? error.code : "gone");
+const formCode = (error: PageError): string => (["name", "closed", "option", "full"].includes(error.code) ? error.code : "gone");
 
 function secure(res: Response): void {
   res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");

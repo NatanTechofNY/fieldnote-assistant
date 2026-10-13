@@ -244,7 +244,9 @@ Six tools publish and manage web pages at an unguessable link, `/p/<slug>`; the 
 
 **Audience.** A page is `owner` or `shared`. An `owner` page needs a signed-in session: an anonymous visitor is redirected to `/login?next=/p/<slug>`. A `shared` page is public to anyone with the link, which is why it can never hold the owner's private records unless it is filed under a group's life area (then it reads that area only). Templates that read the owner's records (`weekly_review`, `project`, `meeting_prep`, `jira_status`, `habits`, `mood_heatmap`) are owner-only, and a group turn refuses them. `/p/*` is the only public prefix besides `/api/health` and `/api/webhooks/*`.
 
-**Group scope.** From a group chat, `create_page` files the page under the group's area and thread, `update_page`, `list_pages`, `get_poll_results`, and `revoke_page` reach only that area's pages (`scopedPage`), and `send_to_contact` is refused (`OWNER_ONLY_TOOLS`).
+**Naming a group.** From the owner's own chat, `create_page` with a `thread_id` (or a `from_page_id` copy of a group's page) files the page under that group, and its result is texted there, so it takes what `send_to_group` takes: the owner's own line, the owner naming the group, and no web page or other group read this turn. A poll is always shared, and an owner-only template can never be shared, filed under a group, or copied into either.
+
+**Group scope.** From a group chat, `create_page` files the page under the group's area and thread, `update_page`, `list_pages`, `get_poll_results`, and `revoke_page` reach only that area's shared pages (`scopedPage`; a private page filed under the area is still the owner's), and `send_to_contact` is refused (`OWNER_ONLY_TOOLS`).
 
 **Public writes.** A page's visitors can type a name (`POST /p/:slug/name`), vote, or tick a shared checklist step. Names are remembered in an `fn_voter` cookie, one vote per name per question, and a checklist tick only succeeds for a subtask of the block's own todo. These routes are rate-limited per IP and send a strict CSP (no script runs on a page).
 

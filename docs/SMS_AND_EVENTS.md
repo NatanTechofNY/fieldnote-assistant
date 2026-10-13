@@ -221,11 +221,11 @@ A page link sent to a chat (`create_page` then the reply, or `send_to_contact`) 
 
 Three jobs in [`server/page-worker.ts`](../server/page-worker.ts) run from the worker tick, each only when a recipient is configured and each claiming its row before it sends so a retry or a second tick cannot repeat it:
 
-- **Close-out.** Once a poll's `closes_at` passes, the result is texted to the chat that page was sent to (`results_posted_at`).
+- **Close-out.** Once a poll's `closes_at` passes, or everyone in its group has answered, the result is texted to the chat that page was sent to (`results_posted_at`). A poll that finished early is closed at that moment, so the text and the page agree. A poll's page is kept open for three days past its close.
 - **Nudge.** Within two hours of a poll closing, the people in a group who have not voted are reminded once (`nudged_at`).
 - **Echo.** Votes and ticks since the last pass are summarised to the chat in one line (`page_events.echoed_at`).
 
-If the send fails the claim is reverted and the next tick retries. A group with *Week in review* turned on gets a recap page every Sunday at 18:00 in its timezone.
+If a send fails the claim is reverted and the job waits 2 minutes, then 4, 8, and 16 before trying again; the fifth failure gives up on that text rather than trying every minute for good. A text that went out but could not be filed is not retried. A group with *Week in review* turned on gets a recap page every Sunday at 18:00 in its timezone.
 
 ## Reactions and threads
 

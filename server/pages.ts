@@ -15,7 +15,7 @@ import { getNotificationPreferences, getSendbluePublicConfig, getTwilioPublicCon
 import { PAGE_BLOCK_TYPES, type TODO_BLOCK_RANGES, type pageBlockInput } from "./schemas.ts";
 import type { Db } from "./types.ts";
 
-/** `code` is `name`, `closed`, or `option` for a public form's notice, `not_found` for a missing page, else `invalid`. */
+/** `code` is `name`, `closed`, `full`, or `option` for a public form's notice, `not_found` for a missing page, else `invalid`. */
 export class PageError extends Error {
   code: string;
   constructor(message: string, code = "invalid") {
@@ -69,6 +69,8 @@ export type PageRow = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const VOTER_NAME_MAX = 40;
+/** Most distinct names a page holds, so a link in the wrong hands cannot stuff a poll without end. */
+export const MAX_VOTERS = 100;
 
 /** Blocks a viewer can write to: they carry a stable id the vote or check is filed under. */
 export const INTERACTIVE_BLOCKS = new Set<PageBlockType>(["poll", "availability", "live_checklist"]);
@@ -321,6 +323,20 @@ export type NewPage = {
   dedupeKey?: string | null;
 };
 
+/**
+ * When a page stops answering: at least `days` from now, and never before a
+ * poll on it closes (plus a grace week for people to read the result), so the
+ * close-out never links to a page that has gone.
+ */
+function expiryFor(blocks: PageBlock[], days: number): string {
+  let at = Date.now() + days * DAY_MS;
+  for (const block of blocks) {
+    const closes = block.closes_at ? Date.parse(block.closes_at) : NaN;
+    if (Number.isFinite(closes)) at = Math.max(at, closes + 3 * DAY_MS);
+  }
+  return new Date(at).toISOString();
+}
+
 export function createPage(db: Db, input: NewPage): PageRow {
   assertRecordsAllowed(input.blocks, input.audience, input.lifeAreaId ?? null);
   const kind: PageKind = input.kind ?? (hasVoting(input.blocks) ? "poll" : "custom");
@@ -338,7 +354,7 @@ export function createPage(db: Db, input: NewPage): PageRow {
     thread_id: input.threadId ?? null,
     group_id: input.groupId ?? null,
     dedupe_key: input.dedupeKey ?? null,
-    expires_at: new Date(Date.now() + (input.expiresInDays ?? DEFAULT_DAYS[kind]) * DAY_MS).toISOString(),
+    expires_at: expiryFor(input.blocks, input.expiresInDays ?? DEFAULT_DAYS[kind]),
     revoked_at: null,
     results_posted_at: null,
     nudged_at: null,
@@ -379,7 +395,9 @@ export function updatePage(
     `).run(
       (patch.title ?? row.title).slice(0, 120),
       JSON.stringify(blocks),
-      patch.expiresInDays ? new Date(Date.now() + patch.expiresInDays * DAY_MS).toISOString() : row.expires_at,
+      patch.expiresInDays || patch.blocks
+        ? (patch.expiresInDays ? expiryFor(blocks, patch.expiresInDays) : laterOf(row.expires_at, expiryFor(blocks, 0)))
+        : row.expires_at,
       row.kind === "today" || row.kind === "week" ? row.kind : hasVoting(blocks) ? "poll" : "custom",
       timestamp,
       row.id,
@@ -388,6 +406,8 @@ export function updatePage(
   })();
   return getPage(db, row.id) as PageRow;
 }
+
+const laterOf = (a: string, b: string): string => (Date.parse(a) >= Date.parse(b) ? a : b);
 
 function pruneVotes(db: Db, pageId: string, blocks: PageBlock[]): void {
   const valid = new Map(blocks.filter(block => block.id && blockOptions(block).length)
@@ -408,19 +428,21 @@ function pruneVotes(db: Db, pageId: string, blocks: PageBlock[]): void {
 }
 
 export function revokePage(db: Db, row: PageRow): PageRow {
-  db.prepare("UPDATE shared_pages SET revoked_at=COALESCE(revoked_at,?),updated_at=? WHERE id=?")
+  // The dedupe key goes too, so a briefing that wants today's page again makes a fresh one.
+  db.prepare("UPDATE shared_pages SET revoked_at=COALESCE(revoked_at,?),dedupe_key=NULL,updated_at=? WHERE id=?")
     .run(now(), now(), row.id);
   return getPage(db, row.id) as PageRow;
 }
 
 export function listPages(
   db: Db,
-  options: { includeExpired?: boolean; lifeAreaId?: string } = {},
+  options: { includeExpired?: boolean; lifeAreaId?: string; audience?: PageAudience } = {},
 ): PageRow[] {
   const clauses = ["user_id=?"];
   const args: Array<string | number> = [USER_ID];
   if (!options.includeExpired) { clauses.push("revoked_at IS NULL AND expires_at>?"); args.push(now()); }
   if (options.lifeAreaId) { clauses.push("life_area_id=?"); args.push(options.lifeAreaId); }
+  if (options.audience) { clauses.push("audience=?"); args.push(options.audience); }
   return db.prepare(`SELECT * FROM shared_pages WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT 200`)
     .all(...args) as PageRow[];
 }
@@ -439,10 +461,13 @@ export const isPreviewFetcher = (userAgent: string | undefined): boolean =>
 
 /* Votes -------------------------------------------------------------------- */
 
-/** Control characters are whitespace here: `\s` takes the common ones, the rest are swapped one by one. */
+/**
+ * Control characters are whitespace here: `\s` takes the common ones, the rest are swapped one by one.
+ * A name goes into chat texts and the agent's context, so the characters a link or an address needs are dropped.
+ */
 export const cleanVoterName = (value: unknown): string =>
   [...String(value ?? "")].map(char => (char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 ? " " : char)).join("")
-    .replace(/\s+/g, " ").trim().slice(0, VOTER_NAME_MAX);
+    .replace(/[<>"\\/:@]/g, "").replace(/\s+/g, " ").trim().slice(0, VOTER_NAME_MAX);
 
 export const pollIsClosed = (block: PageBlock, at: number = Date.now()): boolean =>
   Boolean(block.closes_at && Date.parse(block.closes_at) <= at);
@@ -485,6 +510,9 @@ export function recordVote(
   if (block.type === "poll" && !chosen.length) throw new PageError("Pick an option to vote", "option");
   const key = name.toLowerCase();
   const timestamp = now();
+  const known = db.prepare("SELECT COUNT(DISTINCT voter_name_key) n FROM page_votes WHERE page_id=?").get(row.id) as { n: number };
+  const already = db.prepare("SELECT 1 found FROM page_votes WHERE page_id=? AND voter_name_key=?").get(row.id, key);
+  if (!already && known.n >= MAX_VOTERS) throw new PageError("This page has all the answers it can take", "full");
   db.transaction(() => {
     if (!chosen.length) {
       db.prepare("DELETE FROM page_votes WHERE page_id=? AND block_id=? AND voter_name_key=?").run(row.id, block.id, key);
@@ -577,9 +605,9 @@ const interactiveBlocks = (row: PageRow) => pageBlocks(row).filter(block => bloc
 export function pagesAwaitingResults(db: Db, at: number = Date.now()): PageRow[] {
   const rows = db.prepare(`
     SELECT * FROM shared_pages
-    WHERE user_id=? AND kind='poll' AND revoked_at IS NULL AND results_posted_at IS NULL
+    WHERE user_id=? AND kind='poll' AND revoked_at IS NULL AND results_posted_at IS NULL AND expires_at>?
       AND (thread_id IS NOT NULL OR group_id IS NOT NULL)
-  `).all(USER_ID) as PageRow[];
+  `).all(USER_ID, new Date(at).toISOString()) as PageRow[];
   return rows.filter(row => {
     const blocks = interactiveBlocks(row);
     if (!blocks.length) return false;
@@ -593,9 +621,9 @@ export function pagesAwaitingResults(db: Db, at: number = Date.now()): PageRow[]
 export function pagesToNudge(db: Db, at: number = Date.now()): Array<{ page: PageRow; missing: string[] }> {
   const rows = db.prepare(`
     SELECT * FROM shared_pages
-    WHERE user_id=? AND kind='poll' AND revoked_at IS NULL AND results_posted_at IS NULL
+    WHERE user_id=? AND kind='poll' AND revoked_at IS NULL AND results_posted_at IS NULL AND expires_at>?
       AND nudged_at IS NULL AND group_id IS NOT NULL AND thread_id IS NOT NULL
-  `).all(USER_ID) as PageRow[];
+  `).all(USER_ID, new Date(at).toISOString()) as PageRow[];
   const due: Array<{ page: PageRow; missing: string[] }> = [];
   for (const page of rows) {
     const closes = interactiveBlocks(page).map(block => block.closes_at).filter(Boolean)
@@ -605,6 +633,14 @@ export function pagesToNudge(db: Db, at: number = Date.now()): Array<{ page: Pag
     if (missing.length) due.push({ page, missing });
   }
   return due;
+}
+
+/** Closes every poll on a page that is still open, so a poll everyone has answered stops taking votes the moment its result is posted. */
+export function closePollsNow(db: Db, row: PageRow, at: number = Date.now()): void {
+  const stamp = new Date(at).toISOString();
+  const blocks = pageBlocks(row).map(block =>
+    (block.type === "poll" || block.type === "availability") && !pollIsClosed(block, at) ? { ...block, closes_at: stamp } : block);
+  db.prepare("UPDATE shared_pages SET blocks_json=?,updated_at=? WHERE id=?").run(JSON.stringify(blocks), now(), row.id);
 }
 
 const joinNames = (names: string[]): string =>
@@ -623,12 +659,13 @@ export function closeoutText(db: Db, row: PageRow): string {
       ? `${result.question} ${joinNames(result.leaders)} tie with ${top.count} each (${voted} ${noun}).`
       : `${result.question} ${result.leaders[0]} wins with ${top.count} of ${voted} ${noun}.`;
   });
-  const link = tryPublicPageUrl(db, row.slug);
+  // An owner's page is behind a sign-in; nobody in a chat can open it, so it is not offered to them.
+  const link = row.audience === "shared" ? tryPublicPageUrl(db, row.slug) : null;
   return [`Poll closed. ${lines.join(" ")}`, link ? `Full results: ${link}` : ""].filter(Boolean).join("\n");
 }
 
 export function nudgeText(db: Db, row: PageRow, missing: string[]): string {
-  const link = tryPublicPageUrl(db, row.slug);
+  const link = row.audience === "shared" ? tryPublicPageUrl(db, row.slug) : null;
   return `${joinNames(missing)}: "${row.title}" closes soon and still needs your vote.${link ? ` ${link}` : ""}`;
 }
 
@@ -647,7 +684,9 @@ export function pendingEchoes(db: Db, at: number = Date.now(), windowMs = 2 * 60
   const ready: PendingEcho[] = [];
   for (const [pageId, events] of byPage) {
     // Gathered over a window: the chat hears about a burst of votes once, not once per vote.
-    if (Date.parse(events[0].created_at) + windowMs > at) continue;
+    // Unless it keeps going: after ten minutes the first of it is told whatever has come since.
+    const newest = Date.parse(events[events.length - 1].created_at);
+    if (newest + windowMs > at && Date.parse(events[0].created_at) + 5 * windowMs > at) continue;
     const page = getPage(db, pageId);
     if (page) ready.push({ page, events });
   }

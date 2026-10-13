@@ -179,7 +179,9 @@ export function clearedSessionCookie(secure: boolean): string {
 /** Only same-origin paths are accepted, so `next` cannot become an open redirect. */
 export function safeNextPath(value: unknown): string {
   if (typeof value !== "string") return "/";
+  // A backslash is a slash to a browser, so "/\\host" is "//host"; control characters have no place in a path.
   if (!value.startsWith("/") || value.startsWith("//")) return "/";
+  if ([...value].some(char => char === "\\" || char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return "/";
   return value;
 }
 

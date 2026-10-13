@@ -427,7 +427,8 @@ CREATE TABLE IF NOT EXISTS page_events (
   created_at TEXT NOT NULL,
   echoed_at TEXT
 );
-CREATE INDEX IF NOT EXISTS page_events_pending ON page_events(page_id, echoed_at);
+DROP INDEX IF EXISTS page_events_pending;
+CREATE INDEX IF NOT EXISTS page_events_unechoed ON page_events(created_at) WHERE echoed_at IS NULL;
 `;
 
 function columns(db: Db, table: string): Set<string> {
