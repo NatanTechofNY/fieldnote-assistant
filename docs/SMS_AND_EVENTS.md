@@ -215,6 +215,18 @@ A group's area can carry two local times, set per group in Settings → Group ch
 
 **A second bubble.** `send_message` texts one message mid-turn — an emoji, "on it", a line that should stand alone — through the same sender the turn's reply uses, into the group when the turn came from one, and files it on the thread as an assistant message with `kind: "message"`. A turn that said everything through it and then returned no text is delivered as those bubbles alone, the same rule as a tapback with nothing after it. It works on any SMS conversation and refuses on web, where the answer is the reply itself. Every Sendblue call, this one included, is bounded by `SENDBLUE_TIMEOUT_MS` (15 s) so a stalled connection cannot hold the worker's loop.
 
+## Hosted pages in chat
+
+A page link sent to a chat (`create_page` then the reply, or `send_to_contact`) is an ordinary text; iMessage unfurls it with the page's title and the Fieldnote image served at `/p/og.png`. Links are built from `PUBLIC_BASE_URL`, falling back to the webhook URL saved in Settings; without either, `create_page` answers with a clear error instead of an unusable link. Link-preview bots that open a page do not count as views.
+
+Three jobs in [`server/page-worker.ts`](../server/page-worker.ts) run from the worker tick, each only when a recipient is configured and each claiming its row before it sends so a retry or a second tick cannot repeat it:
+
+- **Close-out.** Once a poll's `closes_at` passes, or everyone in its group has answered, the result is texted to the chat that page was sent to (`results_posted_at`). A poll that finished early is closed at that moment, so the text and the page agree. A poll's page is kept open for three days past its close.
+- **Nudge.** Within two hours of a poll closing, the people in a group who have not voted are reminded once (`nudged_at`).
+- **Echo.** Votes and ticks since the last pass are summarised to the chat in one line (`page_events.echoed_at`).
+
+If a send fails the claim is reverted and the job waits 2 minutes, then 4, 8, and 16 before trying again; the fifth failure gives up on that text rather than trying every minute for good. A text that went out but could not be filed is not retried. A group with *Week in review* turned on gets a recap page every Sunday at 18:00 in its timezone.
+
 ## Reactions and threads
 
 Two things iMessage has that SMS does not, both reachable only from a turn a real message started — never from the browser chat, a Twilio conversation, or an app-composed turn like a digest.

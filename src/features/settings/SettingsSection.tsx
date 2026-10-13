@@ -1,6 +1,10 @@
-import { type ReactNode, useState } from "react";
-import { ChevronDown, Settings2 } from "lucide-react";
+import type { ReactNode } from "react";
+import { Settings2 } from "lucide-react";
 
+/**
+ * One group of related settings, always open: the tab it sits under already
+ * did the sorting, so there is nothing left to collapse.
+ */
 export function SettingsSection({
   sectionId,
   title,
@@ -16,30 +20,15 @@ export function SettingsSection({
   icon: typeof Settings2;
   children: ReactNode;
 }) {
-  const [isOpen, setIsOpen] = useState(() => {
-    try {
-      const saved = JSON.parse(window.localStorage.getItem("fieldnote:settings-sections") || "{}") as Record<string, boolean>;
-      return saved[sectionId] === true;
-    } catch {
-      return false;
-    }
-  });
-  const persistOpenState = (nextOpen: boolean) => {
-    setIsOpen(nextOpen);
-    try {
-      const saved = JSON.parse(window.localStorage.getItem("fieldnote:settings-sections") || "{}") as Record<string, boolean>;
-      window.localStorage.setItem("fieldnote:settings-sections", JSON.stringify({ ...saved, [sectionId]: nextOpen }));
-    } catch {
-      // Browser storage can be unavailable in private or restricted contexts.
-    }
-  };
-  return <details className="card settings-section" open={isOpen} onToggle={event => persistOpenState(event.currentTarget.open)}>
-    <summary>
+  return <section className="card settings-section" aria-labelledby={`settings-section-${sectionId}`}>
+    <header className="settings-section-head">
       <span className="settings-section-icon"><Icon size={18}/></span>
-      <span className="settings-section-copy"><strong>{title}</strong><small>{description}</small></span>
+      <span className="settings-section-copy">
+        <strong id={`settings-section-${sectionId}`}>{title}</strong>
+        <small>{description}</small>
+      </span>
       {status && <span className="settings-section-status">{status}</span>}
-      <ChevronDown className="settings-section-chevron" size={18}/>
-    </summary>
+    </header>
     <div className="settings-section-body">{children}</div>
-  </details>;
+  </section>;
 }

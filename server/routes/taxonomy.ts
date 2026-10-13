@@ -22,6 +22,7 @@ const GROUP_FIELDS = [
   "evening_checkin_time",
   "checkin_copy_to_owner",
   "keep_pictures",
+  "weekly_review_page",
   "morning_checkin_prompt",
   "evening_checkin_prompt",
   "soul",
@@ -123,7 +124,7 @@ export function registerTaxonomyRoutes({ app, db, search, draftWithAgent }: Rout
       FROM life_areas WHERE id=? AND user_id=?
     `).get(req.params.id, USER_ID) as {
       id: string; slug: string; name: string; color: string; thread_id: string | null;
-      morning_checkin_time: string | null; evening_checkin_time: string | null; checkin_copy_to_owner: 0 | 1; keep_pictures: 0 | 1;
+      morning_checkin_time: string | null; evening_checkin_time: string | null; checkin_copy_to_owner: 0 | 1; keep_pictures: 0 | 1; weekly_review_page: 0 | 1;
       morning_checkin_prompt: string | null; evening_checkin_prompt: string | null;
       soul: string | null; assistant_nickname: string | null; reply_mode: "normal" | "named_only";
     } | undefined;

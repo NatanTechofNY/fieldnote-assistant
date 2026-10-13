@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { Archive, Check, Circle, Clock3, Database, EyeOff, History, ListChecks, LoaderCircle, MessageSquare, Moon, Newspaper, Pause, PenLine, Phone, Plus, RefreshCw, Send, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, X, Zap } from "lucide-react";
+import { Archive, Bot, Check, Circle, Clock3, Database, EyeOff, FileText, History, ListChecks, LoaderCircle, MessageSquare, MessagesSquare, Moon, Newspaper, Pause, PenLine, Phone, Plug, Plus, RefreshCw, Send, SlidersHorizontal, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, Wrench, X, Zap } from "lucide-react";
 import { api } from "../../api";
 import type {
   ExternalEvent, IntegrationState, SmsProvider, TrustedContact,
@@ -15,6 +16,7 @@ import { AskEditor } from "./AskEditor";
 import { LifeAreasSettings } from "./LifeAreasSettings";
 import { GroupChatSettings } from "./GroupChatSettings";
 import { SettingsSection } from "./SettingsSection";
+import { SettingsTabs, type SettingsTabDef } from "./SettingsTabs";
 import { SoulEditor } from "./SoulEditor";
 import { UnderHoodSettings } from "./UnderHoodSettings";
 import { WebhookUrlField } from "./WebhookUrlField";
@@ -28,6 +30,13 @@ const themeStatus: Record<ThemePreference, string> = {
 };
 
 const providerLabel: Record<SmsProvider, string> = { twilio: "Twilio", sendblue: "Sendblue" };
+
+/** The tab ids, in the order they run across the menu; `?tab=` carries one of them. */
+const SETTINGS_TAB_IDS = ["general", "assistant", "messaging", "connections", "advanced"] as const;
+type SettingsTabId = (typeof SETTINGS_TAB_IDS)[number];
+
+/** Sections used to open and close, remembered here; they are always open now. */
+const LEGACY_SECTIONS_KEY = "fieldnote:settings-sections";
 
 /** The number format the server accepts (`e164` in `server/schemas.ts`). */
 const E164 = /^\+[1-9]\d{7,14}$/;
@@ -68,6 +77,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   const [digestTime, setDigestTime] = useState(data.notifications.dailyDigestTime);
   const [digestTodos, setDigestTodos] = useState(data.notifications.digestIncludeTodos);
   const [digestOverdue, setDigestOverdue] = useState(data.notifications.digestIncludeOverdue);
+  const [linkTodayPage, setLinkTodayPage] = useState(data.notifications.linkTodayPage ?? false);
   const [smsEnabled, setSmsEnabled] = useState(data.notifications.smsEnabled);
   const [quietStart, setQuietStart] = useState(data.notifications.quietHoursStart || "22:00");
   const [quietEnd, setQuietEnd] = useState(data.notifications.quietHoursEnd || "07:00");
@@ -83,6 +93,24 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   const [granolaKey, setGranolaKey] = useState("");
   const [toast, setToast] = useState("");
   const { preference } = useTheme();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab");
+  const activeTab: SettingsTabId = SETTINGS_TAB_IDS.find(id => id === requestedTab) ?? "general";
+  // A tab already opened stays mounted, hidden, so what was typed in it (a Soul being edited, a brief's wording) survives a visit elsewhere.
+  const [visited, setVisited] = useState(() => new Set<string>([activeTab]));
+  if (!visited.has(activeTab)) setVisited(new Set(visited).add(activeTab));
+  const selectTab = (id: string) => setSearchParams(previous => {
+    const next = new URLSearchParams(previous);
+    next.set("tab", id);
+    return next;
+  }, { replace: true });
+  useEffect(() => {
+    try {
+      window.localStorage.removeItem(LEGACY_SECTIONS_KEY);
+    } catch {
+      // Browser storage can be unavailable in private or restricted contexts.
+    }
+  }, []);
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ["integrations"] });
     void queryClient.invalidateQueries({ queryKey: ["integration-events"] });
@@ -135,6 +163,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
       dailyDigestTime: digestTime,
       digestIncludeTodos: digestTodos,
       digestIncludeOverdue: digestOverdue,
+      linkTodayPage,
       quietHoursStart: quietStart || null,
       quietHoursEnd: quietEnd || null,
       trustedContacts,
@@ -236,6 +265,18 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
     setProviderTab(provider);
     if (provider !== activeProvider && connections[provider].configured) providerSwitch.mutate(provider);
   };
+  const connectedServices = [data.granola.configured, data.atlassian.configured].filter(Boolean).length;
+  const tabs: SettingsTabDef[] = [
+    { id: "general", label: "General", icon: SlidersHorizontal },
+    { id: "assistant", label: "Assistant", icon: Bot, status: briefCount ? `${briefCount} ${briefCount === 1 ? "brief" : "briefs"}` : undefined },
+    {
+      id: "messaging", label: "Messaging", icon: MessagesSquare,
+      status: activeConnection.configured ? providerLabel[activeProvider] : "Not connected",
+      attention: !activeConnection.configured,
+    },
+    { id: "connections", label: "Connections", icon: Plug, status: `${connectedServices} of 2` },
+    { id: "advanced", label: "Advanced", icon: Wrench },
+  ];
   return <div className="page">
     <PageHead
       eyebrow="Preferences & connections"
@@ -245,510 +286,535 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
     {!data.secretStorageReady && <div className="integration-warning">
       <TriangleAlert size={16}/><span>Add <code>SETTINGS_ENCRYPTION_KEY</code> to the server environment before connecting providers.</span>
     </div>}
-    <section className="settings-stack">
-      <SettingsSection
-        sectionId="appearance"
-        title="Appearance"
-        description="Match your system, or pin the interface to light or dark."
-        status={demoMode.enabled ? "Demo mode · on" : themeStatus[preference]}
-        icon={SunMoon}
-      >
-        <div className="card-title"><h3>Theme</h3><SunMoon size={18}/></div>
-        <p className="integration-copy">Applies to this browser only. System follows your operating system setting as it changes.</p>
-        <ThemeToggle/>
-        <div className="card-title"><h3>Demo mode</h3><EyeOff size={18}/></div>
-        <p className="integration-copy">
-          Hides the values that identify this installation — phone numbers, account identifiers, the
-          public tunnel URL, and the agent id — so the app can be screen-recorded as it is. Nothing is
-          changed on the server, and a masked field still saves the real value underneath.
-          Toggle it from anywhere with <kbd>⌘⇧D</kbd>.
-        </p>
-        <label className="toggle-row compact">
-          <input type="checkbox" checked={demoMode.enabled} onChange={event => demoMode.setEnabled(event.target.checked)}/>
-          <span>Mask identifying values on screen</span>
-        </label>
-      </SettingsSection>
-      <SettingsSection
-        sectionId="soul"
-        title="Soul"
-        description="How the assistant talks with you, on your own line and here. It updates itself when you give it feedback."
-        status={data.soul ? "Shaped" : "Default voice"}
-        icon={Sparkles}
-      >
-        <SoulEditor
-          name="Your Soul"
-          value={data.soul ?? null}
-          placeholder={"- Short answers; skip the pleasantries.\n- Dry humour is fine.\n- No emojis.\n- Autonomy: just reschedule things; ask before cancelling anything."}
-          saving={soul.isPending}
-          onSave={next => soul.mutate(next)}
-        />
-        <SoulEditor
-          name="Your profile"
-          title="Profile"
-          setLabel={data.profile?.updatedAt ? `Updated ${format(new Date(data.profile.updatedAt), "MMM d")}` : "Written"}
-          emptyLabel="Not written yet"
-          saveLabel="Save profile"
-          hint="What the assistant knows about you before you say a word. It rewrites this overnight from your memories; edit it to correct anything."
-          value={data.profile?.profile ?? null}
-          placeholder={"People: wife Cementa; sister Natella…\nLife & work: …\nRoutines & preferences: …"}
-          saving={profile.isPending || refreshProfile.isPending}
-          onSave={next => profile.mutate(next)}
-          action={{
-            label: "Rewrite now",
-            icon: refreshProfile.isPending ? <LoaderCircle className="spin" size={13}/> : <RefreshCw size={13}/>,
-            pending: refreshProfile.isPending,
-            onClick: () => refreshProfile.mutate(),
-          }}
-        />
-        <div className="toolbar-actions">
+    <section className="settings-shell">
+      <SettingsTabs tabs={tabs} active={activeTab} onSelect={selectTab}>
+        {visited.has("general") && <div className="settings-stack" hidden={activeTab !== "general"}>
+        <SettingsSection
+          sectionId="appearance"
+          title="Appearance"
+          description="Match your system, or pin the interface to light or dark."
+          status={demoMode.enabled ? "Demo mode · on" : themeStatus[preference]}
+          icon={SunMoon}
+        >
+          <div className="card-title"><h3>Theme</h3><SunMoon size={18}/></div>
+          <p className="integration-copy">Applies to this browser only. System follows your operating system setting as it changes.</p>
+          <ThemeToggle/>
+          <div className="card-title"><h3>Demo mode</h3><EyeOff size={18}/></div>
+          <p className="integration-copy">
+            Hides the values that identify this installation — phone numbers, account identifiers, the
+            public tunnel URL, and the agent id — so the app can be screen-recorded as it is. Nothing is
+            changed on the server, and a masked field still saves the real value underneath.
+            Toggle it from anywhere with <kbd>⌘⇧D</kbd>.
+          </p>
+          <label className="toggle-row compact">
+            <input type="checkbox" checked={demoMode.enabled} onChange={event => demoMode.setEnabled(event.target.checked)}/>
+            <span>Mask identifying values on screen</span>
+          </label>
+        </SettingsSection>
+        <SettingsSection
+          sectionId="tasks"
+          title="Tasks"
+          description="How the board behaves when work is broken into subtasks."
+          status={data.tasks.autoCompleteParent ? "Parent closes itself" : "Parent stays open"}
+          icon={ListChecks}
+        >
+          <div className="card-title"><h3>Finishing a task</h3><ListChecks size={18}/></div>
+          <p className="integration-copy">
+            Applies wherever a subtask is completed: the board, the list, the editor, and the Agent.
+            Finishing a parent that still has open subtasks always asks first, whichever way this is set.
+          </p>
           <label className="toggle-row compact">
             <input
               type="checkbox"
-              checked={data.followUps !== false}
-              onChange={event => followUps.mutate(event.target.checked)}
+              checked={data.tasks.autoCompleteParent}
+              disabled={taskPreferences.isPending}
+              onChange={event => taskPreferences.mutate(event.target.checked)}
             />
-            <span>Follow up once on things I said I&rsquo;d do and haven&rsquo;t marked done</span>
+            <span>Mark the parent done when its last subtask is completed</span>
+            {taskPreferences.isPending && <LoaderCircle className="spin" size={13}/>}
           </label>
-        </div>
-        <p className="integration-copy">
-          Each group chat has its own Soul, under Group chats. Facts about you — what you like, allergies, how you
-          want things done — are memories: those tagged <code>preference</code> come with every turn.
-        </p>
-        <button className="button ghost" type="button" disabled={tagPreferences.isPending} onClick={() => tagPreferences.mutate()}>
-          {tagPreferences.isPending ? <LoaderCircle className="spin" size={13}/> : <ListChecks size={13}/>}
-          Tag preference memories
-        </button>
-      </SettingsSection>
-      <SettingsSection
-        sectionId="classifications"
-        title="Classifications"
-        description="Manage life areas used by todos, memories, search, and the Agent."
-        status="Work · Personal · custom"
-        icon={Circle}
-      >
-        <LifeAreasSettings notify={notify}/>
-      </SettingsSection>
-      <SettingsSection
-        sectionId="tasks"
-        title="Tasks"
-        description="How the board behaves when work is broken into subtasks."
-        status={data.tasks.autoCompleteParent ? "Parent closes itself" : "Parent stays open"}
-        icon={ListChecks}
-      >
-        <div className="card-title"><h3>Finishing a task</h3><ListChecks size={18}/></div>
-        <p className="integration-copy">
-          Applies wherever a subtask is completed: the board, the list, the editor, and the Agent.
-          Finishing a parent that still has open subtasks always asks first, whichever way this is set.
-        </p>
-        <label className="toggle-row compact">
-          <input
-            type="checkbox"
-            checked={data.tasks.autoCompleteParent}
-            disabled={taskPreferences.isPending}
-            onChange={event => taskPreferences.mutate(event.target.checked)}
-          />
-          <span>Mark the parent done when its last subtask is completed</span>
-          {taskPreferences.isPending && <LoaderCircle className="spin" size={13}/>}
-        </label>
-      </SettingsSection>
-      <SettingsSection
-        sectionId="sms-connection"
-        title="Message provider"
-        description="Send through Twilio SMS or Sendblue iMessage, and switch between them whenever you like."
-        status={activeConnection.configured
-          ? `${providerLabel[activeProvider]} · ${redact.phone(activeConnection.fromPhone)}`
-          : `${providerLabel[activeProvider]} · not connected`}
-        icon={Phone}
-      >
-        <div className="card-title"><h3>Sending provider</h3><MessageSquare size={18}/></div>
-        <p className="integration-copy">Reminders, briefings, and Agent replies all go out through the provider selected here. Both providers can stay connected, and inbound messages are answered on whichever one they arrive on.</p>
-        <div className="provider-toggle" role="tablist" aria-label="Message provider">
-          {(["twilio", "sendblue"] as const).map(provider => <button
-            key={provider}
-            type="button"
-            role="tab"
-            aria-selected={providerTab === provider}
-            className={`provider-option ${providerTab === provider ? "viewing" : ""} ${activeProvider === provider ? "active" : ""}`}
-            disabled={providerSwitch.isPending}
-            onClick={() => selectProvider(provider)}
-          >
-            <span className="provider-option-icon">{provider === "twilio" ? <Phone size={15}/> : <MessageSquare size={15}/>}</span>
-            <span>
-              <strong>{providerLabel[provider]}</strong>
-              <small>{provider === "twilio" ? "SMS and MMS over carriers" : "iMessage with RCS and SMS fallback"}</small>
-            </span>
-            <span className={`provider-option-state ${activeProvider === provider ? "on" : ""}`}>
-              {activeProvider === provider ? "Sending now" : connections[provider].configured ? "Connected" : "Not connected"}
-            </span>
-          </button>)}
-        </div>
-        {providerTab === "twilio" ? <div className="provider-panel">
-          <div className="card-title"><h3>Twilio SMS</h3><Phone size={18}/></div>
-          <p className="integration-copy">Inbound texts become Agent Studio conversations. Outbound texts deliver reminders and daily summaries.</p>
-          <div className="integration-status"><span className={`dot ${data.twilio.configured ? "ok" : ""}`}/>{data.twilio.configured ? `Connected · ${redact.phone(data.twilio.fromPhone)}` : "Not connected"}</div>
-          <Field label="Account SID"><input className="input" type={redact.inputType()} value={accountSid} onChange={e => setAccountSid(e.target.value)} placeholder="AC…" /></Field>
-          <Field label={data.twilio.configured ? "New auth token (only to rotate)" : "Auth token"}><input className="input" type="password" value={authToken} onChange={e => setAuthToken(e.target.value)} placeholder="Stored encrypted" /></Field>
-          <div className="form-grid">
-            <Field label="Twilio number"><input className="input" type={redact.inputType("tel")} value={fromPhone} onChange={e => setFromPhone(e.target.value)} placeholder="+17185551234" /></Field>
-            <WebhookUrlField
-              provider="Twilio"
-              value={webhookBaseUrl}
-              savedValue={data.twilio.webhookBaseUrl}
-              onChange={setWebhookBaseUrl}
-              paths={[
-                { label: "Inbound SMS", path: data.webhookPaths.sms },
-                { label: "Delivery status", path: data.webhookPaths.status },
-              ]}
-              hint="Localhost cannot receive Twilio webhooks. Use ngrok, Cloudflare Tunnel, or your deployed URL. Saving points the Twilio number at the endpoints below."
-            />
-          </div>
-          {twilioConnect.error && <div className="inline-error"><TriangleAlert size={14}/><span>{twilioConnect.error.message}</span></div>}
-          <div className="actions">
-            <button
-              className="button primary"
-              disabled={twilioConnect.isPending || !data.secretStorageReady || (!authToken && !data.twilio.configured)}
-              onClick={() => twilioConnect.mutate()}
-            >
-              {twilioConnect.isPending ? <LoaderCircle className="spin" size={14}/> : <Zap size={14}/>}
-              {data.twilio.configured ? "Save changes" : webhookBaseUrl ? "Connect & configure" : "Connect Twilio"}
-            </button>
-            {data.twilio.configured && <button className="button ghost" onClick={() => api.testTwilio().then(() => notify("Test SMS sent")).catch(e => notify(e.message))}>Send test</button>}
-            {data.twilio.configured && activeProvider !== "twilio" && <button className="button ghost" disabled={providerSwitch.isPending} onClick={() => providerSwitch.mutate("twilio")}>Send through Twilio</button>}
-            {data.twilio.configured && <button className="button danger" onClick={() => confirm("Disconnect Twilio?") && api.disconnectTwilio().then(refresh)}>Disconnect</button>}
-          </div>
-        </div> : <div className="provider-panel">
-          <div className="card-title"><h3>Sendblue iMessage</h3><MessageSquare size={18}/></div>
-          <p className="integration-copy">Messages send as iMessage and fall back to RCS, then SMS, on their own. Run <code>sendblue show-keys</code> and <code>sendblue lines</code> in your terminal to read the values below.</p>
-          <div className="integration-status"><span className={`dot ${data.sendblue.configured ? "ok" : ""}`}/>{data.sendblue.configured ? `Connected · ${redact.phone(data.sendblue.fromPhone)}` : "Not connected"}</div>
-          {data.sendblue.lastError && <div className="inline-error"><TriangleAlert size={14}/><span>{data.sendblue.lastError}</span></div>}
-          <Field label="API key ID"><input className="input" type={redact.inputType()} value={sendblueKeyId} onChange={e => setSendblueKeyId(e.target.value)} placeholder="From sendblue show-keys" /></Field>
-          <Field label={data.sendblue.configured ? "New API secret (only to rotate)" : "API secret"}><input className="input" type="password" value={sendblueSecret} onChange={e => setSendblueSecret(e.target.value)} placeholder="Stored encrypted" /></Field>
-          <div className="form-grid">
-            <Field label="Sendblue number"><input className="input" type={redact.inputType("tel")} value={sendbluePhone} onChange={e => setSendbluePhone(e.target.value)} placeholder="+15551234567" /></Field>
-            <WebhookUrlField
-              provider="Sendblue"
-              value={sendblueWebhookBaseUrl}
-              savedValue={data.sendblue.webhookBaseUrl}
-              onChange={setSendblueWebhookBaseUrl}
-              paths={[
-                { label: "Inbound message", path: data.webhookPaths.sendblueInbound },
-                { label: "Delivery status", path: data.webhookPaths.sendblueStatus },
-              ]}
-              hint="Saving registers the endpoints below plus the blocked-line and reassigned-line webhooks, each with a generated secret. Sendblue webhooks are account-wide, so this replaces those URLs for every line."
-            />
-          </div>
-          {data.sendblue.configured && <p className="integration-copy">
-            {data.sendblue.autoTypingIndicator && data.sendblue.autoMarkRead
-              ? "Sendblue shows a typing bubble and marks your message read the moment it arrives, so you get an acknowledgement before the reply is composed."
-              : data.sendblue.autoTypingIndicator
-                ? "Typing bubbles are on. Read receipts are off — Sendblue enables those per account, so email support@sendblue.com to ask for them, then save again."
-                : "Sendblue is not acknowledging arrivals itself. Messages the assistant answers still get a typing bubble; anything it does not answer waits with no acknowledgement. Save again to retry."}
-          </p>}
-          <p className="integration-copy">The assistant can also reply with a tapback instead of a message, and thread its answer under an older message you replied to. It chooses per message, and neither works over Twilio.</p>
-          <p className="integration-copy">On the free shared line, a contact has to text your Sendblue number once before you can message them. Add them with <code>sendblue add-contact +1…</code> first.</p>
-          {sendblueConnect.error && <div className="inline-error"><TriangleAlert size={14}/><span>{sendblueConnect.error.message}</span></div>}
-          <div className="actions">
-            <button
-              className="button primary"
-              disabled={sendblueConnect.isPending || !data.secretStorageReady || !sendblueKeyId || (!sendblueSecret && !data.sendblue.configured)}
-              onClick={() => sendblueConnect.mutate()}
-            >
-              {sendblueConnect.isPending ? <LoaderCircle className="spin" size={14}/> : <Zap size={14}/>}
-              {data.sendblue.configured ? "Save changes" : sendblueWebhookBaseUrl ? "Connect & register webhook" : "Connect Sendblue"}
-            </button>
-            {data.sendblue.configured && <button className="button ghost" onClick={() => api.testSendblue().then(() => notify("Test message sent")).catch(e => notify(e.message))}>Send test</button>}
-            {data.sendblue.configured && activeProvider !== "sendblue" && <button className="button ghost" disabled={providerSwitch.isPending} onClick={() => providerSwitch.mutate("sendblue")}>Send through Sendblue</button>}
-            {data.sendblue.configured && <button className="button danger" onClick={() => confirm("Disconnect Sendblue?") && api.disconnectSendblue().then(refresh)}>Disconnect</button>}
-          </div>
+        </SettingsSection>
+        <SettingsSection
+          sectionId="classifications"
+          title="Classifications"
+          description="Manage life areas used by todos, memories, search, and the Agent."
+          status="Work · Personal · custom"
+          icon={Circle}
+        >
+          <LifeAreasSettings notify={notify}/>
+        </SettingsSection>
         </div>}
-      </SettingsSection>
-      <SettingsSection
-        sectionId="delivery-schedule"
-        title="Delivery schedule"
-        description="Set reminder texts, the daily Agent briefing, timezone, and quiet hours."
-        status={smsEnabled ? "Delivery on" : "Paused"}
-        icon={Clock3}
-      >
-        <div className="delivery-card settings-delivery">
-        <div className="delivery-heading">
-          <div><div className="eyebrow">Your day, delivered</div><h3>SMS schedule</h3></div>
-          <span className={`delivery-live ${smsEnabled ? "active" : ""}`}><i/>{smsEnabled ? "Delivery on" : "Paused"}</span>
-        </div>
-        <p className="delivery-summary">
-          {digestEnabled
-            ? <>Every morning at <strong>{humanTime(digestTime)}</strong>, your Agent will text a concise briefing of due tasks and reminders{digestTodos ? <>, including every open todo due or reminding you that day</> : null}{digestOverdue ? <>, plus anything still open from an earlier day</> : null}.</>
-            : <>Turn on the daily briefing to receive one concise morning summary of due tasks and reminders.</>}
-        </p>
+        {visited.has("assistant") && <div className="settings-stack" hidden={activeTab !== "assistant"}>
+        <SettingsSection
+          sectionId="soul"
+          title="Soul"
+          description="How the assistant talks with you, on your own line and here. It updates itself when you give it feedback."
+          status={data.soul ? "Shaped" : "Default voice"}
+          icon={Sparkles}
+        >
+          <SoulEditor
+            name="Your Soul"
+            value={data.soul ?? null}
+            placeholder={"- Short answers; skip the pleasantries.\n- Dry humour is fine.\n- No emojis.\n- Autonomy: just reschedule things; ask before cancelling anything."}
+            saving={soul.isPending}
+            onSave={next => soul.mutate(next)}
+          />
+          <SoulEditor
+            name="Your profile"
+            title="Profile"
+            setLabel={data.profile?.updatedAt ? `Updated ${format(new Date(data.profile.updatedAt), "MMM d")}` : "Written"}
+            emptyLabel="Not written yet"
+            saveLabel="Save profile"
+            hint="What the assistant knows about you before you say a word. It rewrites this overnight from your memories; edit it to correct anything."
+            value={data.profile?.profile ?? null}
+            placeholder={"People: wife Cementa; sister Natella…\nLife & work: …\nRoutines & preferences: …"}
+            saving={profile.isPending || refreshProfile.isPending}
+            onSave={next => profile.mutate(next)}
+            action={{
+              label: "Rewrite now",
+              icon: refreshProfile.isPending ? <LoaderCircle className="spin" size={13}/> : <RefreshCw size={13}/>,
+              pending: refreshProfile.isPending,
+              onClick: () => refreshProfile.mutate(),
+            }}
+          />
+          <div className="toolbar-actions">
+            <label className="toggle-row compact">
+              <input
+                type="checkbox"
+                checked={data.followUps !== false}
+                onChange={event => followUps.mutate(event.target.checked)}
+              />
+              <span>Follow up once on things I said I&rsquo;d do and haven&rsquo;t marked done</span>
+            </label>
+          </div>
+          <p className="integration-copy">
+            Each group chat has its own Soul, under Group chats. Facts about you — what you like, allergies, how you
+            want things done — are memories: those tagged <code>preference</code> come with every turn.
+          </p>
+          <button className="button ghost" type="button" disabled={tagPreferences.isPending} onClick={() => tagPreferences.mutate()}>
+            {tagPreferences.isPending ? <LoaderCircle className="spin" size={13}/> : <ListChecks size={13}/>}
+            Tag preference memories
+          </button>
+        </SettingsSection>
+        <SettingsSection
+          sectionId="digest-briefs"
+          title="Digest briefs"
+          description="Write an instruction once and have your Agent text you the answer every day."
+          status={briefCount ? `${briefCount} active` : "None yet"}
+          icon={Newspaper}
+        >
+          <div className="card-title"><h3>Your briefs</h3><Newspaper size={18}/></div>
+          <DigestBriefsSettings
+            atlassianConfigured={data.atlassian.configured}
+            quietHours={{
+              start: data.notifications.quietHoursStart,
+              end: data.notifications.quietHoursEnd,
+            }}
+            notify={notify}
+          />
+        </SettingsSection>
+        </div>}
+        {visited.has("messaging") && <div className="settings-stack" hidden={activeTab !== "messaging"}>
+        <SettingsSection
+          sectionId="sms-connection"
+          title="Message provider"
+          description="Send through Twilio SMS or Sendblue iMessage, and switch between them whenever you like."
+          status={activeConnection.configured
+            ? `${providerLabel[activeProvider]} · ${redact.phone(activeConnection.fromPhone)}`
+            : `${providerLabel[activeProvider]} · not connected`}
+          icon={Phone}
+        >
+          <div className="card-title"><h3>Sending provider</h3><MessageSquare size={18}/></div>
+          <p className="integration-copy">Reminders, briefings, and Agent replies all go out through the provider selected here. Both providers can stay connected, and inbound messages are answered on whichever one they arrive on.</p>
+          <div className="provider-toggle" role="tablist" aria-label="Message provider">
+            {(["twilio", "sendblue"] as const).map(provider => <button
+              key={provider}
+              type="button"
+              role="tab"
+              aria-selected={providerTab === provider}
+              className={`provider-option ${providerTab === provider ? "viewing" : ""} ${activeProvider === provider ? "active" : ""}`}
+              disabled={providerSwitch.isPending}
+              onClick={() => selectProvider(provider)}
+            >
+              <span className="provider-option-icon">{provider === "twilio" ? <Phone size={15}/> : <MessageSquare size={15}/>}</span>
+              <span>
+                <strong>{providerLabel[provider]}</strong>
+                <small>{provider === "twilio" ? "SMS and MMS over carriers" : "iMessage with RCS and SMS fallback"}</small>
+              </span>
+              <span className={`provider-option-state ${activeProvider === provider ? "on" : ""}`}>
+                {activeProvider === provider ? "Sending now" : connections[provider].configured ? "Connected" : "Not connected"}
+              </span>
+            </button>)}
+          </div>
+          {providerTab === "twilio" ? <div className="provider-panel">
+            <div className="card-title"><h3>Twilio SMS</h3><Phone size={18}/></div>
+            <p className="integration-copy">Inbound texts become Agent Studio conversations. Outbound texts deliver reminders and daily summaries.</p>
+            <div className="integration-status"><span className={`dot ${data.twilio.configured ? "ok" : ""}`}/>{data.twilio.configured ? `Connected · ${redact.phone(data.twilio.fromPhone)}` : "Not connected"}</div>
+            <Field label="Account SID"><input className="input" type={redact.inputType()} value={accountSid} onChange={e => setAccountSid(e.target.value)} placeholder="AC…" /></Field>
+            <Field label={data.twilio.configured ? "New auth token (only to rotate)" : "Auth token"}><input className="input" type="password" value={authToken} onChange={e => setAuthToken(e.target.value)} placeholder="Stored encrypted" /></Field>
+            <div className="form-grid">
+              <Field label="Twilio number"><input className="input" type={redact.inputType("tel")} value={fromPhone} onChange={e => setFromPhone(e.target.value)} placeholder="+17185551234" /></Field>
+              <WebhookUrlField
+                provider="Twilio"
+                value={webhookBaseUrl}
+                savedValue={data.twilio.webhookBaseUrl}
+                onChange={setWebhookBaseUrl}
+                paths={[
+                  { label: "Inbound SMS", path: data.webhookPaths.sms },
+                  { label: "Delivery status", path: data.webhookPaths.status },
+                ]}
+                hint="Localhost cannot receive Twilio webhooks. Use ngrok, Cloudflare Tunnel, or your deployed URL. Saving points the Twilio number at the endpoints below."
+              />
+            </div>
+            {twilioConnect.error && <div className="inline-error"><TriangleAlert size={14}/><span>{twilioConnect.error.message}</span></div>}
+            <div className="actions">
+              <button
+                className="button primary"
+                disabled={twilioConnect.isPending || !data.secretStorageReady || (!authToken && !data.twilio.configured)}
+                onClick={() => twilioConnect.mutate()}
+              >
+                {twilioConnect.isPending ? <LoaderCircle className="spin" size={14}/> : <Zap size={14}/>}
+                {data.twilio.configured ? "Save changes" : webhookBaseUrl ? "Connect & configure" : "Connect Twilio"}
+              </button>
+              {data.twilio.configured && <button className="button ghost" onClick={() => api.testTwilio().then(() => notify("Test SMS sent")).catch(e => notify(e.message))}>Send test</button>}
+              {data.twilio.configured && activeProvider !== "twilio" && <button className="button ghost" disabled={providerSwitch.isPending} onClick={() => providerSwitch.mutate("twilio")}>Send through Twilio</button>}
+              {data.twilio.configured && <button className="button danger" onClick={() => confirm("Disconnect Twilio?") && api.disconnectTwilio().then(refresh)}>Disconnect</button>}
+            </div>
+          </div> : <div className="provider-panel">
+            <div className="card-title"><h3>Sendblue iMessage</h3><MessageSquare size={18}/></div>
+            <p className="integration-copy">Messages send as iMessage and fall back to RCS, then SMS, on their own. Run <code>sendblue show-keys</code> and <code>sendblue lines</code> in your terminal to read the values below.</p>
+            <div className="integration-status"><span className={`dot ${data.sendblue.configured ? "ok" : ""}`}/>{data.sendblue.configured ? `Connected · ${redact.phone(data.sendblue.fromPhone)}` : "Not connected"}</div>
+            {data.sendblue.lastError && <div className="inline-error"><TriangleAlert size={14}/><span>{data.sendblue.lastError}</span></div>}
+            <Field label="API key ID"><input className="input" type={redact.inputType()} value={sendblueKeyId} onChange={e => setSendblueKeyId(e.target.value)} placeholder="From sendblue show-keys" /></Field>
+            <Field label={data.sendblue.configured ? "New API secret (only to rotate)" : "API secret"}><input className="input" type="password" value={sendblueSecret} onChange={e => setSendblueSecret(e.target.value)} placeholder="Stored encrypted" /></Field>
+            <div className="form-grid">
+              <Field label="Sendblue number"><input className="input" type={redact.inputType("tel")} value={sendbluePhone} onChange={e => setSendbluePhone(e.target.value)} placeholder="+15551234567" /></Field>
+              <WebhookUrlField
+                provider="Sendblue"
+                value={sendblueWebhookBaseUrl}
+                savedValue={data.sendblue.webhookBaseUrl}
+                onChange={setSendblueWebhookBaseUrl}
+                paths={[
+                  { label: "Inbound message", path: data.webhookPaths.sendblueInbound },
+                  { label: "Delivery status", path: data.webhookPaths.sendblueStatus },
+                ]}
+                hint="Saving registers the endpoints below plus the blocked-line and reassigned-line webhooks, each with a generated secret. Sendblue webhooks are account-wide, so this replaces those URLs for every line."
+              />
+            </div>
+            {data.sendblue.configured && <p className="integration-copy">
+              {data.sendblue.autoTypingIndicator && data.sendblue.autoMarkRead
+                ? "Sendblue shows a typing bubble and marks your message read the moment it arrives, so you get an acknowledgement before the reply is composed."
+                : data.sendblue.autoTypingIndicator
+                  ? "Typing bubbles are on. Read receipts are off — Sendblue enables those per account, so email support@sendblue.com to ask for them, then save again."
+                  : "Sendblue is not acknowledging arrivals itself. Messages the assistant answers still get a typing bubble; anything it does not answer waits with no acknowledgement. Save again to retry."}
+            </p>}
+            <p className="integration-copy">The assistant can also reply with a tapback instead of a message, and thread its answer under an older message you replied to. It chooses per message, and neither works over Twilio.</p>
+            <p className="integration-copy">On the free shared line, a contact has to text your Sendblue number once before you can message them. Add them with <code>sendblue add-contact +1…</code> first.</p>
+            {sendblueConnect.error && <div className="inline-error"><TriangleAlert size={14}/><span>{sendblueConnect.error.message}</span></div>}
+            <div className="actions">
+              <button
+                className="button primary"
+                disabled={sendblueConnect.isPending || !data.secretStorageReady || !sendblueKeyId || (!sendblueSecret && !data.sendblue.configured)}
+                onClick={() => sendblueConnect.mutate()}
+              >
+                {sendblueConnect.isPending ? <LoaderCircle className="spin" size={14}/> : <Zap size={14}/>}
+                {data.sendblue.configured ? "Save changes" : sendblueWebhookBaseUrl ? "Connect & register webhook" : "Connect Sendblue"}
+              </button>
+              {data.sendblue.configured && <button className="button ghost" onClick={() => api.testSendblue().then(() => notify("Test message sent")).catch(e => notify(e.message))}>Send test</button>}
+              {data.sendblue.configured && activeProvider !== "sendblue" && <button className="button ghost" disabled={providerSwitch.isPending} onClick={() => providerSwitch.mutate("sendblue")}>Send through Sendblue</button>}
+              {data.sendblue.configured && <button className="button danger" onClick={() => confirm("Disconnect Sendblue?") && api.disconnectSendblue().then(refresh)}>Disconnect</button>}
+            </div>
+          </div>}
+        </SettingsSection>
+        <SettingsSection
+          sectionId="delivery-schedule"
+          title="Delivery schedule"
+          description="Set reminder texts, the daily Agent briefing, timezone, and quiet hours."
+          status={smsEnabled ? "Delivery on" : "Paused"}
+          icon={Clock3}
+        >
+          <div className="delivery-card settings-delivery">
+          <div className="delivery-heading">
+            <div><div className="eyebrow">Your day, delivered</div><h3>SMS schedule</h3></div>
+            <span className={`delivery-live ${smsEnabled ? "active" : ""}`}><i/>{smsEnabled ? "Delivery on" : "Paused"}</span>
+          </div>
+          <p className="delivery-summary">
+            {digestEnabled
+              ? <>Every morning at <strong>{humanTime(digestTime)}</strong>, your Agent will text a concise briefing of due tasks and reminders{digestTodos ? <>, including every open todo due or reminding you that day</> : null}{digestOverdue ? <>, plus anything still open from an earlier day</> : null}.</>
+              : <>Turn on the daily briefing to receive one concise morning summary of due tasks and reminders.</>}
+          </p>
 
-        <div className="delivery-options">
-          <label className={`delivery-option ${smsEnabled ? "selected" : ""}`}>
-            <span className="delivery-option-icon"><Send size={15}/></span>
-            <span><strong>Reminder texts</strong><small>Send individual reminders when they become due.</small></span>
-            <input type="checkbox" checked={smsEnabled} onChange={e => setSmsEnabled(e.target.checked)}/>
-          </label>
-          <label className={`delivery-option ${digestEnabled ? "selected" : ""}`}>
-            <span className="delivery-option-icon"><Sparkles size={15}/></span>
-            <span><strong>Daily Agent briefing</strong><small>One AI-written overview, delivered once each day.</small></span>
-            <input type="checkbox" checked={digestEnabled} onChange={e => setDigestEnabled(e.target.checked)}/>
-          </label>
-          <label className={`delivery-option delivery-suboption ${digestEnabled && digestTodos ? "selected" : ""} ${digestEnabled ? "" : "disabled"}`}>
-            <span className="delivery-option-icon"><ListChecks size={15}/></span>
+          <div className="delivery-options">
+            <label className={`delivery-option ${smsEnabled ? "selected" : ""}`}>
+              <span className="delivery-option-icon"><Send size={15}/></span>
+              <span><strong>Reminder texts</strong><small>Send individual reminders when they become due.</small></span>
+              <input type="checkbox" checked={smsEnabled} onChange={e => setSmsEnabled(e.target.checked)}/>
+            </label>
+            <label className={`delivery-option ${digestEnabled ? "selected" : ""}`}>
+              <span className="delivery-option-icon"><Sparkles size={15}/></span>
+              <span><strong>Daily Agent briefing</strong><small>One AI-written overview, delivered once each day.</small></span>
+              <input type="checkbox" checked={digestEnabled} onChange={e => setDigestEnabled(e.target.checked)}/>
+            </label>
+            <label className={`delivery-option delivery-suboption ${digestEnabled && digestTodos ? "selected" : ""} ${digestEnabled ? "" : "disabled"}`}>
+              <span className="delivery-option-icon"><ListChecks size={15}/></span>
+              <span>
+                <strong>Include today&rsquo;s todos</strong>
+                <small>Cover open todos due today or set to remind you today, not only the reminders themselves.</small>
+              </span>
+              <input
+                type="checkbox"
+                checked={digestTodos}
+                disabled={!digestEnabled}
+                onChange={e => setDigestTodos(e.target.checked)}
+              />
+            </label>
+            <label className={`delivery-option delivery-suboption ${digestEnabled && digestOverdue ? "selected" : ""} ${digestEnabled ? "" : "disabled"}`}>
+              <span className="delivery-option-icon"><History size={15}/></span>
+              <span>
+                <strong>Include overdue todos</strong>
+                <small>Carry over anything still open past its due date or a reminder that already passed.</small>
+              </span>
+              <input
+                type="checkbox"
+                checked={digestOverdue}
+                disabled={!digestEnabled}
+                onChange={e => setDigestOverdue(e.target.checked)}
+              />
+            </label>
+            <label className={`delivery-option delivery-suboption ${digestEnabled && linkTodayPage ? "selected" : ""} ${digestEnabled ? "" : "disabled"}`}>
+            <span className="delivery-option-icon"><FileText size={15}/></span>
             <span>
-              <strong>Include today&rsquo;s todos</strong>
-              <small>Cover open todos due today or set to remind you today, not only the reminders themselves.</small>
+              <strong>Link today&rsquo;s page in the morning briefing</strong>
+              <small>Ends the briefing with a link to a page of today&rsquo;s todos that only opens when you are signed in.</small>
             </span>
             <input
               type="checkbox"
-              checked={digestTodos}
+              checked={linkTodayPage}
               disabled={!digestEnabled}
-              onChange={e => setDigestTodos(e.target.checked)}
-            />
-          </label>
-          <label className={`delivery-option delivery-suboption ${digestEnabled && digestOverdue ? "selected" : ""} ${digestEnabled ? "" : "disabled"}`}>
-            <span className="delivery-option-icon"><History size={15}/></span>
-            <span>
-              <strong>Include overdue todos</strong>
-              <small>Carry over anything still open past its due date or a reminder that already passed.</small>
-            </span>
-            <input
-              type="checkbox"
-              checked={digestOverdue}
-              disabled={!digestEnabled}
-              onChange={e => setDigestOverdue(e.target.checked)}
+              onChange={e => setLinkTodayPage(e.target.checked)}
             />
           </label>
           <label className={`delivery-option ${eveningEnabled ? "selected" : ""}`}>
-            <span className="delivery-option-icon"><Moon size={15}/></span>
-            <span><strong>Evening check-in</strong><small>One question each evening about how the day went; your answer becomes that day&rsquo;s journal entry.</small></span>
-            <input type="checkbox" aria-label="My evening check-in" checked={eveningEnabled} onChange={e => setEveningEnabled(e.target.checked)}/>
-          </label>
-          {/* Hidden rather than unmounted while the switch is off, so wording typed and then
-              toggled away is still what the field shows — and what Save sends. */}
-          <details className="checkin-wording delivery-suboption" hidden={!eveningEnabled}>
-            <summary>
-              <PenLine size={13} aria-hidden="true"/>
-              <span>Wording</span>
-              <small>{eveningAsk.trim() ? "Your wording" : "Default"} · what the assistant is asked; what you finished today is still supplied underneath</small>
-            </summary>
-            <div className="checkin-wording-body">
-              <AskEditor
-                label="Evening question"
-                name="My evening check-in wording"
-                fallback={data.checkinDefaults.ownerEvening}
-                value={data.notifications.eveningCheckinPrompt ?? null}
-                onChange={setEveningAsk}
-                draft={{
-                  prompt: "How do you want to be asked about your day?",
-                  placeholder: "Short and direct — one win, one thing I'd do differently, then the mood number",
-                  request: (brief, current) => api.draftCheckinAsk({ kind: "owner_evening", brief, current }).then(result => result.ask),
-                  onError: notify,
-                }}
-              />
-              <small className="field-hint">Saved with the SMS schedule below.</small>
+              <span className="delivery-option-icon"><Moon size={15}/></span>
+              <span><strong>Evening check-in</strong><small>One question each evening about how the day went; your answer becomes that day&rsquo;s journal entry.</small></span>
+              <input type="checkbox" aria-label="My evening check-in" checked={eveningEnabled} onChange={e => setEveningEnabled(e.target.checked)}/>
+            </label>
+            {/* Hidden rather than unmounted while the switch is off, so wording typed and then
+                toggled away is still what the field shows — and what Save sends. */}
+            <details className="checkin-wording delivery-suboption" hidden={!eveningEnabled}>
+              <summary>
+                <PenLine size={13} aria-hidden="true"/>
+                <span>Wording</span>
+                <small>{eveningAsk.trim() ? "Your wording" : "Default"} · what the assistant is asked; what you finished today is still supplied underneath</small>
+              </summary>
+              <div className="checkin-wording-body">
+                <AskEditor
+                  label="Evening question"
+                  name="My evening check-in wording"
+                  fallback={data.checkinDefaults.ownerEvening}
+                  value={data.notifications.eveningCheckinPrompt ?? null}
+                  onChange={setEveningAsk}
+                  draft={{
+                    prompt: "How do you want to be asked about your day?",
+                    placeholder: "Short and direct — one win, one thing I'd do differently, then the mood number",
+                    request: (brief, current) => api.draftCheckinAsk({ kind: "owner_evening", brief, current }).then(result => result.ask),
+                    onError: notify,
+                  }}
+                />
+                <small className="field-hint">Saved with the SMS schedule below.</small>
+              </div>
+            </details>
+          </div>
+
+          <div className="form-grid delivery-destination">
+            <Field label="Send messages to"><input className="input" type={redact.inputType("tel")} value={recipientPhone} onChange={e => setRecipientPhone(e.target.value)} placeholder="+17185551234" /></Field>
+            <Field label="Schedule timezone">
+              <select className="select" value={timezone} onChange={e => setTimezone(e.target.value)}>
+                {timezoneNames.map(name => <option key={name} value={name}>{timezoneLabel(name)}</option>)}
+              </select>
+              <small className="field-hint">The dashboard, Agent, reminders, and daily briefing all use this timezone.</small>
+            </Field>
+          </div>
+
+          <div className="schedule-panel">
+            <div className="schedule-panel-head">
+              <div><strong>Daily timing</strong><span>The worker checks this schedule once per minute.</span></div>
+              <Clock3 size={17}/>
             </div>
-          </details>
-        </div>
+            <div className="form-grid three schedule-controls">
+              <Field label="Briefing arrives"><input className="input" type="time" value={digestTime} onChange={e => setDigestTime(e.target.value)} disabled={!digestEnabled} /></Field>
+              <Field label="Evening check-in"><input className="input" type="time" aria-label="Evening check-in time" value={eveningTime} onChange={e => setEveningTime(e.target.value)} disabled={!eveningEnabled} /></Field>
+              <Field label="Quiet hours begin"><input className="input" type="time" value={quietStart} onChange={e => setQuietStart(e.target.value)} /></Field>
+              <Field label="Messages resume"><input className="input" type="time" value={quietEnd} onChange={e => setQuietEnd(e.target.value)} /></Field>
+            </div>
+            <div className="quiet-note">
+              <Pause size={13}/>
+              <span>No scheduled texts from <strong>{humanTime(quietStart)}</strong> to <strong>{humanTime(quietEnd)}</strong>. Anything due overnight waits until quiet hours end, except a check-in you timed inside them.</span>
+            </div>
+          </div>
 
-        <div className="form-grid delivery-destination">
-          <Field label="Send messages to"><input className="input" type={redact.inputType("tel")} value={recipientPhone} onChange={e => setRecipientPhone(e.target.value)} placeholder="+17185551234" /></Field>
-          <Field label="Schedule timezone">
-            <select className="select" value={timezone} onChange={e => setTimezone(e.target.value)}>
-              {timezoneNames.map(name => <option key={name} value={name}>{timezoneLabel(name)}</option>)}
-            </select>
-            <small className="field-hint">The dashboard, Agent, reminders, and daily briefing all use this timezone.</small>
-          </Field>
-        </div>
-
-        <div className="schedule-panel">
-          <div className="schedule-panel-head">
-            <div><strong>Daily timing</strong><span>The worker checks this schedule once per minute.</span></div>
-            <Clock3 size={17}/>
+          <div className="delivery-footer">
+            <span><Database size={12}/>Saved locally and applied while the server is running</span>
+            <button className="button primary" disabled={preferences.isPending} onClick={() => preferences.mutate()}>
+              {preferences.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save SMS schedule
+            </button>
           </div>
-          <div className="form-grid three schedule-controls">
-            <Field label="Briefing arrives"><input className="input" type="time" value={digestTime} onChange={e => setDigestTime(e.target.value)} disabled={!digestEnabled} /></Field>
-            <Field label="Evening check-in"><input className="input" type="time" aria-label="Evening check-in time" value={eveningTime} onChange={e => setEveningTime(e.target.value)} disabled={!eveningEnabled} /></Field>
-            <Field label="Quiet hours begin"><input className="input" type="time" value={quietStart} onChange={e => setQuietStart(e.target.value)} /></Field>
-            <Field label="Messages resume"><input className="input" type="time" value={quietEnd} onChange={e => setQuietEnd(e.target.value)} /></Field>
           </div>
-          <div className="quiet-note">
-            <Pause size={13}/>
-            <span>No scheduled texts from <strong>{humanTime(quietStart)}</strong> to <strong>{humanTime(quietEnd)}</strong>. Anything due overnight waits until quiet hours end, except a check-in you timed inside them.</span>
-          </div>
-        </div>
-
-        <div className="delivery-footer">
-          <span><Database size={12}/>Saved locally and applied while the server is running</span>
-          <button className="button primary" disabled={preferences.isPending} onClick={() => preferences.mutate()}>
-            {preferences.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save SMS schedule
-          </button>
-        </div>
-        </div>
-      </SettingsSection>
-      <SettingsSection
-        sectionId="group-chats"
-        title="Group chats"
-        description="Who may talk to the assistant in an iMessage group you add it to, and what each group is texted on a schedule."
-        status={data.notifications.smsProvider === "sendblue"
-          ? `${trustedContacts.length} trusted · ${groupAllowAll ? "open groups" : "trusted only"}`
-          : "needs iMessage"}
-        icon={Users}
-      >
-        <p className="integration-copy">
-          Add the assistant&rsquo;s iMessage line to a group chat you are in and the people below can talk to it there.
-          Everything asked for in a group is filed under that group&rsquo;s own classification, and reminders for it come back to the group.
-        </p>
-        {data.notifications.smsProvider !== "sendblue" && (
-          <div className="quiet-note">
-            <TriangleAlert size={13}/>
-            <span>Group chats need iMessage. Switch the message provider to Sendblue to use them.</span>
-          </div>
-        )}
-        <div className={`schedule-panel group-chats ${data.notifications.smsProvider === "sendblue" ? "" : "disabled"}`}>
-          <div className="schedule-panel-head">
-            <div><strong>Who can talk to the assistant</strong><span>Trusted contacts can, in any group that also includes you.</span></div>
-            <Users size={17}/>
-          </div>
-          <div className="list trusted-contacts">
-            {trustedContacts.map(contact => (
-              <div className="list-row" key={contact.phone}>
-                <span className="badge">{contact.name.slice(0, 2).toUpperCase()}</span>
-                <div className="list-main"><strong>{contact.name}</strong><small>{redact.phone(contact.phone)}</small></div>
+        </SettingsSection>
+        <SettingsSection
+          sectionId="group-chats"
+          title="Group chats"
+          description="Who may talk to the assistant in an iMessage group you add it to, and what each group is texted on a schedule."
+          status={data.notifications.smsProvider === "sendblue"
+            ? `${trustedContacts.length} trusted · ${groupAllowAll ? "open groups" : "trusted only"}`
+            : "needs iMessage"}
+          icon={Users}
+        >
+          <p className="integration-copy">
+            Add the assistant&rsquo;s iMessage line to a group chat you are in and the people below can talk to it there.
+            Everything asked for in a group is filed under that group&rsquo;s own classification, and reminders for it come back to the group.
+          </p>
+          {data.notifications.smsProvider !== "sendblue" && (
+            <div className="quiet-note">
+              <TriangleAlert size={13}/>
+              <span>Group chats need iMessage. Switch the message provider to Sendblue to use them.</span>
+            </div>
+          )}
+          <div className={`schedule-panel group-chats ${data.notifications.smsProvider === "sendblue" ? "" : "disabled"}`}>
+            <div className="schedule-panel-head">
+              <div><strong>Who can talk to the assistant</strong><span>Trusted contacts can, in any group that also includes you.</span></div>
+              <Users size={17}/>
+            </div>
+            <div className="list trusted-contacts">
+              {trustedContacts.map(contact => (
+                <div className="list-row" key={contact.phone}>
+                  <span className="badge">{contact.name.slice(0, 2).toUpperCase()}</span>
+                  <div className="list-main"><strong>{contact.name}</strong><small>{redact.phone(contact.phone)}</small></div>
+                  <button
+                    className="button ghost"
+                    type="button"
+                    aria-label={`Remove ${contact.name}`}
+                    onClick={() => setTrustedContacts(trustedContacts.filter(entry => entry.phone !== contact.phone))}
+                  >
+                    <X size={14}/>
+                  </button>
+                </div>
+              ))}
+              {!trustedContacts.length && !groupAllowAll && (
+                <div className="empty-state compact">Only you can talk to the assistant until a trusted contact is added.</div>
+              )}
+            </div>
+            <div className="form-grid three schedule-controls">
+              <Field label="Name"><input className="input" value={contactName} onChange={e => setContactName(e.target.value)} placeholder="Sarah" /></Field>
+              <Field label="Phone">
+                <input
+                  className="input"
+                  type={redact.inputType("tel")}
+                  value={contactPhone}
+                  onChange={e => setContactPhone(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addTrustedContact(); } }}
+                  placeholder="+17185550123"
+                />
+              </Field>
+              <div className="field field-action">
                 <button
                   className="button ghost"
                   type="button"
-                  aria-label={`Remove ${contact.name}`}
-                  onClick={() => setTrustedContacts(trustedContacts.filter(entry => entry.phone !== contact.phone))}
+                  disabled={!contactName.trim() || !contactPhone.trim()}
+                  onClick={addTrustedContact}
                 >
-                  <X size={14}/>
+                  <Plus size={14}/>Add trusted contact
                 </button>
               </div>
-            ))}
-            {!trustedContacts.length && !groupAllowAll && (
-              <div className="empty-state compact">Only you can talk to the assistant until a trusted contact is added.</div>
-            )}
-          </div>
-          <div className="form-grid three schedule-controls">
-            <Field label="Name"><input className="input" value={contactName} onChange={e => setContactName(e.target.value)} placeholder="Sarah" /></Field>
-            <Field label="Phone">
-              <input
-                className="input"
-                type={redact.inputType("tel")}
-                value={contactPhone}
-                onChange={e => setContactPhone(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addTrustedContact(); } }}
-                placeholder="+17185550123"
-              />
-            </Field>
-            <div className="field field-action">
-              <button
-                className="button ghost"
-                type="button"
-                disabled={!contactName.trim() || !contactPhone.trim()}
-                onClick={addTrustedContact}
-              >
-                <Plus size={14}/>Add trusted contact
+            </div>
+            <div className="delivery-options">
+              <label className={`delivery-option ${groupAllowAll ? "selected" : ""}`}>
+                <span className="delivery-option-icon"><Users size={15}/></span>
+                <span>
+                  <strong>Answer anyone in a group chat I have written in</strong>
+                  <small>Once you have sent a message in a group, every participant of that group can talk to the assistant there, not only trusted contacts. Anyone can add you to a group without asking, so a group you have never written in stays closed.</small>
+                </span>
+                <input type="checkbox" checked={groupAllowAll} onChange={e => setGroupAllowAll(e.target.checked)}/>
+              </label>
+            </div>
+            <div className="delivery-footer">
+              <span><Database size={12}/>Saved with the SMS schedule</span>
+              <button className="button primary" disabled={preferences.isPending} onClick={() => preferences.mutate()}>
+                {preferences.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save who can talk
               </button>
             </div>
           </div>
-          <div className="delivery-options">
-            <label className={`delivery-option ${groupAllowAll ? "selected" : ""}`}>
-              <span className="delivery-option-icon"><Users size={15}/></span>
-              <span>
-                <strong>Answer anyone in a group chat I have written in</strong>
-                <small>Once you have sent a message in a group, every participant of that group can talk to the assistant there, not only trusted contacts. Anyone can add you to a group without asking, so a group you have never written in stays closed.</small>
-              </span>
-              <input type="checkbox" checked={groupAllowAll} onChange={e => setGroupAllowAll(e.target.checked)}/>
-            </label>
+          <div className="schedule-panel">
+            <div className="schedule-panel-head">
+              <div>
+                <strong>Check-ins per group</strong>
+                <span>
+                  A morning note about what that group has in progress or due soon, an evening question about how the day went,
+                  or both. Sent in the schedule timezone and saved as you switch them. A time you set inside quiet hours is
+                  still honoured &mdash; you chose it.
+                </span>
+              </div>
+              <Clock3 size={17}/>
+            </div>
+            <GroupChatSettings notify={notify} imessage={data.notifications.smsProvider === "sendblue"} defaults={data.checkinDefaults}/>
           </div>
-          <div className="delivery-footer">
-            <span><Database size={12}/>Saved with the SMS schedule</span>
-            <button className="button primary" disabled={preferences.isPending} onClick={() => preferences.mutate()}>
-              {preferences.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save who can talk
-            </button>
-          </div>
-        </div>
-        <div className="schedule-panel">
-          <div className="schedule-panel-head">
+        </SettingsSection>
+        </div>}
+        {visited.has("connections") && <div className="settings-stack" hidden={activeTab !== "connections"}>
+        <SettingsSection
+          sectionId="meeting-notes"
+          title="Meeting notes"
+          description="Bring Granola notes into a review queue before saving them as memories."
+          status={data.granola.configured ? "Connected" : "Not connected"}
+          icon={Sparkles}
+        >
+          <div className="settings-split">
             <div>
-              <strong>Check-ins per group</strong>
-              <span>
-                A morning note about what that group has in progress or due soon, an evening question about how the day went,
-                or both. Sent in the schedule timezone and saved as you switch them. A time you set inside quiet hours is
-                still honoured &mdash; you chose it.
-              </span>
+              <div className="card-title"><h3>Granola</h3><Sparkles size={18}/></div>
+              <p className="integration-copy">Granola has no webhooks yet, so Fieldnote polls its read-only API and places new notes in a review queue.</p>
+              <div className="integration-status"><span className={`dot ${data.granola.configured ? "ok" : ""}`}/>{data.granola.configured ? "Connected" : "Not connected"}</div>
+              <Field label="Granola API key"><input className="input" type="password" value={granolaKey} onChange={e => setGranolaKey(e.target.value)} placeholder="Stored encrypted" /></Field>
+              <div className="actions">
+                <button className="button primary" disabled={granolaConnect.isPending || !granolaKey} onClick={() => granolaConnect.mutate()}>Connect Granola</button>
+                {data.granola.configured && <button className="button ghost" onClick={() => api.pollGranola().then(result => { refresh(); notify(`${result.queued} new meeting events`); })}><RefreshCw size={14}/>Poll now</button>}
+                {data.granola.configured && <button className="button danger" onClick={() => confirm("Disconnect Granola?") && api.disconnectGranola().then(refresh)}>Disconnect</button>}
+              </div>
             </div>
-            <Clock3 size={17}/>
-          </div>
-          <GroupChatSettings notify={notify} imessage={data.notifications.smsProvider === "sendblue"} defaults={data.checkinDefaults}/>
-        </div>
-      </SettingsSection>
-      <SettingsSection
-        sectionId="meeting-notes"
-        title="Meeting notes"
-        description="Bring Granola notes into a review queue before saving them as memories."
-        status={data.granola.configured ? "Connected" : "Not connected"}
-        icon={Sparkles}
-      >
-        <div className="settings-split">
-          <div>
-            <div className="card-title"><h3>Granola</h3><Sparkles size={18}/></div>
-            <p className="integration-copy">Granola has no webhooks yet, so Fieldnote polls its read-only API and places new notes in a review queue.</p>
-            <div className="integration-status"><span className={`dot ${data.granola.configured ? "ok" : ""}`}/>{data.granola.configured ? "Connected" : "Not connected"}</div>
-            <Field label="Granola API key"><input className="input" type="password" value={granolaKey} onChange={e => setGranolaKey(e.target.value)} placeholder="Stored encrypted" /></Field>
-            <div className="actions">
-              <button className="button primary" disabled={granolaConnect.isPending || !granolaKey} onClick={() => granolaConnect.mutate()}>Connect Granola</button>
-              {data.granola.configured && <button className="button ghost" onClick={() => api.pollGranola().then(result => { refresh(); notify(`${result.queued} new meeting events`); })}><RefreshCw size={14}/>Poll now</button>}
-              {data.granola.configured && <button className="button danger" onClick={() => confirm("Disconnect Granola?") && api.disconnectGranola().then(refresh)}>Disconnect</button>}
+            <div className="settings-review">
+              <div className="card-title"><h3>Review queue</h3><Archive size={18}/></div>
+              {!pendingEvents.length ? <div className="empty-state compact">No meeting events need review.</div> : <div className="list">
+                {pendingEvents.slice(0, 8).map(event => <div className="list-row" key={event.id}>
+                  <span className="badge">GR</span>
+                  <div className="list-main"><strong>{String(event.payload.title || "Granola meeting")}</strong><small>{format(new Date(event.createdAt), "MMM d · h:mm a")}</small></div>
+                  <button className="button ghost" onClick={() => eventReview.mutate({ event, action: "ignore" })}>Ignore</button>
+                  <button className="button primary" onClick={() => eventReview.mutate({ event, action: "create_memory" })}>Save memory</button>
+                </div>)}
+              </div>}
             </div>
           </div>
-          <div className="settings-review">
-            <div className="card-title"><h3>Review queue</h3><Archive size={18}/></div>
-            {!pendingEvents.length ? <div className="empty-state compact">No meeting events need review.</div> : <div className="list">
-              {pendingEvents.slice(0, 8).map(event => <div className="list-row" key={event.id}>
-                <span className="badge">GR</span>
-                <div className="list-main"><strong>{String(event.payload.title || "Granola meeting")}</strong><small>{format(new Date(event.createdAt), "MMM d · h:mm a")}</small></div>
-                <button className="button ghost" onClick={() => eventReview.mutate({ event, action: "ignore" })}>Ignore</button>
-                <button className="button primary" onClick={() => eventReview.mutate({ event, action: "create_memory" })}>Save memory</button>
-              </div>)}
-            </div>}
-          </div>
-        </div>
-      </SettingsSection>
-      <SettingsSection
-        sectionId="atlassian"
-        title="Jira & Confluence"
-        description="Read boards, issues, spaces, pages, and comments from your Atlassian site."
-        status={data.atlassian.configured
-          ? `Connected · ${[data.atlassian.jiraAvailable && "Jira", data.atlassian.confluenceAvailable && "Confluence"].filter(Boolean).join(" · ")}`
-          : "Not connected"}
-        icon={SquareKanban}
-      >
-        <div className="card-title"><h3>Atlassian</h3><SquareKanban size={18}/></div>
-        <AtlassianSettings
-          config={data.atlassian}
-          secretStorageReady={data.secretStorageReady}
-          notify={notify}
-          refresh={refresh}
-        />
-      </SettingsSection>
-      <SettingsSection
-        sectionId="digest-briefs"
-        title="Digest briefs"
-        description="Write an instruction once and have your Agent text you the answer every day."
-        status={briefCount ? `${briefCount} active` : "None yet"}
-        icon={Newspaper}
-      >
-        <div className="card-title"><h3>Your briefs</h3><Newspaper size={18}/></div>
-        <DigestBriefsSettings
-          atlassianConfigured={data.atlassian.configured}
-          quietHours={{
-            start: data.notifications.quietHoursStart,
-            end: data.notifications.quietHoursEnd,
-          }}
-          notify={notify}
-        />
-      </SettingsSection>
-      <UnderHoodSettings notify={notify}/>
+        </SettingsSection>
+        <SettingsSection
+          sectionId="atlassian"
+          title="Jira & Confluence"
+          description="Read boards, issues, spaces, pages, and comments from your Atlassian site."
+          status={data.atlassian.configured
+            ? `Connected · ${[data.atlassian.jiraAvailable && "Jira", data.atlassian.confluenceAvailable && "Confluence"].filter(Boolean).join(" · ")}`
+            : "Not connected"}
+          icon={SquareKanban}
+        >
+          <div className="card-title"><h3>Atlassian</h3><SquareKanban size={18}/></div>
+          <AtlassianSettings
+            config={data.atlassian}
+            secretStorageReady={data.secretStorageReady}
+            notify={notify}
+            refresh={refresh}
+          />
+        </SettingsSection>
+        </div>}
+        {visited.has("advanced") && <div className="settings-stack" hidden={activeTab !== "advanced"}>
+        <UnderHoodSettings notify={notify}/>
+        </div>}
+      </SettingsTabs>
     </section>
     {toast && <Toast>{toast}</Toast>}
   </div>;

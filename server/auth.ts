@@ -1,5 +1,6 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import type { Request } from "express";
+import { escapeHtml } from "./html.ts";
 import type { Db } from "./types.ts";
 
 export const SESSION_COOKIE = "fieldnote_session";
@@ -178,14 +179,10 @@ export function clearedSessionCookie(secure: boolean): string {
 /** Only same-origin paths are accepted, so `next` cannot become an open redirect. */
 export function safeNextPath(value: unknown): string {
   if (typeof value !== "string") return "/";
+  // A backslash is a slash to a browser, so "/\\host" is "//host"; control characters have no place in a path.
   if (!value.startsWith("/") || value.startsWith("//")) return "/";
+  if ([...value].some(char => char === "\\" || char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return "/";
   return value;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => (
-    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character] as string
-  ));
 }
 
 export function loginPage(options: { next: string; error?: string }): string {

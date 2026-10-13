@@ -18,6 +18,8 @@ export default defineConfig(({ mode }) => ({
       // /login with the SPA, which redirects to /login again on the next 401.
       "/login": "http://localhost:4174",
       "/logout": "http://localhost:4174",
+      // Hosted pages are server-rendered HTML, not part of the SPA.
+      "/p": "http://localhost:4174",
     },
   },
   test: {

@@ -9,6 +9,7 @@ import { runChannelAgent } from "./agent-runner.ts";
 import { getTwilioErrorMessage } from "./twilio-service.ts";
 import { openDatabase } from "./db.ts";
 import { failure } from "./http.ts";
+import { PageError } from "./pages.ts";
 import type { Db } from "./types.ts";
 import type {
   AgentDrafter,
@@ -28,9 +29,11 @@ import { registerHealthRoutes } from "./routes/health.ts";
 import { registerIntegrationRoutes } from "./routes/integrations.ts";
 import { registerMemoryRoutes } from "./routes/memories.ts";
 import { registerOverviewRoutes } from "./routes/overview.ts";
+import { registerPublicPageRoutes } from "./routes/public-pages.ts";
 import { registerReflectionRoutes } from "./routes/reflections.ts";
 import { registerReminderRoutes } from "./routes/reminders.ts";
 import { registerSearchRoutes } from "./routes/search.ts";
+import { registerSharedPageRoutes } from "./routes/shared-pages.ts";
 import { registerTaxonomyRoutes } from "./routes/taxonomy.ts";
 import { registerTodoRoutes } from "./routes/todos.ts";
 import { registerWebhookRoutes } from "./routes/webhooks.ts";
@@ -58,6 +61,8 @@ const registerRoutes = [
   registerHealthRoutes,
   registerIntegrationRoutes,
   registerWebhookRoutes,
+  // After the gate, which lets `/p/*` through: these routes decide per page who may open it.
+  registerPublicPageRoutes,
   registerOverviewRoutes,
   registerTaxonomyRoutes,
   registerTodoRoutes,
@@ -70,6 +75,7 @@ const registerRoutes = [
   registerConversationRoutes,
   registerActivityRoutes,
   registerSearchRoutes,
+  registerSharedPageRoutes,
   registerAgentRoutes,
   registerAdminRoutes,
 ];
@@ -110,6 +116,7 @@ export function createApp(options: AppOptions = {}): { app: express.Express; db:
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     void _next;
     if (error instanceof ZodError) return failure(res, 400, error.issues[0]?.message || "Invalid request");
+    if (error instanceof PageError) return failure(res, error.code === "not_found" ? 404 : 400, error.message);
     if (
       typeof error === "object" && error !== null && "code" in error
       && typeof error.code === "string" && error.code.startsWith("SQLITE_CONSTRAINT")

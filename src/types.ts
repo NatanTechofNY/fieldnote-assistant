@@ -18,6 +18,8 @@ export interface LifeArea {
   checkin_copy_to_owner?: number | boolean;
   /** Whether pictures sent in the group are kept as files; absent or on keeps them. Group areas only. */
   keep_pictures?: number | boolean;
+  /** Whether the group is posted a week-in-review page on Sunday evening. Group areas only. */
+  weekly_review_page?: number | boolean;
   /** The owner's wording for each ask; null or absent uses the default. `{group}` stands for the group's name. */
   morning_checkin_prompt?: string | null;
   evening_checkin_prompt?: string | null;
@@ -346,6 +348,8 @@ export interface IntegrationState {
     /* Who else may talk to the assistant, and only inside an iMessage group that includes the recipient. */
     trustedContacts: TrustedContact[];
     groupAllowAll: boolean;
+    /** Whether the morning briefing ends with a link to a page of today's todos. */
+    linkTodayPage: boolean;
     /** Local `HH:MM` the owner is asked how the day went, or null for never. */
     eveningCheckinTime: string | null;
     /** The owner's wording for that evening ask, or null for the default. */
@@ -507,3 +511,38 @@ export interface UniversalSearchResult {
   hits: UniversalSearchHit[];
 }
 
+
+/** A hosted page as `/api/pages` describes it. */
+export interface HostedPage {
+  id: string;
+  title: string;
+  kind: "today" | "week" | "custom" | "poll";
+  template: string | null;
+  /** `owner` opens only for a signed-in owner; `shared` opens for anyone holding the link. */
+  audience: "owner" | "shared";
+  /** The public link, or null when the server has no address to build one from. */
+  url: string | null;
+  path: string;
+  /** The group chat the page was filed under, if any. */
+  group: string | null;
+  expires_at: string;
+  revoked: boolean;
+  live: boolean;
+  view_count: number;
+  created_at: string;
+  updated_at: string;
+  results_posted: boolean;
+  /** The most people who have answered any one poll on the page. */
+  voters: number;
+}
+
+export interface PageBlockResult {
+  block_id: string;
+  type: "poll" | "availability";
+  question: string;
+  closed: boolean;
+  closes_at: string | null;
+  voters: string[];
+  options: Array<{ id: string; label: string; count: number; voters: string[] }>;
+  leaders: string[];
+}

@@ -15,6 +15,7 @@ import { ConversationHistoryPage } from "../../features/history/ConversationHist
 import { AttachmentsPage } from "../../features/attachments/AttachmentsPage";
 import { MemoriesPage } from "../../features/memories/MemoriesPage";
 import { OverviewPage } from "../../features/overview/OverviewPage";
+import { PagesPage } from "../../features/pages/PagesPage";
 import { ReflectionsPage } from "../../features/reflections/ReflectionsPage";
 import { IntegrationsPage } from "../../features/settings/IntegrationsPage";
 import { SetupPage } from "../../features/setup/SetupPage";
@@ -91,6 +92,7 @@ function ShellBody() {
         {/* The agent used to be a page; the panel replaces it, so old links
             open the panel over the dashboard instead of 404ing. */}
         <Route path="/chat" element={<AgentRedirect />} />
+        <Route path="/pages" element={<PagesPage />} />
         <Route path="/attachments" element={<AttachmentsPage />} />
         <Route path="/history" element={<ConversationHistoryPage />} />
         <Route path="/settings" element={<IntegrationsPage />} />

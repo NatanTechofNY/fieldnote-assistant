@@ -23,6 +23,11 @@ import {
   speakerLabel, speakerNameOf, withoutQuotedSpans,
 } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
+import { createPageFromInput, updatePageFromInput, type PageOrigin } from "./page-service.ts";
+import {
+  assertNoOwnerPageLinks, getPage, listPages, NO_BASE_URL, pageJson, pollResults, revokePage,
+  type PageRow,
+} from "./pages.ts";
 import { localIsoWithOffset, zonedToInstant } from "./local-time.ts";
 import { plainText, sendSms, type SmsSender } from "./messaging.ts";
 import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
@@ -487,7 +492,7 @@ const OWNER_ONLY_TOOLS = new Set([
   "get_review_evidence", "get_reflection_evidence",
   "list_jira_boards", "list_jira_issues", "get_jira_issue", "list_jira_users",
   "list_confluence_spaces", "list_confluence_pages", "get_confluence_page", "list_confluence_comments",
-  "list_group_chats", "send_to_group", "react_in_group",
+  "list_group_chats", "send_to_group", "react_in_group", "send_to_contact",
 ]);
 
 const DELETE_TOOLS = new Set(["delete_todo", "delete_memory", "delete_reminder"]);
@@ -578,6 +583,30 @@ function scopedTodo(db: Db, todoId: string, scope: GroupScope | undefined): Todo
   const row = getTodo(db, todoId);
   if (row && scope && row.life_area_id !== scope.lifeAreaId) return undefined;
   return row;
+}
+
+/** A page as the turn may see it: in a group, only the group's own, and any other is as good as missing. */
+function scopedPage(db: Db, pageId: string, scope: GroupScope | undefined): PageRow | undefined {
+  const row = getPage(db, pageId);
+  // A group reaches only pages that are the group's and shared: a private one filed under its area is still the owner's.
+  if (row && scope && (row.life_area_id !== scope.lifeAreaId || row.audience !== "shared")) return undefined;
+  return row;
+}
+
+const PAGE_NOT_FOUND = "Page not found. Pass an id from list_pages or create_page";
+
+/** Where a page made on this turn is filed: a group turn's own group, else the owner's own chat. */
+function pageOrigin(context: ToolTurnContext | undefined): PageOrigin {
+  if (context?.scope) {
+    return { group: { lifeAreaId: context.scope.lifeAreaId, threadId: context.scope.threadId, groupId: context.groupId } };
+  }
+  return context?.channel === "sms" ? { threadId: context.threadId } : {};
+}
+
+/** A page as a tool returns it, with the note a missing address needs. */
+function pageResult(db: Db, row: PageRow): Record<string, unknown> {
+  const json = pageJson(db, row);
+  return json.url ? json : { ...json, note: NO_BASE_URL };
 }
 
 function scopedMemory(db: Db, memoryId: string, scope: GroupScope | undefined, ownOnly = false): MemoryRow | undefined {
@@ -846,6 +875,8 @@ export async function executeAgentTool(
     const turn = textingTurn(context);
     // Flattened here, not only in sendSms: the archive and the dedupe against the closing reply must hold what was delivered.
     const text = plainText(input.text as string) || (input.text as string);
+    // The owner's private pages open only for the owner; a group is not the owner.
+    if (scope) assertNoOwnerPageLinks(db, text);
     const send = turn.sendSms ?? sendSms;
     const delivered = await send(db, turn.address, text, turn.groupId ? { groupId: turn.groupId } : undefined);
     insertOutboundChannelMessage(db, turn.threadId, text, delivered.sid, delivered.status, { kind: "message" });
@@ -992,6 +1023,7 @@ export async function executeAgentTool(
   if (name === "send_to_group") {
     const { turn, group } = crossChatTurn(db, context, input.thread_id as string);
     const text = typeof input.text === "string" ? plainText(input.text.trim()) : "";
+    assertNoOwnerPageLinks(db, text);
     const imageUrl = typeof input.image_url === "string" && input.image_url ? input.image_url : undefined;
     if (imageUrl) {
       if (!turn.foundGifs?.has(imageUrl)) {
@@ -1040,6 +1072,82 @@ export async function executeAgentTool(
     }
     recordMessageReaction(db, group.id, handle, reaction);
     return { reacted: true, reaction, group_name: group.group_name };
+  }
+  /*
+   * Hosted pages. A page made in a group is filed under that group and shared;
+   * from the owner's own chat it is the owner's. `scopedPage` is what keeps a
+   * group from reading, editing, or even finding a page that is not its own.
+   */
+  if (name === "create_page") {
+    // A page filed under a group is texted to that group when its poll closes, so naming a group here
+    // takes what posting there takes: the owner's own line, naming the group, on a turn that read nothing foreign.
+    if (!scope) {
+      const source = typeof input.from_page_id === "string" ? getPage(db, input.from_page_id) : undefined;
+      const target = typeof input.thread_id === "string" ? input.thread_id : !input.thread_id && source?.group_id ? source.thread_id : null;
+      if (target) crossChatTurn(db, context, target);
+    }
+    const { page, wroteTodos } = await createPageFromInput(db, input as never, pageOrigin(context));
+    if (wroteTodos) search.flushSoon();
+    return pageResult(db, page);
+  }
+  if (name === "update_page") {
+    const row = scopedPage(db, input.id as string, scope);
+    if (!row) throw new Error(PAGE_NOT_FOUND);
+    return pageResult(db, await updatePageFromInput(db, row, input as never));
+  }
+  if (name === "list_pages") {
+    const rows = listPages(db, {
+      includeExpired: input.include_expired === true, lifeAreaId: scope?.lifeAreaId, audience: scope ? "shared" : undefined,
+    });
+    return { pages: rows.map(row => pageResult(db, row)) };
+  }
+  if (name === "revoke_page") {
+    const row = scopedPage(db, input.id as string, scope);
+    if (!row) throw new Error(PAGE_NOT_FOUND);
+    return pageResult(db, revokePage(db, row));
+  }
+  if (name === "get_poll_results") {
+    const row = scopedPage(db, input.id as string, scope);
+    if (!row) throw new Error(PAGE_NOT_FOUND);
+    const results = pollResults(db, row);
+    if (!results.length) throw new Error("That page has no poll or availability grid");
+    return { page: row.title, results };
+  }
+  if (name === "send_to_contact") {
+    // A 1:1 text to someone the owner has named under Settings, from the owner's own chat only.
+    if (!context || context.channel !== "sms") throw new Error("This is not a text conversation; texting a contact works from the owner's own text chat");
+    if (context.appTurn || context.internal) throw new Error("This turn is the app writing, not the owner; nothing goes to a contact from it");
+    assertOwnerLine(db, context);
+    if (context.readPages) {
+      throw new Error("This turn read a web page, search results, or a Jira or Confluence page, so nothing goes to someone else on it; ask the owner to say it again");
+    }
+    if (context.groupThreadsRead?.size) {
+      throw new Error("This turn read what people wrote in a group chat, so nothing goes to someone else on it; ask the owner to say it again");
+    }
+    const wanted = (input.name as string).trim().toLowerCase();
+    const contacts = getNotificationPreferences(db).trustedContacts;
+    const matches = contacts.filter(contact => contact.name.trim().toLowerCase() === wanted);
+    const named = matches.length ? matches : contacts.filter(contact => contact.name.trim().toLowerCase().split(/\s+/)[0] === wanted);
+    if (!named.length) throw new Error(`No contact named "${input.name}". Contacts are the people named under Trusted contacts in Settings`);
+    if (named.length > 1) throw new Error(`More than one contact is called "${input.name}"; ask the owner which one they mean`);
+    const contact = named[0];
+    // The owner's own words have to name them, as with a group.
+    const since = new Date(Date.now() - OWNER_ASK_WINDOW_MS).toISOString();
+    const recent = db.prepare(`
+      SELECT content FROM channel_messages
+      WHERE thread_id=? AND role='user' AND direction='inbound' AND created_at>=?
+        AND COALESCE(json_extract(metadata_json,'$.internal'),0)=0
+    `).all(context.threadId, since) as Array<{ content: string }>;
+    const asked = [context.inboundText ?? "", ...recent.map(row => row.content)]
+      .map(text => withoutMediaLines(text).toLowerCase()).join("\n");
+    if (!asked.includes(contact.name.trim().toLowerCase().split(/\s+/)[0])) {
+      throw new Error(`The owner has to name ${contact.name} to text them; ask who they mean`);
+    }
+    const text = plainText((input.text as string).trim());
+    assertNoOwnerPageLinks(db, text);
+    const send = context.sendSms ?? sendSms;
+    const delivered = await send(db, contact.phone, text);
+    return { sent: true, to: contact.name, message_handle: delivered.sid, status: delivered.status };
   }
   if (name === "stay_quiet") {
     // People talk to each other in a group, and not every message is for the

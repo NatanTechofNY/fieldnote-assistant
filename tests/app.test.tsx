@@ -31,7 +31,24 @@ beforeEach(() => {
   failNoteWrites = false;
   deletedAttachments.length = 0;
   attachmentDeleteFails = false;
+  revokedPages.length = 0;
 });
+
+const revokedPages: string[] = [];
+const hostedPages = [
+  {
+    id: "page_poll", title: "Dinner Friday", kind: "poll", template: "pick_a_time", audience: "shared",
+    url: "https://assistant.example.com/p/abcdefghijklmnopqrstuv", path: "/p/abcdefghijklmnopqrstuv", group: "Home",
+    expires_at: "2026-08-20T00:00:00.000Z", revoked: false, live: true, view_count: 4,
+    created_at: "2026-07-20T00:00:00.000Z", updated_at: "2026-07-20T00:00:00.000Z", results_posted: false, voters: 2,
+  },
+  {
+    id: "page_today", title: "Today", kind: "today", template: "today", audience: "owner",
+    url: "https://assistant.example.com/p/zyxwvutsrqponmlkjihgfe", path: "/p/zyxwvutsrqponmlkjihgfe", group: null,
+    expires_at: "2026-07-26T00:00:00.000Z", revoked: false, live: true, view_count: 1,
+    created_at: "2026-07-24T00:00:00.000Z", updated_at: "2026-07-24T00:00:00.000Z", results_posted: false, voters: 0,
+  },
+];
 
 const health = {
   sqlite: { ok: true, records: 0 },
@@ -471,6 +488,25 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     success: true,
     data: { spaces: [{ id: "77", key: "GROW", name: "Growth space" }] },
   }));
+  if (url.includes("/api/pages")) {
+    const method = init?.method || "GET";
+    if (url.endsWith("/results")) {
+      return new Response(JSON.stringify({ success: true, data: [{
+        block_id: "poll1", type: "poll", question: "Where to eat?", closed: false, closes_at: null,
+        voters: ["Sarah", "Dev"], leaders: ["Tacos"],
+        options: [
+          { id: "o1", label: "Tacos", count: 2, voters: ["Sarah", "Dev"] },
+          { id: "o2", label: "Pizza", count: 0, voters: [] },
+        ],
+      }] }));
+    }
+    if (method === "DELETE") {
+      const pageId = url.split("/").pop() as string;
+      revokedPages.push(pageId);
+      return new Response(JSON.stringify({ success: true, data: { ...hostedPages[0], id: pageId, revoked: true, live: false } }));
+    }
+    return new Response(JSON.stringify({ success: true, data: hostedPages }));
+  }
   if (url.includes("/api/digest-briefs")) {
     const method = init?.method || "GET";
     if (url.endsWith("/test")) {
@@ -1586,8 +1622,13 @@ describe("fallback agent panel", () => {
   });
 });
 
+/** Settings shows one tab at a time; a test that crosses tabs clicks the menu like a person would. */
+const openTab = (name: RegExp) => userEvent.click(screen.getByRole("tab", { name }));
+
 it("renders secure messaging and event integration settings", async () => {
   window.localStorage.clear();
+  // Sections used to remember being open; they are always open now, and the old key goes.
+  window.localStorage.setItem("fieldnote:settings-sections", JSON.stringify({ "delivery-schedule": true }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
@@ -1595,13 +1636,14 @@ it("renders secure messaging and event integration settings", async () => {
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: /General/ })).toHaveAttribute("aria-selected", "true");
+  expect(window.localStorage.getItem("fieldnote:settings-sections")).toBeNull();
+  await openTab(/Messaging/);
   expect(screen.getByText("Message provider")).toBeInTheDocument();
   expect(screen.getByText("Delivery schedule")).toBeInTheDocument();
-  expect(screen.getByText("Meeting notes")).toBeInTheDocument();
   expect(screen.getByText("Twilio SMS")).toBeInTheDocument();
   expect(screen.queryByDisplayValue(/secret/i)).not.toBeInTheDocument();
   // Sendblue is the other half of the toggle, and its form replaces Twilio's.
-  await userEvent.click(screen.getByText("Message provider"));
   await userEvent.click(screen.getByRole("tab", { name: /Sendblue/ }));
   expect(screen.getByText("Sendblue iMessage")).toBeInTheDocument();
   expect(screen.queryByText("Twilio SMS")).not.toBeInTheDocument();
@@ -1609,14 +1651,12 @@ it("renders secure messaging and event integration settings", async () => {
   // the only place they are announced.
   expect(screen.getByText(/reply with a tapback instead of a message/)).toBeInTheDocument();
   expect(screen.getByLabelText("API key ID")).toHaveValue("");
-  const delivery = screen.getByText("Delivery schedule").closest("details") as HTMLDetailsElement;
-  expect(delivery.open).toBe(false);
-  await userEvent.click(screen.getByText("Delivery schedule"));
-  expect(delivery.open).toBe(true);
-  expect(JSON.parse(window.localStorage.getItem("fieldnote:settings-sections") || "{}")).toMatchObject({
-    "delivery-schedule": true,
-  });
-  await userEvent.click(screen.getByText("Under the hood"));
+  // Every section is open: the schedule's controls are there without a click.
+  expect(screen.getByRole("button", { name: /Save SMS schedule/ })).toBeVisible();
+  await openTab(/Connections/);
+  expect(screen.getByText("Meeting notes")).toBeInTheDocument();
+  expect(screen.getByText("Jira & Confluence")).toBeInTheDocument();
+  await openTab(/Advanced/);
   // Search mode, its actions, and the index names share one panel now.
   expect(screen.getByText("Search mode")).toBeInTheDocument();
   expect(screen.getByText("devcon_assistant_todos")).toBeInTheDocument();
@@ -1648,11 +1688,10 @@ it("offers the origin the app is served from as the webhook URL", async () => {
   try {
     render(
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+        <MemoryRouter initialEntries={["/settings?tab=messaging"]}><App /></MemoryRouter>
       </QueryClientProvider>,
     );
     expect(await screen.findByText("Settings.")).toBeInTheDocument();
-    await userEvent.click(screen.getByText("Message provider"));
     // Nothing saved yet, so the field starts as the current origin and the
     // endpoints the provider will be pointed at are spelled out.
     const field = screen.getByLabelText("Public HTTPS URL");
@@ -1676,11 +1715,10 @@ it("keeps the webhook field empty in development, where the origin is plain HTTP
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=messaging"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
-  await userEvent.click(screen.getByText("Message provider"));
   expect(screen.getByLabelText("Public HTTPS URL")).toHaveValue("");
   expect(screen.queryByRole("button", { name: "Use this URL" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Connect Twilio" })).toBeInTheDocument();
@@ -1716,11 +1754,10 @@ it("saves the owner's evening check-in time with the SMS schedule", async () => 
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=messaging"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
-  await userEvent.click(screen.getByText("Delivery schedule"));
   const time = screen.getByLabelText("Evening check-in time");
   expect(time).toBeDisabled();
   await userEvent.click(screen.getByRole("button", { name: /Save SMS schedule/ }));
@@ -1759,11 +1796,10 @@ it("shapes a group's voice from the Group chats section", async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=messaging"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
-  await userEvent.click(screen.getByText("Group chats"));
 
   const named = await screen.findByLabelText("Answer only when named in Home");
   expect(named).not.toBeChecked();
@@ -1800,11 +1836,10 @@ it("saves the owner's Soul and tags preference memories", async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=assistant"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
-  await userEvent.click(screen.getByText(/How the assistant talks with you/));
   const soul = await screen.findByLabelText("Your Soul");
   fireEvent.change(soul, { target: { value: "- Dry humour is fine." } });
   await userEvent.click(within(soul.closest(".ask-editor") as HTMLElement).getByRole("button", { name: /Save Soul/ }));
@@ -1827,15 +1862,14 @@ it("schedules a group's check-ins, and a copy to the owner, from the Group chats
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
-  await userEvent.click(screen.getByText("Classifications"));
-  const classifications = (await screen.findByText("Group chat")).closest("details")!;
+  const classifications = (await screen.findByText("Group chat")).closest(".settings-section")!;
 
-  await userEvent.click(screen.getByText("Group chats"));
+  await openTab(/Messaging/);
   expect(await screen.findByText("Who can talk to the assistant")).toBeInTheDocument();
   expect(screen.queryByLabelText("Morning check-in for Work")).not.toBeInTheDocument();
 
   const morning = screen.getByLabelText("Morning check-in for Home");
-  const groupChats = morning.closest("details")!;
+  const groupChats = morning.closest(".settings-section")!;
   expect(classifications).not.toContainElement(morning);
   expect(groupChats).toHaveTextContent("Group chats");
   expect(groupChats).toContainElement(screen.getByRole("button", { name: /Add trusted contact/ }));
@@ -1908,13 +1942,12 @@ it("fills the brief form from the end-of-day template and flags a send time insi
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=assistant"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
 
-  await userEvent.click(screen.getByText("Digest briefs"));
-  const briefSection = screen.getByText("Digest briefs").closest("details") as HTMLDetailsElement;
+  const briefSection = screen.getByText("Digest briefs").closest(".settings-section") as HTMLElement;
   const newBrief = briefSection.querySelector(".brief-new") as HTMLElement;
   await userEvent.click(within(newBrief).getByRole("button", { name: /End-of-day reflection/ }));
 
@@ -1944,13 +1977,12 @@ it("connects Atlassian and pins a board and a space to a digest brief", async ()
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=connections"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Settings.")).toBeInTheDocument();
 
-  await userEvent.click(screen.getByText("Jira & Confluence"));
-  const atlassianSection = screen.getByText("Jira & Confluence").closest("details") as HTMLDetailsElement;
+  const atlassianSection = screen.getByText("Jira & Confluence").closest(".settings-section") as HTMLElement;
   const connect = within(atlassianSection).getByRole("button", { name: "Connect Atlassian" });
   expect(connect).toBeDisabled();
   await userEvent.type(within(atlassianSection).getByLabelText("Site URL"), "https://example.atlassian.net");
@@ -1963,8 +1995,8 @@ it("connects Atlassian and pins a board and a space to a digest brief", async ()
   expect(await within(atlassianSection).findByText("Jira available")).toBeInTheDocument();
   expect(within(atlassianSection).getByText("Confluence available")).toBeInTheDocument();
 
-  await userEvent.click(screen.getByText("Digest briefs"));
-  const briefSection = screen.getByText("Digest briefs").closest("details") as HTMLDetailsElement;
+  await openTab(/Assistant/);
+  const briefSection = screen.getByText("Digest briefs").closest(".settings-section") as HTMLElement;
   const newBrief = briefSection.querySelector(".brief-new") as HTMLElement;
   await userEvent.type(within(newBrief).getByLabelText("Brief name"), "Morning sweep");
   await userEvent.type(within(newBrief).getByLabelText("Instruction"), "What is in review?");
@@ -2013,10 +2045,10 @@ it("defaults to keyword search and reports what the NeuralSearch toggle achieved
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=advanced"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
-  await userEvent.click(await screen.findByText("Under the hood"));
+  await screen.findByText("Under the hood");
   expect(screen.getByText("Algolia keyword search")).toBeInTheDocument();
 
   const toggle = screen.getByRole("checkbox", { name: /NeuralSearch/ });
@@ -2067,10 +2099,10 @@ it("spins only the maintenance button that is actually running", async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>
+      <MemoryRouter initialEntries={["/settings?tab=advanced"]}><App /></MemoryRouter>
     </QueryClientProvider>,
   );
-  await userEvent.click(await screen.findByText("Under the hood"));
+  await screen.findByText("Under the hood");
   const reindex = screen.getByRole("button", { name: "Reindex" });
   const configure = screen.getByRole("button", { name: "Configure Algolia" });
   expect(reindex).toHaveAttribute("aria-busy", "false");
@@ -3096,6 +3128,56 @@ it("opens a task from the keyboard and traps focus in the editor", async () => {
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(document.activeElement).toBe(title);
+});
+
+it("keeps the settings tabs in the address and moves between them with the arrow keys", async () => {
+  renderAt("/settings?tab=connections");
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  const tabs = screen.getAllByRole("tab").filter(tab => tab.id.startsWith("settings-tab-"));
+  expect(tabs).toHaveLength(5);
+  const connections = screen.getByRole("tab", { name: /Connections/ });
+  expect(connections).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", connections.id);
+  expect(screen.getByText("Meeting notes")).toBeInTheDocument();
+  expect(screen.queryByText("Message provider")).not.toBeInTheDocument();
+
+  connections.focus();
+  await userEvent.keyboard("{ArrowRight}");
+  const advanced = screen.getByRole("tab", { name: /Advanced/ });
+  expect(advanced).toHaveAttribute("aria-selected", "true");
+  expect(advanced).toHaveFocus();
+  await userEvent.keyboard("{ArrowRight}");
+  expect(screen.getByRole("tab", { name: /General/ })).toHaveAttribute("aria-selected", "true");
+  await userEvent.keyboard("{End}");
+  expect(screen.getByRole("tab", { name: /Advanced/ })).toHaveAttribute("aria-selected", "true");
+  await userEvent.keyboard("{Home}");
+  expect(screen.getByText("Appearance")).toBeInTheDocument();
+});
+
+it("falls back to the first settings tab for a tab it does not know", async () => {
+  renderAt("/settings?tab=nonsense");
+  expect(await screen.findByText("Settings.")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: /General/ })).toHaveAttribute("aria-selected", "true");
+});
+
+it("lists hosted pages with who can open them, shows poll results, and revokes a link", async () => {
+  renderAt("/pages");
+  expect(await screen.findByText("Pages.")).toBeInTheDocument();
+  expect(await screen.findByText("Dinner Friday")).toBeInTheDocument();
+  expect(document.querySelector(".page-audience.shared")).toHaveTextContent("Shared");
+  expect(screen.getByText("Private")).toBeInTheDocument();
+  expect(screen.getByText("In Home")).toBeInTheDocument();
+  expect(screen.getByText("4 views")).toBeInTheDocument();
+  expect(screen.getByText("2 answers")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Results" }));
+  expect(await screen.findByText("Where to eat?")).toBeInTheDocument();
+  expect(screen.getByText("Sarah, Dev")).toBeInTheDocument();
+
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  await userEvent.click(screen.getAllByRole("button", { name: /Revoke/ })[0]);
+  await waitFor(() => expect(revokedPages).toEqual(["page_poll"]));
+  confirmSpy.mockRestore();
 });
 
 it("lists the pictures the assistant kept, filters them, and deletes one", async () => {

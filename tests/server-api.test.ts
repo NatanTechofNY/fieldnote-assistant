@@ -8,7 +8,7 @@ import { syncAgentStudioTools } from "../server/agent-studio.ts";
 import { archiveReactionText, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames, indexedCommentBodies, TODO_COMMENTS_INDEXED, TODO_COMMENTS_INDEXED_BYTES } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
-import { resetThrottling } from "../server/auth.ts";
+import { resetThrottling, safeNextPath } from "../server/auth.ts";
 import { countTodoComments, ensureGroupLifeArea, getTodo, getTodoComments, insertTodoComment, loadStoreCatalog, openDatabase, queueIndexJob, readStoreCatalog, USER_ID } from "../server/db.ts";
 import { currentFiscalQuarter, fiscalQuarterRange } from "../server/fiscal-quarter.ts";
 import { reflectionPeriod } from "../server/reflection-period.ts";
@@ -74,6 +74,11 @@ import { toolInput } from "../server/schemas.ts";
 import { z } from "zod";
 import { sendSendblueSms, startSendblueTypingIndicator } from "../server/sendblue-service.ts";
 import { executeAgentTool, resetBrowserTurnState, type ToolTurnContext } from "../server/tool-executor.ts";
+import { resetPageJobFailures, runPageJobs } from "../server/page-worker.ts";
+import { ensureTodayPage } from "../server/page-service.ts";
+import { pageCalendar } from "../server/page-ics.ts";
+import { closePollsNow, createPage, getPage, MAX_VOTERS, optionId, pageIsLive, revokePage, sweepPages } from "../server/pages.ts";
+import { resetPageWriteThrottle } from "../server/routes/public-pages.ts";
 import { resetWebState } from "../server/web-service.ts";
 import { pullGifLine, rememberImages } from "../server/image-output.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
@@ -1533,7 +1538,7 @@ describe("Agent Studio configuration sync", () => {
       agentId: "agent",
       fetcher,
     });
-    assert.equal(result.clientTools, 46);
+    assert.equal(result.clientTools, 52);
     assert.equal(result.preservedTools, 1, "unrelated tools survive, the search tool is rebuilt not preserved");
     assert.equal(result.searchIndices, 3);
     assert.deepEqual(calls.map(call => call.method), ["GET", "PATCH", "POST"]);
@@ -1592,7 +1597,7 @@ describe("Agent Studio configuration sync", () => {
       assert.deepEqual(controls.facets.default, expected, `${index.index} exposes only safe facets`);
       assert.deepEqual(parameters.facets, expected, `${index.index} requests the same set it allows`);
     }
-    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 46);
+    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 52);
     assert.ok(!patch.tools.some(tool => tool.name === "list_memories"));
     assert.ok(patch.tools.some(tool => tool.name === "list_jira_issues" && "inputSchema" in tool));
     assert.ok(patch.tools.some(tool => tool.name === "create_memory" && "inputSchema" in tool));
@@ -2664,7 +2669,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
     const declared = Object.keys(toolInput);
-    assert.equal(declared.length, 46, "the tool contract changed; extend this test with it");
+    assert.equal(declared.length, 52, "the tool contract changed; extend this test with it");
     // The Atlassian tools read a remote system rather than SQLite, so they are
     // exercised against a stubbed site in their own block instead of here, as
     // are the shopping tools, which read the store catalog, and the web tools.
@@ -2858,6 +2863,8 @@ describe("agent tools over /api/agent/tools/:name", () => {
       "find_gif", "send_image",
       // Exercised in and out of a group in their own block.
       "update_soul", "update_group_settings",
+      // Exercised in the hosted pages block.
+      "create_page", "update_page", "list_pages", "revoke_page", "get_poll_results", "send_to_contact",
     ]);
     assert.deepEqual(declared.filter(name => !exercised.has(name)), [], "every declared tool must be covered");
   });
@@ -13514,5 +13521,498 @@ describe("background activity", () => {
     const sweeps = body.chats.find(chat => chat.kind === "group")!.sweeps;
     const byId = Object.fromEntries(sweeps.map(sweep => [sweep.id, [sweep.summary, sweep.changes.map(change => change.title)]]));
     assert.deepEqual(byId, { d1: ["First run.", ["First"]], d2: ["Second run.", ["Second"]] });
+  });
+});
+
+describe("hosted pages", () => {
+  const BASE = "https://assistant.example.com";
+  const PASSWORD = "correct-horse-battery-staple";
+  const OWNER = "+17185551111";
+  const slugOf = (url: string) => url.slice(`${BASE}/p/`.length);
+
+  afterEach(() => {
+    delete process.env.PUBLIC_BASE_URL;
+    delete process.env.APP_ADMIN_PASSWORD;
+    resetThrottling();
+    resetPageWriteThrottle();
+  });
+
+  function pageFixture() {
+    process.env.PUBLIC_BASE_URL = BASE;
+    resetPageWriteThrottle();
+    return fixture();
+  }
+
+  async function makePoll(api: ReturnType<typeof fixture>["api"], extra: object = {}) {
+    const created = await api.post("/api/pages").send({
+      title: "Dinner Friday",
+      blocks: [{ type: "poll", text: "Where to eat?", items: ["Tacos", "Pizza"] }],
+      ...extra,
+    }).expect(201);
+    return created.body.data as { id: string; url: string; audience: string; blocks: Array<{ id: string }> };
+  }
+
+  /** A thread for the owner's own text chat, and the context a turn on it carries. */
+  function ownerTurn(db: Db, inboundText = ""): ToolTurnContext {
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT OR IGNORE INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_owner_pages',?,'sms',?,'alg_cnv_owner_pages',?,?)
+    `).run(USER_ID, OWNER, stamp, stamp);
+    saveNotificationPreferences(db, {
+      smsEnabled: true, recipientPhone: OWNER, timezone: "UTC", dailyDigestEnabled: false, dailyDigestTime: "09:00",
+      quietHoursStart: null, quietHoursEnd: null,
+      trustedContacts: [{ phone: "+17185552222", name: "Sarah" }],
+    });
+    return { channel: "sms", address: OWNER, threadId: "thread_owner_pages", provider: "sendblue", inboundText };
+  }
+
+  function groupTurn(db: Db, threadId: string): { context: ToolTurnContext; areaId: string } {
+    const stamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES(?,?,'sms',?,?,?,?)
+    `).run(threadId, USER_ID, `group:${threadId}`, `alg_cnv_${threadId}`, stamp, stamp);
+    const area = ensureGroupLifeArea(db, threadId, threadId);
+    return {
+      areaId: area.id,
+      context: {
+        channel: "sms", address: `group:${threadId}`, threadId, provider: "sendblue", groupId: threadId,
+        scope: { lifeAreaId: area.id, threadId }, speakerIsOwner: false, inboundMessageHandle: `SB_${threadId}`,
+      },
+    };
+  }
+
+  const run = (db: Db, name: string, input: object, context?: ToolTurnContext) =>
+    executeAgentTool(db, { flushSoon() {} }, name, input as Record<string, unknown>, context) as Promise<Record<string, any>>;
+
+  it("serves a shared poll without a sign-in, with locked-down headers, and counts one vote per name", async () => {
+    const { api, db } = pageFixture();
+    const poll = await makePoll(api);
+    assert.equal(poll.audience, "shared", "a poll is answered by other people, so it is shared by nature");
+    assert.ok(poll.url.startsWith(`${BASE}/p/`));
+    const slug = slugOf(poll.url);
+    const blockId = poll.blocks[0].id;
+
+    process.env.APP_ADMIN_PASSWORD = PASSWORD;
+    const page = await api.get(`/p/${slug}`).set("User-Agent", "Mozilla/5.0 (iPhone)").expect(200);
+    assert.match(page.text, /Dinner Friday/);
+    assert.match(page.text, /Tacos/);
+    assert.match(page.headers["content-security-policy"], /default-src 'none'/);
+    assert.doesNotMatch(page.headers["content-security-policy"], /script-src/);
+    assert.equal(page.headers["x-frame-options"], "DENY");
+    assert.equal(page.headers["referrer-policy"], "no-referrer");
+    assert.equal(page.headers["cache-control"], "no-store");
+    assert.doesNotMatch(page.text, /<script/i, "a page runs no script");
+    assert.match(page.text, /og:title/);
+    assert.match(page.text, /noindex/);
+    assert.equal(getPage(db, poll.id)?.view_count, 1);
+    // Link-preview bots open a link the moment it is sent; they are not people.
+    await api.get(`/p/${slug}`).set("User-Agent", "facebookexternalhit/1.1").expect(200);
+    assert.equal(getPage(db, poll.id)?.view_count, 1);
+
+    const vote = (body: object) => api.post(`/p/${slug}/vote`).type("form").send({ block: blockId, ...body });
+    const first = await vote({ name: "Sarah", option: optionId("Tacos") }).expect(303);
+    assert.match(first.headers.location, new RegExp(`^/p/${slug}\\?n=voted`));
+    assert.match(String(first.headers["set-cookie"]), /fn_voter=Sarah/);
+    assert.match(String(first.headers["set-cookie"]), /HttpOnly/);
+    // Voting again under the same name is a change of mind, not a second vote.
+    await vote({ name: "sarah", option: optionId("Pizza") }).expect(303);
+    await vote({ name: "Dev", option: optionId("Pizza") }).expect(303);
+    assert.match((await vote({ name: "", option: optionId("Pizza") }).expect(303)).headers.location, /n=name/);
+    assert.match((await vote({ name: "Eve", option: "nope" }).expect(303)).headers.location, /n=option/);
+
+    delete process.env.APP_ADMIN_PASSWORD;
+    const results = (await api.get(`/api/pages/${poll.id}/results`).expect(200)).body.data;
+    assert.deepEqual(results[0].voters.sort(), ["Dev", "sarah"]);
+    assert.deepEqual(results[0].leaders, ["Pizza"]);
+    assert.equal(results[0].options.find((option: { label: string }) => option.label === "Tacos").count, 0);
+
+    assert.match((await api.get("/p/og.png").expect(200)).headers["content-type"], /image\/png/);
+    await api.get("/p/not-a-real-slug").expect(404);
+  });
+
+  it("answers 404 for a revoked or expired page, and keeps an owner page behind the sign-in", async () => {
+    const { api, db } = pageFixture();
+    const poll = await makePoll(api);
+    const slug = slugOf(poll.url);
+    await api.delete(`/api/pages/${poll.id}`).expect(200);
+    await api.get(`/p/${slug}`).expect(404);
+    await api.post(`/p/${slug}/vote`).type("form").send({ block: "poll1", name: "Sarah", option: optionId("Tacos") }).expect(404);
+
+    const expired = createPage(db, {
+      title: "Old", blocks: [{ type: "text", text: "gone" }], audience: "shared", expiresInDays: 1,
+    });
+    db.prepare("UPDATE shared_pages SET expires_at=? WHERE id=?").run(new Date(Date.now() - 1000).toISOString(), expired.id);
+    await api.get(`/p/${expired.slug}`).expect(404);
+
+    const mine = (await api.post("/api/pages").send({ template: "today" }).expect(201)).body.data;
+    assert.equal(mine.audience, "owner");
+    const mineSlug = slugOf(mine.url);
+    process.env.APP_ADMIN_PASSWORD = PASSWORD;
+    const gate = await api.get(`/p/${mineSlug}`).expect(303);
+    assert.equal(gate.headers.location, `/login?next=${encodeURIComponent(`/p/${mineSlug}`)}`);
+    const basic = `Basic ${Buffer.from(`admin:${PASSWORD}`).toString("base64")}`;
+    const opened = await api.get(`/p/${mineSlug}`).set("Authorization", basic).expect(200);
+    assert.match(opened.text, /Today/);
+    // The same gate holds for the REST list: the owner's pages are not public.
+    await api.get("/api/pages").expect(401);
+  });
+
+  it("refuses to send an owner page's link to anyone else", async () => {
+    const { api, db } = pageFixture();
+    const mine = (await api.post("/api/pages").send({ template: "today" }).expect(201)).body.data;
+    const { context } = groupTurn(db, "thread_link_group");
+    const sent: string[] = [];
+    context.sendSms = async (_db, _to, body) => { sent.push(body); return { sid: "SM_1", status: "queued" }; };
+    await assert.rejects(run(db, "send_message", { text: `here: ${mine.url}` }, context), /private page/);
+    assert.deepEqual(sent, []);
+    const shared = await makePoll(api);
+    await run(db, "send_message", { text: `vote: ${shared.url}` }, context);
+    assert.equal(sent.length, 1);
+  });
+
+  it("files a page made in a group under that group, shows only its records, and hides it from other groups", async () => {
+    const { api, db } = pageFixture();
+    const { context: family, areaId } = groupTurn(db, "thread_family_pages");
+    const { context: work } = groupTurn(db, "thread_work_pages");
+
+    await api.post("/api/todos").send({ title: "Owner secret errand", due_at: new Date().toISOString() }).expect(201);
+    await run(db, "create_todo", { title: "Buy oat milk", due_at: new Date().toISOString() }, family);
+
+    const made = await run(db, "create_page", {
+      title: "Family week", blocks: [{ type: "todos", range: "week" }, { type: "text", text: "Be kind" }],
+    }, family);
+    assert.equal(made.audience, "shared", "a group's page is the group's");
+    assert.equal(made.life_area_id, areaId);
+    const slug = slugOf(made.url);
+    const html = (await api.get(`/p/${slug}`).expect(200)).text;
+    assert.match(html, /Buy oat milk/);
+    assert.doesNotMatch(html, /Owner secret errand/, "a group page reads only its own area's records");
+
+    assert.equal((await run(db, "list_pages", { include_expired: null }, family)).pages.length, 1);
+    assert.deepEqual((await run(db, "list_pages", { include_expired: null }, work)).pages, []);
+    await assert.rejects(run(db, "update_page", { id: made.id, title: "Hijacked" }, work), /Page not found/);
+    await assert.rejects(run(db, "revoke_page", { id: made.id }, work), /Page not found/);
+    await assert.rejects(run(db, "get_poll_results", { id: made.id }, work), /Page not found/);
+    await assert.rejects(run(db, "create_page", { template: "weekly_review" }, family), /owner/i);
+    await assert.rejects(
+      run(db, "create_page", { template: "pick_a_time", slots: ["Sat 2pm"], thread_id: "thread_work_pages" }, family),
+      /only make pages for that group/,
+    );
+    await assert.rejects(run(db, "send_to_contact", { name: "Sarah", text: "hi" }, family), /not available in a group chat/);
+    // The owner sees every page, and can file one under a group from their own chat.
+    const owner = ownerTurn(db);
+    assert.equal((await run(db, "list_pages", { include_expired: null }, owner)).pages.length, 1);
+    // Naming a group takes what posting there takes: the owner has to have named it.
+    await assert.rejects(run(db, "create_page", { template: "shopping_list", items: ["Eggs"], thread_id: "thread_work_pages" }, owner), /has to name the group/);
+    owner.inboundText = "start a shopping list for thread_work_pages";
+    const filed = await run(db, "create_page", {
+      template: "shopping_list", items: ["Eggs", "Flour"], thread_id: "thread_work_pages",
+    }, owner);
+    assert.equal(filed.audience, "shared");
+    assert.equal((db.prepare("SELECT count(*) n FROM todos WHERE title IN ('Eggs','Flour') AND life_area_id=(SELECT id FROM life_areas WHERE thread_id='thread_work_pages')").get() as { n: number }).n, 2);
+  });
+
+  it("builds and renders every template, in a group where it is a group's and from the owner's chat where it is theirs", async () => {
+    const { api, db } = pageFixture();
+    const owner = ownerTurn(db);
+    const { context: group } = groupTurn(db, "thread_templates");
+    const parent = await run(db, "create_todo", {
+      title: "Plan the trip", subtasks: [{ title: "Book flights" }, { title: "Pack" }],
+    }, group);
+    assert.ok(parent.id, JSON.stringify(parent));
+    const open = async (made: Record<string, any>) => (await api.get(`/p/${slugOf(made.url)}`)
+      .set("Authorization", "").expect(200)).text as string;
+
+    const forGroup: Array<[string, object]> = [
+      ["today", {}], ["week", {}], ["pick_a_time", { items: ["Sat Oct 17", "Sun Oct 18"], slots: ["2pm", "6pm"], title: "Brunch" }],
+      ["shopping_list", { items: ["Milk", "Eggs"] }], ["group_week_review", {}], ["chore_rotation", { items: ["Dishes", "Trash"] }],
+      ["trip", { title: "Lisbon", when: "2031-05-01T09:00:00.000Z", items: ["Fri 7pm | Dinner"], slots: ["Passport", "Charger"] }],
+    ];
+    for (const [template, input] of forGroup) {
+      const made = await run(db, "create_page", { template, ...input }, group);
+      assert.equal(made.audience, "shared", `${template} made in a group is shared`);
+      const html = await open(made);
+      assert.match(html, /<h1[^>]*>/, `${template} renders a title`);
+    }
+    const forOwner: Array<[string, object]> = [
+      ["today", {}], ["week", {}], ["weekly_review", {}], ["project", { todo_id: parent.id }],
+      ["meeting_prep", { title: "Standup", items: ["Sarah"] }], ["habits", {}], ["mood_heatmap", {}],
+    ];
+    for (const [template, input] of forOwner) {
+      const made = await run(db, "create_page", { template, ...input }, owner);
+      assert.equal(made.audience, "owner", `${template} made for the owner stays private`);
+      await open(made);
+    }
+    for (const template of ["weekly_review", "project", "meeting_prep", "jira_status", "habits", "mood_heatmap"]) {
+      await assert.rejects(run(db, "create_page", { template, todo_id: parent.id, items: ["Sarah"] }, group), /owner/i, `${template} is refused in a group`);
+    }
+
+    // One page with every kind of block.
+    owner.inboundText = "make it for thread_templates";
+    const everything = await run(db, "create_page", {
+      title: "Everything", audience: "shared", thread_id: "thread_templates",
+      blocks: [
+        { type: "heading", text: "Plan" }, { type: "text", text: "Some **words** and <b>markup</b>" },
+        { type: "checklist", items: ["a", "b"] }, { type: "link", url: "https://example.com/x", text: "Example" },
+        { type: "todos", range: "week" }, { type: "todos", range: "overdue" },
+        { type: "poll", text: "Pick", items: ["x", "y"], multi: true },
+        { type: "availability", items: ["Mon Oct 19", "Tue Oct 20"], slots: ["5pm", "6pm"] },
+        { type: "live_checklist", todo_id: parent.id }, { type: "progress", todo_id: parent.id },
+        { type: "countdown", text: "Launch", when: "2031-01-01T00:00:00.000Z" },
+        { type: "itinerary", items: ["9:00 Coffee", "11:00 Museum"] }, { type: "stats", items: ["Steps: 9000"] },
+        { type: "habits", days: 28 }, { type: "rotation", text: "Dishes", items: ["Sarah", "Dev"] },
+        { type: "mood_chart", days: 14 }, { type: "mood_heatmap", days: 28 },
+      ],
+    }, owner);
+    const html = await open(everything);
+    assert.match(html, /<strong>words<\/strong>/);
+    assert.doesNotMatch(html, /<b>markup<\/b>/, "markup in a block is escaped, not rendered");
+    assert.match(html, /Book flights/);
+    assert.match(html, /event\.ics/, "a countdown offers to be added to a calendar");
+    const ics = await api.get(`/p/${slugOf(everything.url)}/event.ics`).expect(200);
+    assert.match(ics.text, /BEGIN:VCALENDAR/);
+
+    // A shared checklist is ticked from the public link, and the step is the group's own.
+    const steps = db.prepare("SELECT id,title,status FROM todos WHERE parent_id=? ORDER BY created_at,rowid").all(parent.id) as Array<{ id: string; title: string; status: string }>;
+    const blockId = (everything.blocks as Array<{ id: string; type: string }>).find(block => block.type === "live_checklist")!.id;
+    await api.post(`/p/${slugOf(everything.url)}/check`).type("form")
+      .send({ block: blockId, todo: steps[0].id, name: "Sarah" }).expect(303);
+    assert.equal(getTodo(db, steps[0].id)?.status, "done");
+    const outside = await api.post("/api/todos").send({ title: "Not on the list" }).expect(201);
+    const denied = await api.post(`/p/${slugOf(everything.url)}/check`).type("form")
+      .send({ block: blockId, todo: outside.body.data.id, name: "Sarah" }).expect(303);
+    assert.match(denied.headers.location, /n=gone/);
+    assert.equal(getTodo(db, outside.body.data.id)?.status, "pending");
+  });
+
+  it("keeps votes on the options that survive an edit", async () => {
+    const { api, db } = pageFixture();
+    const owner = ownerTurn(db);
+    const made = await run(db, "create_page", {
+      title: "Snacks", blocks: [{ type: "poll", text: "Pick", items: ["Tacos", "Pizza"] }],
+    }, owner);
+    const slug = slugOf(made.url);
+    const blockId = made.blocks[0].id;
+    await api.post(`/p/${slug}/vote`).type("form").send({ block: blockId, name: "Sarah", option: optionId("Tacos") }).expect(303);
+    await api.post(`/p/${slug}/vote`).type("form").send({ block: blockId, name: "Dev", option: optionId("Pizza") }).expect(303);
+    await run(db, "update_page", {
+      id: made.id, blocks: [{ type: "poll", id: blockId, text: "Pick", items: ["Tacos", "Sushi"] }],
+    }, owner);
+    const results = await run(db, "get_poll_results", { id: made.id }, owner);
+    assert.deepEqual(results.results[0].options.map((option: { label: string; count: number }) => [option.label, option.count]), [["Tacos", 1], ["Sushi", 0]]);
+    assert.deepEqual(results.results[0].voters, ["Sarah"], "the vote for the option that went away is dropped");
+  });
+
+  it("posts a closed poll's result once, nudges the missing, and echoes votes back to the chat", async () => {
+    const { api, db } = pageFixture();
+    const owner = ownerTurn(db);
+    const made = await run(db, "create_page", {
+      title: "Dinner",
+      blocks: [{ type: "poll", text: "Where?", items: ["Tacos", "Pizza"], closes_at: new Date(Date.now() + 3_600_000).toISOString() }],
+    }, owner);
+    const slug = slugOf(made.url);
+    await api.post(`/p/${slug}/vote`).type("form").send({ block: made.blocks[0].id, name: "Sarah", option: optionId("Tacos") }).expect(303);
+    // The hour passes: the poll closes, and a late vote is turned away.
+    db.prepare("UPDATE shared_pages SET blocks_json=json_set(blocks_json,'$[0].closes_at',?) WHERE id=?")
+      .run(new Date(Date.now() - 60_000).toISOString(), made.id);
+    const late = await api.post(`/p/${slug}/vote`).type("form").send({ block: made.blocks[0].id, name: "Dev", option: optionId("Pizza") }).expect(303);
+    assert.match(late.headers.location, /n=closed/);
+
+    const sent: string[] = [];
+    const send = (async (_db: Db, to: string, body: string) => { sent.push(`${to}: ${body}`); return { sid: `SM_${sent.length}`, status: "queued" }; }) as Parameters<typeof runPageJobs>[1]["send"];
+    const local = { date: "2030-01-15", time: "12:00" };
+    await runPageJobs(db, { send, quiet: true, local });
+    assert.deepEqual(sent, [], "nothing is texted in quiet hours");
+    // The vote's echo waits for a quiet two minutes, and the closed poll's result goes first.
+    await runPageJobs(db, { send, quiet: false, local });
+    assert.equal(sent.filter(text => /Poll closed\. .*Tacos wins with 1 of 1 vote/s.test(text)).length, 1);
+    const before = sent.length;
+    await runPageJobs(db, { send, quiet: false, local });
+    assert.equal(sent.length, before, "a result already posted is not posted again");
+
+    db.prepare("UPDATE page_events SET created_at=?").run(new Date(Date.now() - 10 * 60_000).toISOString());
+    await runPageJobs(db, { send, quiet: false, local });
+    assert.ok(sent.some(text => /Dinner: Sarah chose Tacos/.test(text)));
+    const after = sent.length;
+    await runPageJobs(db, { send, quiet: false, local });
+    assert.equal(sent.length, after, "an echoed vote is echoed once");
+  });
+
+  it("keeps what a group can reach to the group's own shared pages and steps", async () => {
+    const { api, db } = pageFixture();
+    const { context: group, areaId } = groupTurn(db, "thread_fence");
+    const owner = ownerTurn(db, "make it for thread_fence");
+
+    // An owner-only snapshot cannot be filed under a group, shared, or copied into either.
+    await assert.rejects(run(db, "create_page", { template: "meeting_prep", items: ["Sarah"], thread_id: "thread_fence" }, owner), /owner/i);
+    const prep = await run(db, "create_page", { template: "meeting_prep", items: ["Sarah"] }, owner);
+    assert.equal(prep.audience, "owner");
+    await assert.rejects(run(db, "create_page", { from_page_id: prep.id, audience: "shared" }, owner), /owner/i);
+    await assert.rejects(run(db, "create_page", { from_page_id: prep.id, thread_id: "thread_fence" }, owner), /owner/i);
+
+    // A private page filed under the group is still the owner's: the group neither lists nor reads it.
+    const quiet = await run(db, "create_page", {
+      title: "Notes", audience: "owner", thread_id: "thread_fence", blocks: [{ type: "text", text: "just for me" }],
+    }, owner);
+    assert.equal(quiet.life_area_id, areaId);
+    assert.deepEqual((await run(db, "list_pages", { include_expired: null }, group)).pages, []);
+    await assert.rejects(run(db, "update_page", { id: quiet.id, title: "Mine now" }, group), /Page not found/);
+
+    // A poll is for other people, so it is shared whatever was asked.
+    const poll = await run(db, "create_page", { audience: "owner", blocks: [{ type: "poll", text: "Where?", items: ["a", "b"] }] }, owner);
+    assert.equal(poll.audience, "shared");
+
+    // Naming a group takes the owner's own words, and a turn that read something foreign cannot.
+    await assert.rejects(run(db, "create_page", { template: "shopping_list", items: ["Eggs"], thread_id: "thread_fence" }, ownerTurn(db, "hello")), /has to name the group/);
+    await assert.rejects(
+      run(db, "create_page", { template: "shopping_list", items: ["Eggs"], thread_id: "thread_fence" }, { ...owner, readPages: true }),
+      /read a web page/,
+    );
+
+    // A shared checklist shows and changes only the steps filed in the group's own area.
+    const parent = await run(db, "create_todo", { title: "Move house", subtasks: [{ title: "Pack kitchen" }, { title: "Private errand" }] }, group);
+    db.prepare("UPDATE todos SET life_area_id='area_personal' WHERE title='Private errand'").run();
+    const list = await run(db, "create_page", { blocks: [{ type: "live_checklist", todo_id: parent.id }, { type: "progress", todo_id: parent.id }] }, group);
+    const html = (await api.get(`/p/${slugOf(list.url)}`).expect(200)).text;
+    assert.match(html, /Pack kitchen/);
+    assert.doesNotMatch(html, /Private errand/);
+    const hidden = db.prepare("SELECT id FROM todos WHERE title='Private errand'").get() as { id: string };
+    const blockId = (list.blocks as Array<{ id: string; type: string }>).find(block => block.type === "live_checklist")!.id;
+    const denied = await api.post(`/p/${slugOf(list.url)}/check`).type("form").send({ block: blockId, todo: hidden.id, name: "Sarah" }).expect(303);
+    assert.match(denied.headers.location, /n=gone/);
+    assert.equal(getTodo(db, hidden.id)?.status, "pending");
+  });
+
+  it("holds public input to what a page can take: odd notice codes, names, and a crowd", async () => {
+    const { api, db } = pageFixture();
+    const poll = await makePoll(api);
+    const slug = slugOf(poll.url);
+    const blockId = poll.blocks[0].id;
+    for (const code of ["constructor", "__proto__", "toString"]) await api.get(`/p/${slug}?n=${code}`).expect(200);
+
+    const vote = (name: string) => api.post(`/p/${slug}/vote`).type("form").send({ block: blockId, name, option: optionId("Tacos") });
+    await vote("Click https://evil.example/x now").expect(303);
+    const names = (await api.get(`/api/pages/${poll.id}/results`).expect(200)).body.data[0].voters as string[];
+    assert.ok(names.every(name => !/[:/@<>"]/.test(name)), `a name carries no link or address: ${names}`);
+
+    const insert = db.prepare("INSERT INTO page_votes(page_id,block_id,voter_name,voter_name_key,option_ids_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)");
+    for (let index = 0; index < MAX_VOTERS; index += 1) insert.run(poll.id, blockId, `Guest ${index}`, `guest ${index}`, JSON.stringify([optionId("Tacos")]), "now", "now");
+    assert.match((await vote("One more").expect(303)).headers.location, /n=full/);
+    assert.match((await vote("Guest 3").expect(303)).headers.location, /n=voted/, "someone already on the page can still change their answer");
+
+    assert.equal(safeNextPath("/\\evil.example"), "/");
+    assert.equal(safeNextPath("/p/abc"), "/p/abc");
+    assert.ok(pageCalendar(db, createPage(db, {
+      title: "Dinner\rBEGIN:VEVENT", audience: "shared", blocks: [{ type: "countdown", text: "Dinner\rATTENDEE:x", when: "2031-05-01T19:00:00.000Z" }],
+    }))?.includes("\r\nATTENDEE") === false);
+  });
+
+  it("closes a poll for good when its result goes out, and keeps its page open past the close", async () => {
+    const { api, db } = pageFixture();
+    const owner = ownerTurn(db);
+    const closes = new Date(Date.now() + 3 * 86_400_000).toISOString();
+    const made = await run(db, "create_page", {
+      expires_in_days: 1, blocks: [{ type: "poll", text: "Where?", items: ["Tacos", "Pizza"], closes_at: closes }],
+    }, owner);
+    assert.ok(Date.parse(getPage(db, made.id)!.expires_at) > Date.parse(closes), "the link outlives the poll's close");
+
+    closePollsNow(db, getPage(db, made.id)!);
+    const late = await api.post(`/p/${slugOf(made.url)}/vote`).type("form").send({ block: made.blocks[0].id, name: "Dev", option: optionId("Pizza") }).expect(303);
+    assert.match(late.headers.location, /n=closed/);
+
+    // Reordering blocks around a poll keeps the poll's votes.
+    const kept = await run(db, "create_page", { blocks: [{ type: "poll", text: "Lunch?", items: ["a", "b"] }] }, owner);
+    await api.post(`/p/${slugOf(kept.url)}/vote`).type("form").send({ block: kept.blocks[0].id, name: "Sarah", option: optionId("a") }).expect(303);
+    await run(db, "update_page", { id: kept.id, blocks: [{ type: "poll", text: "Brunch?", items: ["x", "y"] }, { type: "poll", text: "Lunch?", items: ["a", "b"] }] }, owner);
+    const results = (await api.get(`/api/pages/${kept.id}/results`).expect(200)).body.data as Array<{ question: string; voters: string[] }>;
+    assert.deepEqual(results.find(result => result.question === "Lunch?")?.voters, ["Sarah"]);
+    assert.deepEqual(results.find(result => result.question === "Brunch?")?.voters, []);
+  });
+
+  it("makes a fresh briefing page after one is revoked, and retries a failed text later rather than every minute", async () => {
+    const { db } = pageFixture();
+    const first = await ensureTodayPage(db, "2030-01-15");
+    assert.equal((await ensureTodayPage(db, "2030-01-15")).slug, first.slug);
+    revokePage(db, first);
+    const second = await ensureTodayPage(db, "2030-01-15");
+    assert.notEqual(second.slug, first.slug);
+    assert.ok(pageIsLive(second));
+
+    resetPageJobFailures();
+    const owner = ownerTurn(db);
+    const made = await run(db, "create_page", {
+      blocks: [{ type: "poll", text: "Where?", items: ["a", "b"], closes_at: new Date(Date.now() - 60_000).toISOString() }],
+    }, owner);
+    let attempts = 0;
+    const send = (async () => { attempts += 1; throw new Error("provider down"); }) as unknown as Parameters<typeof runPageJobs>[1]["send"];
+    const local = { date: "2030-01-15", time: "12:00" };
+    await runPageJobs(db, { send, quiet: false, local });
+    await runPageJobs(db, { send, quiet: false, local });
+    assert.equal(attempts, 1, "a failed text waits before it is tried again");
+    assert.equal(getPage(db, made.id)?.results_posted_at, null, "and is still owed");
+    resetPageJobFailures();
+  });
+
+  it("numbers the blocks a template builds, so its form can be answered", async () => {
+    const { api, db } = pageFixture();
+    const owner = ownerTurn(db);
+    const made = await run(db, "create_page", { template: "pick_a_time", title: "Brunch", items: ["Sat Oct 17", "Sun Oct 18"], slots: ["2pm"] }, owner);
+    const block = (made.blocks as Array<{ id?: string }>)[0];
+    assert.ok(block.id, "the availability block has an id");
+    const grid = (await api.get(`/p/${slugOf(made.url)}`).expect(200)).text;
+    assert.match(grid, new RegExp(`name="block" value="${block.id}"`));
+    const voted = await api.post(`/p/${slugOf(made.url)}/vote`).type("form")
+      .send({ block: block.id, name: "Sarah", option: `${optionId("Sat Oct 17")}-${optionId("2pm")}` });
+    assert.doesNotMatch(voted.headers.location ?? "", /n=gone|n=option/);
+  });
+
+  it("sweeps pages a week after they expire, with their votes", async () => {
+    const { db } = pageFixture();
+    const page = createPage(db, { title: "Old", blocks: [{ type: "poll", id: "poll1", text: "?", items: ["a", "b"] }], audience: "shared" });
+    db.prepare("INSERT INTO page_votes(page_id,block_id,voter_name,voter_name_key,option_ids_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)")
+      .run(page.id, "poll1", "Sarah", "sarah", JSON.stringify([optionId("a")]), "now", "now");
+    db.prepare("UPDATE shared_pages SET expires_at=? WHERE id=?").run(new Date(Date.now() - 3 * 86_400_000).toISOString(), page.id);
+    assert.equal(sweepPages(db), 0, "an expired page lingers for a week");
+    db.prepare("UPDATE shared_pages SET expires_at=? WHERE id=?").run(new Date(Date.now() - 8 * 86_400_000).toISOString(), page.id);
+    assert.equal(sweepPages(db), 1);
+    assert.equal((db.prepare("SELECT count(*) n FROM page_votes").get() as { n: number }).n, 0);
+  });
+
+  it("texts a named trusted contact only when the owner's own words name them", async () => {
+    const { db } = pageFixture();
+    const owner = ownerTurn(db, "text Sarah the link");
+    const sent: Array<[string, string]> = [];
+    owner.sendSms = async (_db, to, body) => { sent.push([to, body]); return { sid: "SM_c", status: "queued" }; };
+    const result = await run(db, "send_to_contact", { name: "sarah", text: "Dinner plans soon" }, owner);
+    assert.equal(result.sent, true);
+    assert.deepEqual(sent, [["+17185552222", "Dinner plans soon"]]);
+    await assert.rejects(run(db, "send_to_contact", { name: "Nobody", text: "hi" }, owner), /No contact named/);
+    owner.inboundText = "what's the weather";
+    await assert.rejects(run(db, "send_to_contact", { name: "Sarah", text: "hi" }, { ...owner, inboundText: "what's the weather", threadId: "thread_other" }), /has to name/);
+    owner.appTurn = "daily_digest";
+    await assert.rejects(run(db, "send_to_contact", { name: "Sarah", text: "hi" }, owner), /uses no tools|app writing/);
+  });
+
+  it("ends the morning briefing with today's page when the owner asks for it", async () => {
+    const { db } = pageFixture();
+    ownerTurn(db);
+    saveNotificationPreferences(db, {
+      smsEnabled: true, recipientPhone: OWNER, timezone: "UTC", dailyDigestEnabled: true, dailyDigestTime: "00:00",
+      quietHoursStart: null, quietHoursEnd: null, linkTodayPage: true,
+    });
+    const bodies: string[] = [];
+    await runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async (_db, _to, body) => { bodies.push(body); return { sid: "SM_d", status: "queued" }; },
+      runSmsAgent: async () => ({ text: "digest", threadId: "unused" }),
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+    });
+    const briefing = bodies.find(body => body.startsWith("digest"));
+    assert.ok(briefing, "the briefing went out");
+    assert.match(briefing, new RegExp(`Today's page: ${BASE}/p/[A-Za-z0-9_-]{22}$`));
+    const slug = briefing.slice(briefing.lastIndexOf("/") + 1);
+    const row = db.prepare("SELECT audience,template FROM shared_pages WHERE slug=?").get(slug) as { audience: string; template: string };
+    assert.deepEqual({ ...row }, { audience: "owner", template: "today" });
   });
 });
