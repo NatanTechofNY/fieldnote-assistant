@@ -888,14 +888,20 @@ export function foldIntoNextTurn(
   })();
 }
 
-/** When the oldest message a burst has been gathering since arrived: the burst stops growing past a bound. */
-export function burstStartedAt(db: Db, address: string, providerMessageId: string): string | undefined {
+/**
+ * What a burst has gathered so far for the turn answering `providerMessageId`:
+ * when the first of it was filed, and how many messages it holds. Both are the
+ * worker's own doing (rows are stamped when they are filed, not when they
+ * arrived), so a burst is bounded by how long and how far it has been folding,
+ * never by how old the texts were when the worker got to them.
+ */
+export function burstState(db: Db, address: string, providerMessageId: string): { startedAt?: string; count: number } {
   const row = db.prepare(`
-    SELECT min(m.created_at) started FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+    SELECT min(m.created_at) started, count(*) n FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
     WHERE t.user_id=? AND t.channel='sms' AND t.address=? AND m.role='user'
       AND json_extract(m.metadata_json,'$.foldedInto')=?
-  `).get(USER_ID, address, providerMessageId) as { started: string | null };
-  return row.started ?? undefined;
+  `).get(USER_ID, address, providerMessageId) as { started: string | null; n: number };
+  return { startedAt: row.started ?? undefined, count: row.n };
 }
 
 type BurstRow = {

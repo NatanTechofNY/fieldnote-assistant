@@ -9743,6 +9743,30 @@ describe("Sendblue provider", () => {
     assert.ok(Date.parse(settling.available_at) > Date.now());
   }));
 
+  it("folds a backlog of old group texts into a few turns instead of one turn each", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const post = (text: string) => api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, text)).expect(200);
+    for (let i = 1; i <= 45; i++) await post(`bubble ${i}`);
+    // The worker was away: every text is older than the burst bound by the time it is read.
+    db.prepare("UPDATE external_events SET created_at=?").run(new Date(Date.now() - 30 * 60_000).toISOString());
+    const turns: string[] = [];
+    // A pass claims twenty texts; the queue is drained over several.
+    const pass = () => runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async () => ({ sid: "SB_backlog", status: "queued" as const }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, body: string) => {
+        turns.push(body);
+        return { text: "ok", threadId: "thread_x" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    });
+    for (let i = 0; i < 4; i++) await pass();
+    assert.deepEqual(turns, ["bubble 41", "bubble 45"], "forty bubbles ride on the first turn, the rest on the second");
+    const open = db.prepare("SELECT count(*) n FROM external_events WHERE status NOT IN ('processed','ignored')").get() as { n: number };
+    assert.equal(open.n, 0);
+  });
+
   /*
    * A lively stretch can go by without anyone's facts being kept. A quiet
    * stretch is read once, afterwards, for the facts it established.
