@@ -4,7 +4,7 @@ import { pruneExpiredSessions } from "./auth.ts";
 import { getTodo, groupAreas, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
-  archivedInboundText, archiveReactionText, burstStartedAt, failAgentTurn, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
+  archivedInboundText, archiveReactionText, burstState, failAgentTurn, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
   recordOutboundProviderMessage, runSmsAgent, stageInboundPictures,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
@@ -67,6 +67,8 @@ export type WorkerDependencies = {
 export const GROUP_SETTLE_MS = 3_000;
 /** The longest a burst keeps gathering: in nonstop chatter its first message is still answered. */
 const MAX_BURST_MS = 15_000;
+/** The most messages one turn answers together, so a long backlog is answered in a few turns and not in hundreds. */
+const MAX_BURST_MESSAGES = 40;
 
 /**
  * Inbound texts are queued verbatim in the provider's own vocabulary, so each
@@ -1318,10 +1320,19 @@ export async function runWorkerOnce(
         }
         // Another message from the group is already queued: that turn answers
         // this one with it — unless the burst has been gathering long enough
-        // that its first message is owed an answer now.
+        // (in time or in messages) that it is owed an answer now.
         const next = group && !retrying && message.messageId ? nextTextWaiting(db, source, read, event, address, true) : undefined;
-        const started = next && message.messageId ? burstStartedAt(db, address, message.messageId) ?? event.created_at : undefined;
-        if (next?.messageId && message.messageId && started && Date.now() - Date.parse(started) < MAX_BURST_MS) {
+        /*
+         * How long the burst has been gathering is measured from when the worker
+         * began filing it, not from when its first text arrived. After an outage
+         * or a slow stretch the queue is minutes deep, every text is already
+         * older than the bound, and measuring from arrival turned folding off
+         * exactly when it was needed: each text got a turn of its own, the queue
+         * grew faster than it drained, and answers came twenty minutes late.
+         */
+        const burst = next && message.messageId ? burstState(db, address, message.messageId) : undefined;
+        const burstAge = burst?.startedAt ? Date.now() - Date.parse(burst.startedAt) : 0;
+        if (next?.messageId && message.messageId && burst && burstAge < MAX_BURST_MS && burst.count < MAX_BURST_MESSAGES) {
           foldIntoNextTurn(db, address, heldText, message.messageId, inbound, groupMetadata, next.messageId);
           await savePictures();
           completeExternalEvent(db, event.id, "processed");
