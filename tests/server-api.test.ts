@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { archiveReactionText, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
+import { archiveReactionText, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames, indexedCommentBodies, TODO_COMMENTS_INDEXED, TODO_COMMENTS_INDEXED_BYTES } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling, safeNextPath } from "../server/auth.ts";
@@ -9743,6 +9743,30 @@ describe("Sendblue provider", () => {
     assert.ok(Date.parse(settling.available_at) > Date.now());
   }));
 
+  it("folds a backlog of old group texts into a few turns instead of one turn each", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const post = (text: string) => api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, text)).expect(200);
+    for (let i = 1; i <= 45; i++) await post(`bubble ${i}`);
+    // The worker was away: every text is older than the burst bound by the time it is read.
+    db.prepare("UPDATE external_events SET created_at=?").run(new Date(Date.now() - 30 * 60_000).toISOString());
+    const turns: string[] = [];
+    // A pass claims twenty texts; the queue is drained over several.
+    const pass = () => runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async () => ({ sid: "SB_backlog", status: "queued" as const }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, body: string) => {
+        turns.push(body);
+        return { text: "ok", threadId: "thread_x" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    });
+    for (let i = 0; i < 4; i++) await pass();
+    assert.deepEqual(turns, ["bubble 41", "bubble 45"], "forty bubbles ride on the first turn, the rest on the second");
+    const open = db.prepare("SELECT count(*) n FROM external_events WHERE status NOT IN ('processed','ignored')").get() as { n: number };
+    assert.equal(open.n, 0);
+  });
+
   /*
    * A lively stretch can go by without anyone's facts being kept. A quiet
    * stretch is read once, afterwards, for the facts it established.
@@ -9918,12 +9942,18 @@ describe("Sendblue provider", () => {
       } finally { stub.restore(); }
     });
 
-    it("stops gathering a burst once its first message has waited long enough", async () => {
+    it("stops gathering a burst once the worker has been filing it long enough", async () => {
       const { db, api } = await establishedGroup();
       const sends: string[] = [];
-      await post(api, groupMessage(WIFE, "first question"));
+      const first = groupMessage(WIFE, "first question");
+      await post(api, first);
       await post(api, groupMessage(WIFE, "second question"));
-      db.prepare("UPDATE external_events SET created_at=? WHERE json_extract(payload_json,'$.content')='first question'")
+      await post(api, groupMessage(WIFE, "third question"));
+      // The worker began filing this burst twenty seconds ago: the first is already folded into the second.
+      const address = `group:${GROUP}`;
+      foldIntoNextTurn(db, address, "first question", first.message_handle, undefined, {}, groupMessage(WIFE, "second question").message_handle);
+      db.prepare("UPDATE external_events SET status='processed' WHERE json_extract(payload_json,'$.content')='first question'").run();
+      db.prepare("UPDATE channel_messages SET created_at=? WHERE json_extract(metadata_json,'$.foldedInto') IS NOT NULL")
         .run(new Date(Date.now() - 20_000).toISOString());
       const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
       try {
@@ -9934,7 +9964,20 @@ describe("Sendblue provider", () => {
         };
         await runWorkerOnce(db, fakeSearch(db), workerWith(numbered, sends));
       } finally { stub.restore(); }
-      assert.equal(sends.length, 2, "the first message is answered on its own rather than waiting on a burst that keeps growing");
+      assert.equal(sends.length, 2, "the burst that has been gathering past the bound is answered rather than growing further");
+    });
+
+    it("folds texts that are old on arrival, because only the burst's own age counts", async () => {
+      const { db, api } = await establishedGroup();
+      const sends: string[] = [];
+      await post(api, groupMessage(WIFE, "first question"));
+      await post(api, groupMessage(WIFE, "second question"));
+      db.prepare("UPDATE external_events SET created_at=?").run(new Date(Date.now() - 20 * 60_000).toISOString());
+      const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
+      try {
+        await runWorkerOnce(db, fakeSearch(db), workerWith(answering("one answer"), sends));
+      } finally { stub.restore(); }
+      assert.deepEqual(sends, ["one answer"], "a backlog is answered once, not once per text");
     });
   });
 
