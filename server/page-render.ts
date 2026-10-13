@@ -15,7 +15,7 @@ import {
   checklistItems, habitRows, liveTodos, moodSeries, progressOf, rotationStreak, rotationWeeks, type LiveTodo,
 } from "./page-live.ts";
 import {
-  blockOptions, pageBlocks, pageIsLive, pollIsClosed, pollResults, tryPublicPageUrl, voteNameSuggestions,
+  blockOptions, pageBlocks, pageIsLive, pictureProblem, pollIsClosed, pollResults, tryPublicPageUrl, voteNameSuggestions,
   type BlockResults, type PageBlock, type PageRow,
 } from "./pages.ts";
 import type { Db } from "./types.ts";
@@ -97,6 +97,8 @@ footer{margin-top:26px;text-align:center;color:var(--muted);font-size:13px}
 .rot td,.rot th{padding:6px 0;border-top:1px solid var(--line);text-align:left;font-size:15px}.rot table{width:100%;border-collapse:collapse}
 .rot tr.now td{font-weight:700;color:var(--accent)}
 img.pic{max-width:100%;border-radius:12px;display:block}
+li img.pic{margin-top:8px;max-width:min(100%,420px)}
+.pics{display:grid;gap:10px}
 `;
 
 const NOTICES: Record<string, { kind: "ok" | "error"; text: string }> = {
@@ -323,10 +325,21 @@ function renderCountdown(block: PageBlock, timezone: string): string {
   return `<section class="card"><div class="small">${e(block.text ?? "")}</div><div class="big">${e(text)}</div><p class="small">${e(dayLabel(block.when as string, timezone))}</p></section>`;
 }
 
-function renderItinerary(block: PageBlock): string {
-  return `<section class="card"><h2>${e(block.text || "Plan")}</h2><ul class="timeline">${(block.items ?? []).map(item => {
+/**
+ * A saved picture, drawn through the page's own picture route so it opens for
+ * whoever may open the page and nowhere else. A picture that has since been
+ * deleted is left out rather than shown as a broken image.
+ */
+function pictureTag(db: Db, page: PageRow, attachmentId: string | undefined, alt: string): string {
+  if (!attachmentId || pictureProblem(db, attachmentId, page.audience, page.life_area_id)) return "";
+  return `<img class="pic" src="/p/${e(page.slug)}/pictures/${e(attachmentId)}" alt="${e(alt)}" loading="lazy">`;
+}
+
+function renderItinerary(db: Db, page: PageRow, block: PageBlock): string {
+  return `<section class="card"><h2>${e(block.text || "Plan")}</h2><ul class="timeline">${(block.items ?? []).map((item, index) => {
     const [when, ...rest] = item.split("|");
-    return rest.length ? `<li><b>${e(when.trim())}</b>${e(rest.join("|").trim())}</li>` : `<li>${e(item)}</li>`;
+    const picture = pictureTag(db, page, block.attachment_ids?.[index], rest.length ? rest.join("|").trim() : item);
+    return rest.length ? `<li><b>${e(when.trim())}</b>${e(rest.join("|").trim())}${picture}</li>` : `<li>${e(item)}${picture}</li>`;
   }).join("")}</ul></section>`;
 }
 
@@ -341,14 +354,20 @@ function renderBlock(db: Db, page: PageRow, block: PageBlock, ctx: RenderContext
   switch (block.type) {
     case "heading": return `<h2 style="margin:22px 4px 0;font-size:20px">${e(block.text ?? "")}</h2>`;
     case "text": return `<section class="card">${richText(block.text ?? "")}</section>`;
-    case "checklist": return `<section class="card"><ul class="list">${(block.items ?? []).map(item => `<li><span class="dot"></span><div>${e(item)}</div></li>`).join("")}</ul></section>`;
+    case "checklist": return `<section class="card"><ul class="list">${(block.items ?? []).map((item, index) => `<li><span class="dot"></span><div>${e(item)}${pictureTag(db, page, block.attachment_ids?.[index], item)}</div></li>`).join("")}</ul></section>`;
     case "link": {
       const url = safeHttpUrl(block.url);
       return url ? `<section class="card"><a href="${e(url)}" rel="noopener noreferrer nofollow"><strong>${e(block.text || new URL(url).hostname)}</strong></a><small class="small">${e(new URL(url).hostname)}</small></section>` : "";
     }
     case "image": {
       const url = safeHttpUrl(block.url);
-      return url ? `<section class="card"><img class="pic" src="${e(url)}" alt="${e(block.text ?? "")}" loading="lazy" referrerpolicy="no-referrer">${block.text ? `<p class="small">${e(block.text)}</p>` : ""}</section>` : "";
+      const saved = (block.attachment_ids ?? []).map(attachmentId => pictureTag(db, page, attachmentId, block.text ?? "")).filter(Boolean);
+      const shown = [
+        ...(url ? [`<img class="pic" src="${e(url)}" alt="${e(block.text ?? "")}" loading="lazy" referrerpolicy="no-referrer">`] : []),
+        ...saved,
+      ];
+      if (!shown.length) return block.attachment_ids?.length ? `<section class="card"><p class="small">${e(block.text || "A picture")} is no longer available.</p></section>` : "";
+      return `<section class="card"><div class="pics">${shown.join("")}</div>${block.text ? `<p class="small">${e(block.text)}</p>` : ""}</section>`;
     }
     case "todos": return renderTodos(db, page, block, timezone);
     case "poll": {
@@ -362,7 +381,7 @@ function renderBlock(db: Db, page: PageRow, block: PageBlock, ctx: RenderContext
     case "live_checklist": return renderChecklist(db, page, block, ctx);
     case "progress": return renderProgress(db, page, block, timezone);
     case "countdown": return renderCountdown(block, timezone);
-    case "itinerary": return renderItinerary(block);
+    case "itinerary": return renderItinerary(db, page, block);
     case "stats": return renderStats(block);
     case "habits": return renderHabits(db, page);
     case "rotation": return renderRotation(db, page, block);

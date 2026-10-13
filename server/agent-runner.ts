@@ -1632,6 +1632,8 @@ export async function runChannelAgent(
         ? { appTurn: options.userMessageMetadata.kind }
         : {}),
       ...(soul ? { soul } : {}),
+      // The ids (comma-separated) of the pictures this message carries, for a page block that shows one (a ticket under its itinerary stop).
+      ...(attachmentIds.length && !options.internal ? { pictures: attachmentIds.join(", ") } : {}),
       ...(profile ? { profile } : {}),
       ...(roomProfile ? { groupProfile: roomProfile } : {}),
       ...(facts.length ? { [group ? "groupFacts" : "ownerFacts"]: facts } : {}),

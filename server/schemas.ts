@@ -495,6 +495,8 @@ export const pageBlockInput = z.object({
   items: z.array(pageLine).max(40).nullable().optional(),
   slots: z.array(pageLine).max(12).nullable().optional(),
   url: z.string().trim().url().max(2000).nullable().optional(),
+  /** Saved pictures (ids from `get_memory` or the turn's `pictures`): all of an image block's, or one per item of a checklist or itinerary ("" for an item with none). */
+  attachment_ids: z.array(z.string().trim().max(80)).max(40).nullable().optional(),
   range: z.enum(TODO_BLOCK_RANGES).nullable().optional(),
   multi: z.boolean().nullable().optional(),
   closes_at: nullableIso,

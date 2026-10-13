@@ -78,7 +78,7 @@ import { resetPageJobFailures, runPageJobs } from "../server/page-worker.ts";
 import { ensureTodayPage } from "../server/page-service.ts";
 import { pageCalendar } from "../server/page-ics.ts";
 import { closePollsNow, createPage, getPage, MAX_VOTERS, optionId, pageIsLive, revokePage, sweepPages } from "../server/pages.ts";
-import { resetPageWriteThrottle } from "../server/routes/public-pages.ts";
+import { resetPageWriteThrottle, setPictureLoadLimit } from "../server/routes/public-pages.ts";
 import { resetWebState } from "../server/web-service.ts";
 import { pullGifLine, rememberImages } from "../server/image-output.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
@@ -7874,6 +7874,8 @@ describe("Sendblue provider", () => {
 
       const rows = db.prepare("SELECT * FROM attachments").all() as Array<Record<string, string | number | null>>;
       assert.equal(rows.length, 1);
+      const turnContext = ((agent.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
+      assert.equal(turnContext.pictures, rows[0].id, "the turn names its saved pictures, so a page block can show one");
       assert.equal(rows[0].channel_message_id, archived.id, "the staged file is tied to the archived message");
       assert.equal(rows[0].kind, "document");
       assert.equal(rows[0].content_type, "image/jpeg");
@@ -13773,6 +13775,99 @@ describe("hosted pages", () => {
     await api.get("/api/pages").expect(401);
   });
 
+  it("shows saved pictures on a page, only to people who may open it and only from its own chat", async () => {
+    const { api, db } = pageFixture();
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x08]);
+    const stage = (threadId: string, handle: string, bytes = jpeg) => stageAttachment(db, {
+      threadId, providerMessageId: handle, sourceUrl: `https://cdn.sendblue.example/${handle}.jpg`, contentType: "image/jpeg", bytes,
+    });
+    ownerTurn(db);
+    const ticket = stage("thread_owner_pages", "SB_ticket");
+    const receipt = stage("thread_owner_pages", "SB_receipt", Buffer.from([0xff, 0xd8, 0xff, 0x01]));
+    const { context: group } = groupTurn(db, "thread_pic_group");
+    const groupPhoto = stage("thread_pic_group", "SB_group_photo", Buffer.from([0xff, 0xd8, 0xff, 0x02]));
+
+    // The owner's own ticket sits under its stop of a private itinerary.
+    const trip = (await api.post("/api/pages").send({
+      title: "Lisbon",
+      blocks: [
+        { type: "itinerary", text: "Friday", items: ["8am | Flight TP204", "7pm | Dinner at Lucia's"], attachment_ids: [ticket.id, ""] },
+        { type: "image", text: "Receipt", attachment_ids: [receipt.id] },
+      ],
+    }).expect(201)).body.data as { id: string; url: string; audience: string };
+    assert.equal(trip.audience, "owner");
+    const slug = slugOf(trip.url);
+    const basic = `Basic ${Buffer.from(`admin:${PASSWORD}`).toString("base64")}`;
+    process.env.APP_ADMIN_PASSWORD = PASSWORD;
+    const opened = await api.get(`/p/${slug}`).set("Authorization", basic).expect(200);
+    assert.equal(opened.text.match(/\/pictures\//g)?.length, 2, "the stop with a ticket and the receipt, not the stop without");
+    assert.match(opened.text, new RegExp(`<li><b>8am</b>Flight TP204<img class="pic" src="/p/${slug}/pictures/${ticket.id}" alt="Flight TP204"`));
+    assert.match(opened.headers["content-security-policy"], /img-src 'self' https: data:/);
+
+    // The picture opens for the signed-in owner, as the type it was verified as, and for nobody else.
+    const file = await api.get(`/p/${slug}/pictures/${ticket.id}`).set("Authorization", basic).expect(200);
+    assert.equal(file.headers["content-type"], "image/jpeg");
+    assert.match(file.headers["content-security-policy"], /sandbox/);
+    assert.equal(file.headers["cache-control"], "private, no-cache");
+    assert.deepEqual(file.body, jpeg);
+    assert.equal((await api.get(`/p/${slug}/pictures/${ticket.id}`).expect(303)).headers.location, `/login?next=${encodeURIComponent(`/p/${slug}`)}`);
+    // A picture the page does not name is not served through it, even though it is the owner's.
+    const unnamed = stage("thread_owner_pages", "SB_unnamed", Buffer.from([0xff, 0xd8, 0xff, 0x03]));
+    await api.get(`/p/${slug}/pictures/${unnamed.id}`).set("Authorization", basic).expect(404);
+    delete process.env.APP_ADMIN_PASSWORD;
+
+    // A page anyone can open never shows the owner's own pictures, nor does a poll.
+    const publicTrip = await api.post("/api/pages").send({
+      title: "Lisbon", audience: "shared", blocks: [{ type: "image", attachment_ids: [ticket.id] }],
+    }).expect(400);
+    assert.match(publicTrip.body.error, /public to anyone with its link/);
+    await api.post("/api/pages").send({
+      blocks: [{ type: "poll", text: "Where?", items: ["A", "B"] }, { type: "image", attachment_ids: [ticket.id] }],
+    }).expect(400);
+    // Another chat's picture, an unknown one, and a picture on a block that cannot hold one are refused.
+    assert.match((await api.post("/api/pages").send({ blocks: [{ type: "image", attachment_ids: [groupPhoto.id] }] }).expect(400)).body.error, /group chat/);
+    assert.match((await api.post("/api/pages").send({ blocks: [{ type: "image", attachment_ids: ["attachment_nope"] }] }).expect(400)).body.error, /not found/);
+    assert.match((await api.post("/api/pages").send({ blocks: [{ type: "text", text: "x", attachment_ids: [ticket.id] }] }).expect(400)).body.error, /cannot carry pictures/);
+    assert.match((await api.post("/api/pages").send({
+      blocks: [{ type: "itinerary", items: ["8am | Flight"], attachment_ids: [ticket.id, ticket.id] }],
+    }).expect(400)).body.error, /more attachment_ids than items/);
+
+    // A group's page shows that group's pictures to anyone with the link, and not the owner's.
+    const shared = await run(db, "create_page", {
+      title: "Trip photos", blocks: [{ type: "image", text: "Day one", attachment_ids: [groupPhoto.id] }],
+    }, group);
+    assert.equal(shared.audience, "shared");
+    const sharedSlug = slugOf(shared.url);
+    process.env.APP_ADMIN_PASSWORD = PASSWORD;
+    const anonymous = await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(200);
+    assert.deepEqual(anonymous.body, Buffer.from([0xff, 0xd8, 0xff, 0x02]));
+    assert.match((await api.get(`/p/${sharedSlug}`).expect(200)).text, new RegExp(`/p/${sharedSlug}/pictures/${groupPhoto.id}`));
+    // Pictures are throttled per page and caller (600 in ten minutes, well above what viewing a page of forty needs).
+    resetPageWriteThrottle();
+    setPictureLoadLimit(3);
+    for (let load = 0; load < 3; load += 1) await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(200);
+    const throttled = await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(429);
+    assert.ok(Number(throttled.headers["retry-after"]) > 0);
+    await api.get(`/p/${sharedSlug}`).expect(200);
+    resetPageWriteThrottle();
+    await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(200);
+    delete process.env.APP_ADMIN_PASSWORD;
+    await assert.rejects(run(db, "create_page", { blocks: [{ type: "image", attachment_ids: [ticket.id] }] }, group), /different chat/);
+    await assert.rejects(
+      run(db, "update_page", { id: shared.id, blocks: [{ type: "image", attachment_ids: [ticket.id] }] }, group), /different chat/,
+    );
+
+    // A deleted picture is left off the page rather than shown broken, and a revoked page serves nothing.
+    deleteAttachment(db, receipt.id);
+    process.env.APP_ADMIN_PASSWORD = PASSWORD;
+    const after = await api.get(`/p/${slug}`).set("Authorization", basic).expect(200);
+    assert.equal(after.text.match(/\/pictures\//g)?.length, 1);
+    assert.match(after.text, /Receipt is no longer available/);
+    await api.delete(`/api/pages/${shared.id}`).set("Authorization", basic).expect(200);
+    await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(404);
+    delete process.env.APP_ADMIN_PASSWORD;
+  });
+
   it("refuses to send an owner page's link to anyone else", async () => {
     const { api, db } = pageFixture();
     const mine = (await api.post("/api/pages").send({ template: "today" }).expect(201)).body.data;
@@ -13997,6 +14092,44 @@ describe("hosted pages", () => {
     const denied = await api.post(`/p/${slugOf(list.url)}/check`).type("form").send({ block: blockId, todo: hidden.id, name: "Sarah" }).expect(303);
     assert.match(denied.headers.location, /n=gone/);
     assert.equal(getTodo(db, hidden.id)?.status, "pending");
+  });
+
+  it("files a page researched on the web under a group on the next ask, as a shared copy", async () => {
+    const { db } = pageFixture();
+    const { areaId } = groupTurn(db, "thread_research");
+    // The researched page is the owner's first; a turn that used the web cannot name the group.
+    const researching = { ...ownerTurn(db, "plan Lisbon for thread_research"), readPages: true, readWeb: true };
+    const trip = await run(db, "create_page", {
+      title: "Lisbon", blocks: [{ type: "itinerary", items: ["9am | Belem Tower opens"] }, { type: "link", url: "https://example.com/belem", text: "Opening hours" }],
+    }, researching);
+    assert.equal(trip.audience, "owner");
+    await assert.rejects(
+      run(db, "create_page", { from_page_id: trip.id, thread_id: "thread_research", audience: "shared" }, researching), /read a web page/,
+    );
+    // Next turn, nothing read: the copy goes into the group, shared, so its members can open it.
+    const copy = await run(db, "create_page", { from_page_id: trip.id, thread_id: "thread_research", audience: "shared" }, ownerTurn(db, "put it in thread_research"));
+    assert.deepEqual([copy.audience, copy.life_area_id], ["shared", areaId]);
+    // Without audience the copy would stay private under the group, where nobody in it could open it.
+    const quiet = await run(db, "create_page", { from_page_id: trip.id, thread_id: "thread_research" }, ownerTurn(db, "put it in thread_research"));
+    assert.equal(quiet.audience, "owner");
+  });
+
+  it("holds a page to forty pictures, and keeps a removed group's pictures off the owner's pages", async () => {
+    const { api, db } = pageFixture();
+    ownerTurn(db);
+    const jpeg = (n: number) => Buffer.from([0xff, 0xd8, 0xff, n]);
+    const stage = (threadId: string, handle: string, n: number) => stageAttachment(db, {
+      threadId, providerMessageId: handle, sourceUrl: `https://cdn.sendblue.example/${handle}.jpg`, contentType: "image/jpeg", bytes: jpeg(n),
+    });
+    const own = Array.from({ length: 41 }, (_, index) => stage("thread_owner_pages", `SB_many_${index}`, index).id);
+    assert.match((await api.post("/api/pages").send({ blocks: [{ type: "image", attachment_ids: own.slice(0, 20) }, { type: "image", attachment_ids: own.slice(20) }] }).expect(400)).body.error, /at most 40 pictures/);
+    await api.post("/api/pages").send({ blocks: [{ type: "image", attachment_ids: own.slice(0, 40) }] }).expect(201);
+
+    // A group whose area was removed leaves pictures with no area; they are still the group's, not the owner's.
+    const { areaId } = groupTurn(db, "thread_gone");
+    const orphan = stage("thread_gone", "SB_orphan", 99);
+    db.prepare("UPDATE life_areas SET thread_id=NULL WHERE id=?").run(areaId);
+    assert.match((await api.post("/api/pages").send({ blocks: [{ type: "image", attachment_ids: [orphan.id] }] }).expect(400)).body.error, /group chat/);
   });
 
   it("holds public input to what a page can take: odd notice codes, names, and a crowd", async () => {
