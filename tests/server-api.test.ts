@@ -13955,6 +13955,19 @@ describe("hosted pages", () => {
     resetPageJobFailures();
   });
 
+  it("numbers the blocks a template builds, so its form can be answered", async () => {
+    const { api, db } = pageFixture();
+    const owner = ownerTurn(db);
+    const made = await run(db, "create_page", { template: "pick_a_time", title: "Brunch", items: ["Sat Oct 17", "Sun Oct 18"], slots: ["2pm"] }, owner);
+    const block = (made.blocks as Array<{ id?: string }>)[0];
+    assert.ok(block.id, "the availability block has an id");
+    const grid = (await api.get(`/p/${slugOf(made.url)}`).expect(200)).text;
+    assert.match(grid, new RegExp(`name="block" value="${block.id}"`));
+    const voted = await api.post(`/p/${slugOf(made.url)}/vote`).type("form")
+      .send({ block: block.id, name: "Sarah", option: `${optionId("Sat Oct 17")}-${optionId("2pm")}` });
+    assert.doesNotMatch(voted.headers.location ?? "", /n=gone|n=option/);
+  });
+
   it("sweeps pages a week after they expire, with their votes", async () => {
     const { db } = pageFixture();
     const page = createPage(db, { title: "Old", blocks: [{ type: "poll", id: "poll1", text: "?", items: ["a", "b"] }], audience: "shared" });

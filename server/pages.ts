@@ -611,7 +611,8 @@ export function pagesAwaitingResults(db: Db, at: number = Date.now()): PageRow[]
   return rows.filter(row => {
     const blocks = interactiveBlocks(row);
     if (!blocks.length) return false;
-    if (blocks.some(block => pollIsClosed(block, at))) return true;
+    // A page with several polls waits for the last of them to close; the ones still open take votes.
+    if (blocks.every(block => pollIsClosed(block, at))) return true;
     const names = voteNameSuggestions(db, row);
     return names.length > 0 && missingVoters(db, row).length === 0 && pollResults(db, row).every(result => result.voters.length > 0);
   });

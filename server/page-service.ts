@@ -111,7 +111,13 @@ export async function createPageFromInput(
     expiresInDays ??= built.expiresInDays;
     wroteTodos = Boolean(built.wroteTodos);
   }
-  if (input.blocks?.length) blocks = [...blocks, ...normalizeBlocks(input.blocks)];
+  // Template and copied blocks carry no usable ids (a copy starts without votes), so all of them are numbered together with the caller's.
+  if (blocks.length || input.blocks?.length) {
+    blocks = normalizeBlocks([
+      ...blocks.map(({ id: _id, ...block }) => block),
+      ...(input.blocks ?? []),
+    ] as Array<z.infer<typeof pageBlockInput>>);
+  }
   if (!blocks.length) throw new PageError("The page has no content");
   title ||= titleFrom(blocks);
   // A page made in a group is the group's; one made for people to answer is shared by nature.
