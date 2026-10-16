@@ -7684,6 +7684,33 @@ describe("Sendblue provider", () => {
   });
 
   /*
+   * The assistant asked "Which song do you mean?", two people laughed, and
+   * the owner's answer without its name was held and never answered.
+   */
+  it("lets the person the assistant just asked answer it without its name, even after others spoke", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    await runSmsAgent(db, fakeSearch(db), address, "hello", "SB_hello_ask", groupTurnOptions(agentCallingMany([], "Hi!").fetcher, RECIPIENT, "the owner"));
+    const threadId = (db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string }).id;
+    db.prepare("UPDATE life_areas SET reply_mode='named_only' WHERE thread_id=?").run(threadId);
+    const inbound = { provider: "sendblue" as const, groupId: GROUP };
+    const owner = { groupId: GROUP, speaker: RECIPIENT, speakerName: "the owner", speakerIsOwner: true };
+    const sarah = { groupId: GROUP, speaker: WIFE, speakerName: "Sarah", speakerIsOwner: false };
+
+    // The owner names the assistant, so that one is answered; what it asked comes next.
+    recordOutboundChannelMessage(db, "sms", address, "Which song do you mean?", "SB_which_song");
+    assert.equal(holdUntilNamed(db, address, "ha", "SB_sarah_1", inbound, sarah), true, "someone else's remark is not an answer");
+    assert.equal(holdUntilNamed(db, address, "the one with the lyrics I sent", "SB_owner_1", inbound, owner), false, "the person it asked is answering, others in between or not");
+    assert.equal(holdUntilNamed(db, address, "lol", "SB_sarah_2", inbound, sarah), true);
+
+    // A statement from the assistant is not a question, so what follows it is still the room's.
+    recordOutboundChannelMessage(db, "sms", address, "Done, it is on the list.", "SB_done");
+    assert.equal(holdUntilNamed(db, address, "nice", "SB_owner_2", inbound, owner), true);
+  });
+
+  /*
    * "You can talk now" was refused whenever the turn had looked at someone's
    * held picture on the way. The owner's own words are the ask.
    */

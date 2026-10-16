@@ -813,6 +813,9 @@ export function holdUntilNamed(
   const voice = groupVoiceForThread(db, thread.id);
   if (voice?.replyMode !== "named_only") return false;
   if (addressesAssistant(body, voice.assistantNickname) || repliesToAssistant(db, thread.id, inbound)) return false;
+  // The person the assistant just asked something is answering it, name or no name.
+  const speakerPhone = typeof metadata.speaker === "string" ? metadata.speaker : undefined;
+  if (answersAssistant(db, thread.id, undefined, speakerPhone, true)) return false;
   // A burst's earlier message that named the assistant is answered by this turn.
   const burst = burstRows(db, thread.id, providerMessageId);
   if (burst.some(row => row.forAssistant(db, thread.id, voice.assistantNickname))) return false;
@@ -967,21 +970,54 @@ function aimedAtAssistant(
   if (repliesToAssistant(db, threadId, inbound)) return true;
   if (burstRows(db, threadId, handle).some(row => row.forAssistant(db, threadId, nickname))) return true;
   if (!speakerPhone) return false;
+  return answersAssistant(db, threadId, inboundId, speakerPhone, false);
+}
+
+/**
+ * Whether this speaker is carrying on with the assistant: it replied to them a
+ * moment ago and they are answering it. Right behind its reply that holds for
+ * anything they say. Once other people have spoken in between, the room has
+ * moved on and only an answer to a question the assistant asked still counts:
+ * "Which song do you mean?", then two other people laughing, then the
+ * owner's "the one with the lyrics I sent" was held for want of the assistant's
+ * name and never answered.
+ *
+ * `inboundId` bounds the look at the rows before that message; without it (a
+ * text not filed yet) the whole thread so far is read. `askedOnly` is for a
+ * caller that lets a message past a hold: there the answer has to be to a
+ * question even when nobody else spoke.
+ */
+function answersAssistant(
+  db: Db,
+  threadId: string,
+  inboundId: string | undefined,
+  speakerPhone: string | undefined,
+  askedOnly: boolean,
+): boolean {
+  if (!speakerPhone) return false;
   // The last few rows before this one, newest first, read off the thread's
   // (thread_id, created_at) index rather than a sort of the whole thread.
   const earlier = db.prepare(`
-    SELECT role,created_at,json_extract(metadata_json,'$.speaker') speaker,
+    SELECT role,content,created_at,json_extract(metadata_json,'$.speaker') speaker,
       COALESCE(json_extract(metadata_json,'$.internal'),0) internal
     FROM channel_messages
     WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
       AND json_extract(metadata_json,'$.reactionText') IS NULL
-      AND created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?
-    ORDER BY created_at DESC,rowid DESC LIMIT 6
-  `).all(threadId, inboundId, inboundId) as Array<{ role: string; created_at: string; speaker: string | null; internal: number }>;
-  const latest = earlier[0];
-  if (latest?.role !== "assistant" || Date.now() - Date.parse(latest.created_at) >= FOLLOW_UP_WINDOW_MS) return false;
-  // Past the assistant's reply, which may have been two bubbles, to what it answered.
-  const answered = earlier.find(row => row.role === "user");
+      AND (? IS NULL OR (created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?))
+    ORDER BY created_at DESC,rowid DESC LIMIT 12
+  `).all(threadId, inboundId ?? null, inboundId ?? null, inboundId ?? null) as Array<{
+    role: string; content: string; created_at: string; speaker: string | null; internal: number;
+  }>;
+  const lastSaid = earlier.findIndex(row => row.role === "assistant");
+  if (lastSaid < 0 || Date.now() - Date.parse(earlier[lastSaid].created_at) >= FOLLOW_UP_WINDOW_MS) return false;
+  // The reply may have been two bubbles; what it asked can be in either.
+  let firstBubble = lastSaid;
+  while (earlier[firstBubble + 1]?.role === "assistant") firstBubble += 1;
+  const asked = earlier.slice(lastSaid, firstBubble + 1).some(row => /\?\s*$/.test(row.content.trim()));
+  // Past the assistant's reply to what it answered.
+  const answered = earlier.slice(firstBubble + 1).find(row => row.role === "user");
+  if (lastSaid > 0 && !asked) return false;
+  if (lastSaid === 0 && askedOnly && !asked) return false;
   // A scheduled check-in asked the room something; whoever answers it is talking to the assistant.
   if (answered?.internal) return true;
   return answered?.speaker === speakerPhone;
