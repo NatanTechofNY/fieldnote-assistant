@@ -5,7 +5,7 @@ import { getTodo, groupAreas, id, now, queueIndexJob, syncTodoReminders, USER_ID
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
   archivedInboundText, archiveReactionText, burstState, failAgentTurn, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
-  recordOutboundProviderMessage, runSmsAgent, stageInboundPictures,
+  recordOutboundProviderMessage, runSmsAgent, stageInboundPictures, turnAlreadyAnswered,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
@@ -295,6 +295,9 @@ async function giveUpOnTurn(
   const address = inboundAddress(message);
   // The progress tapback was left up for a retry that is no longer coming.
   if (source === "sendblue" && message.messageId) await liftProgressMark(db, address, message.messageId);
+  // A text whose GIF went out, or which the agent chose to leave alone, was
+  // answered: the failure came after, and "couldn't get through" would be false.
+  if (message.messageId && turnAlreadyAnswered(db, address, message.messageId)) return;
   let sent: Awaited<ReturnType<typeof sendSms>>;
   try {
     // Threaded under the text it is about: by now the texts behind it have

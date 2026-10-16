@@ -1324,9 +1324,84 @@ async function completion(
     if (response.status === 429 || response.status >= 500) {
       throw new TransientFailure(`Agent Studio is unavailable (${response.status}): ${detail}`);
     }
+    // The model answered with nothing at all. The request was valid: asking again usually gets an answer.
+    if (response.status === 424 && detail.includes("EmptyResponseError")) {
+      throw new EmptyModelResponse(`Agent Studio completion failed (${response.status}): ${detail}`);
+    }
     throw new Error(`Agent Studio completion failed (${response.status}): ${detail}`);
   }
   return await response.json() as AgentMessage;
+}
+
+/** Agent Studio's `424 EmptyResponseError`: the model returned no text and no tool call. */
+class EmptyModelResponse extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EmptyModelResponse";
+  }
+}
+
+/** How many times an empty answer is asked for again inside the turn, and how long each wait grows by. */
+const EMPTY_RESPONSE_RETRIES = 2;
+const EMPTY_RESPONSE_BACKOFF_MS = 400;
+
+/**
+ * An empty answer is asked for again in place. Failing the turn instead reran
+ * the whole of it, tools included, and an attempt that had already sent its GIF
+ * sent it again before the room was told "Sorry, I couldn't get through that
+ * one". Still empty after the retries, the error reaches the caller.
+ */
+async function completionRetryingEmpty(
+  conversationId: string,
+  messages: AgentMessage[],
+  fetcher: typeof fetch,
+  searchParameters?: Record<string, { filters: string }>,
+): Promise<AgentMessage> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await completion(conversationId, messages, fetcher, searchParameters);
+    } catch (error) {
+      if (!(error instanceof EmptyModelResponse) || attempt >= EMPTY_RESPONSE_RETRIES) throw error;
+      await new Promise(resolve => setTimeout(resolve, EMPTY_RESPONSE_BACKOFF_MS * (attempt + 1)));
+    }
+  }
+}
+
+/** The tools whose success means the room already got its answer to a message: a GIF sent, or a deliberate silence. */
+const ANSWERING_TOOLS = ["send_image", "stay_quiet"];
+
+/**
+ * Whether an earlier attempt at a turn already answered it. The tool rows an
+ * attempt files after its inbound row, up to the next text, say so, and the
+ * retry that follows a failure after that point has nothing left to do:
+ * running it again sends the GIF twice or goes quiet twice.
+ */
+function answeredEarlier(db: Db, threadId: string, afterRowid: number, beforeRowid?: number): boolean {
+  return Boolean(db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role='tool' AND content IN (${ANSWERING_TOOLS.map(() => "?").join(",")})
+      AND json_extract(metadata_json,'$.output.success')=1
+      AND rowid>? AND (? IS NULL OR rowid<?)
+    LIMIT 1
+  `).get(threadId, ...ANSWERING_TOOLS, afterRowid, beforeRowid ?? null, beforeRowid ?? null));
+}
+
+/**
+ * Whether a text's turn already sent its answer or chose silence, for the
+ * worker to check before it tells the sender it could not get through.
+ */
+export function turnAlreadyAnswered(db: Db, address: string, providerMessageId: string): boolean {
+  const thread = db.prepare("SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address=?")
+    .get(USER_ID, address) as { id: string } | undefined;
+  if (!thread) return false;
+  const inbound = db.prepare(`
+    SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND provider_message_id=? ORDER BY rowid LIMIT 1
+  `).get(thread.id, providerMessageId) as { rowid: number } | undefined;
+  if (!inbound) return false;
+  const next = db.prepare(`
+    SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>? ORDER BY rowid LIMIT 1
+  `).get(thread.id, inbound.rowid) as { rowid: number } | undefined;
+  return answeredEarlier(db, thread.id, inbound.rowid, next?.rowid);
 }
 
 /**
@@ -1689,6 +1764,18 @@ export async function runChannelAgent(
   if (priorWrites.length && !messages.some(message => message.id === replayId)) {
     messages.push({ id: replayId, role: "assistant", parts: priorWrites });
   }
+  /*
+   * Agent Studio refuses a conversation that ends on an assistant message that
+   * is not a set of resolved tool results ("Conversation must end with a user
+   * message"). A retry whose earlier attempt filed a bubble of its own after
+   * the inbound row, a GIF's "(picture)" row, ended on exactly that and failed
+   * every time. Whatever trails the inbound text that is not the replay of its
+   * writes is not part of what is being answered.
+   */
+  while (messages.length > 1 && messages[messages.length - 1].role === "assistant"
+    && messages[messages.length - 1].id !== replayId) {
+    messages.pop();
+  }
 
   // Best effort at both ends: a runtime tapback that fails to land, or to
   // change, is not a reason to lose the answer. The archive is what says
@@ -1773,6 +1860,15 @@ export async function runChannelAgent(
     return undefined;
   };
 
+  // A retry of a text an earlier attempt already answered, with a GIF or with
+  // a chosen silence, has nothing left to do; its working mark comes down and
+  // the turn ends rather than doing it all over again.
+  if (!options.internal && answeredEarlier(db, thread.id, inboundRowid, nextInbound?.rowid)) {
+    await setMark(undefined);
+    search.flushSoon();
+    return { text: "", threadId: thread.id, inboundMessageId: inboundId };
+  }
+
   /*
    * A group's profile is written on a scratch thread with no scope of its own,
    * so its hosted search is fenced to that group the way a group turn's is.
@@ -1830,7 +1926,21 @@ export async function runChannelAgent(
       if (Date.now() >= deadline) {
         throw new Error(`Agent exceeded its time budget of ${budgetMs / 60_000} minutes`);
       }
-      const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch, searchParameters);
+      let response: AgentMessage;
+      try {
+        response = await completionRetryingEmpty(thread.agent_conversation_id, messages, options.fetcher || fetch, searchParameters);
+      } catch (error) {
+        if (!(error instanceof EmptyModelResponse)) throw error;
+        // Still nothing after asking again. A turn that already answered, with
+        // a GIF, a tapback, or a chosen silence, is complete as it stands;
+        // failing it would only end in an apology for a message that was
+        // answered. Otherwise the attempt fails and is tried again later.
+        const answered = context.sentText || context.reacted || context.stayedQuiet || context.adjustedVoice;
+        if (!answered) throw new TransientFailure(error.message, { cause: error });
+        await setMark(context.stayedQuiet && !changedRecord ? undefined : closingMark());
+        search.flushSoon();
+        return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
+      }
       response.id ||= `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
       /*
        * Agent Studio checks a tool call's input against the tool's schema before
