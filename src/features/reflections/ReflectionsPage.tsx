@@ -20,7 +20,6 @@ export function ReflectionsPage() {
   const [startDate, setStartDate] = useState(today);
   const [endDate, setEndDate] = useState(today);
   const [lifeAreaIds, setLifeAreaIds] = useState<string[]>([]);
-  const [categoryIds, setCategoryIds] = useState<string[]>([]);
   const [sources, setSources] = useState<Array<"memories" | "todos">>(["memories", "todos"]);
   const [evidenceSearch, setEvidenceSearch] = useState("");
   const [draftContent, setDraftContent] = useState("");
@@ -29,15 +28,13 @@ export function ReflectionsPage() {
   const [draftMoodLabel, setDraftMoodLabel] = useState("");
   const [showHighlight, setShowHighlight] = useState(false);
   const { data: lifeAreas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
-  const { data: categories = [] } = useQuery({ queryKey: ["categories"], queryFn: api.categories });
   const input = {
     preset,
     ...(preset === "custom" ? { start_date: startDate, end_date: endDate } : {}),
     life_area_ids: lifeAreaIds,
-    category_ids: categoryIds,
     sources,
   };
-  const queryKey = ["reflection", preset, startDate, endDate, lifeAreaIds.join(","), categoryIds.join(","), sources.join(",")];
+  const queryKey = ["reflection", preset, startDate, endDate, lifeAreaIds.join(","), sources.join(",")];
   const { data, isLoading, error } = useQuery({
     queryKey,
     queryFn: () => api.reflectionPeriod(input),
@@ -158,10 +155,6 @@ export function ReflectionsPage() {
       <div><span>Life areas</span><div className="reflection-chips">
         {lifeAreas.map(area => <button key={area.id} className={lifeAreaIds.includes(area.id) ? "active" : ""} onClick={() => toggleFilter(area.id, lifeAreaIds, setLifeAreaIds)}>{area.name}</button>)}
         {!lifeAreas.length && <small>All life areas</small>}
-      </div></div>
-      <div><span>Categories</span><div className="reflection-chips">
-        {categories.map(category => <button key={category.id} className={categoryIds.includes(category.id) ? "active" : ""} onClick={() => toggleFilter(category.id, categoryIds, setCategoryIds)}>{category.name}</button>)}
-        {!categories.length && <small>All categories</small>}
       </div></div>
       <div><span>Sources</span><div className="reflection-chips">
         {(["memories", "todos"] as const).map(source => <button key={source} className={sources.includes(source) ? "active" : ""} onClick={() => {

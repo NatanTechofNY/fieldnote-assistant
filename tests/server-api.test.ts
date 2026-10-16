@@ -831,7 +831,9 @@ describe("frontend API contract", () => {
     assert.equal(work.memories.length, 0);
     assert.equal(work.memory_candidates.length, 1);
     const categoryOnly = (await api.get(`/api/reflections/period?preset=custom&start_date=2026-06-01&end_date=2026-06-30&sources=memories&category_ids=${category.id}`).expect(200)).body.data;
-    assert.equal(categoryOnly.memory_candidates.length, 1);
+    assert.equal(categoryOnly.memory_candidates.length, 2, "reflections no longer filter by category, so the parameter changes nothing");
+    assert.equal(categoryOnly.scope_key, all.scope_key);
+    assert.equal("category_ids" in categoryOnly.scope, false);
     await api.patch("/api/reflections/selections").send({
       scope_key: work.scope_key,
       items: [{ type: "memory", id: memory.id, selected: true }],
@@ -872,7 +874,6 @@ describe("frontend API contract", () => {
       start_date: "2026-06-01",
       end_date: "2026-06-30",
       life_area_ids: ["area_personal"],
-      category_ids: [],
       sources: ["memories"],
     };
     const evidence = (await api.get("/api/reflections/period?preset=custom&start_date=2026-06-01&end_date=2026-06-30&sources=memories&life_area_ids=area_personal").expect(200)).body.data;

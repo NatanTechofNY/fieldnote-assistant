@@ -173,14 +173,12 @@ export function getReflectionEvidence(
   period: ReflectionPeriod,
   filters: {
     lifeAreaIds?: string[];
-    categoryIds?: string[];
     sources?: Array<"memories" | "todos">;
     /** Leave out every group chat's records, whatever areas are asked for. */
     ownAreasOnly?: boolean;
   } = {},
 ) {
   const lifeAreaIds = [...new Set(filters.lifeAreaIds || [])];
-  const categoryIds = [...new Set(filters.categoryIds || [])];
   const sources = [...new Set(filters.sources?.length ? filters.sources : ["memories", "todos"])] as Array<"memories" | "todos">;
   const own = (alias: string) => filters.ownAreasOnly ? `AND ${OWN_AREA_CLAUSE(alias)}` : "";
   const memoryCandidates = sources.includes("memories")
@@ -216,15 +214,14 @@ export function getReflectionEvidence(
       ORDER BY t.completed_at DESC
     `).all(USER_ID, period.start, period.endExclusive) as TodoRow[]
     : [];
-  const scopeKey = reflectionScopeKey(period, { lifeAreaIds, categoryIds, sources });
+  const scopeKey = reflectionScopeKey(period, { lifeAreaIds, sources });
   const selections = db.prepare(`
     SELECT entity_type,entity_id FROM reflection_selections
     WHERE user_id=? AND scope_key=?
   `).all(USER_ID, scopeKey) as Array<{ entity_type: "memory" | "todo"; entity_id: string }>;
   const selected = new Set(selections.map(item => `${item.entity_type}:${item.entity_id}`));
   const inScope = (row: MemoryRow | TodoRow) =>
-    (!lifeAreaIds.length || Boolean(row.life_area_id && lifeAreaIds.includes(row.life_area_id)))
-    && (!categoryIds.length || Boolean(row.category_id && categoryIds.includes(row.category_id)));
+    !lifeAreaIds.length || Boolean(row.life_area_id && lifeAreaIds.includes(row.life_area_id));
   const memories = memoryCandidates.filter(memory => inScope(memory) && selected.has(`memory:${memory.id}`));
   const todos = todoCandidates.filter(todo => inScope(todo) && selected.has(`todo:${todo.id}`));
   const draft = (db.prepare(`
@@ -241,7 +238,6 @@ export function getReflectionEvidence(
     scope_key: scopeKey,
     scope: {
       life_area_ids: lifeAreaIds,
-      category_ids: categoryIds,
       sources,
     },
     memories: memories.map(row => memoryJson(row)),
@@ -2016,7 +2012,6 @@ export async function executeAgentTool(
     });
     return agentEvidence(getReflectionEvidence(db, period, {
       lifeAreaIds: strings("life_area_ids"),
-      categoryIds: strings("category_ids"),
       sources: strings("sources") as Array<"memories" | "todos">,
       ownAreasOnly: ownOnly,
     }));

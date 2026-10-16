@@ -48,18 +48,13 @@
             "items": { "type": "string" },
             "description": "Life areas to include; empty means all"
           },
-          "category_ids": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Categories to include; empty means all"
-          },
           "sources": {
             "type": "array",
             "items": { "type": "string", "enum": ["memories", "todos"] },
             "minItems": 1
           }
         },
-        "required": ["preset", "start_date", "end_date", "timezone", "life_area_ids", "category_ids", "sources"],
+        "required": ["preset", "start_date", "end_date", "timezone", "life_area_ids", "sources"],
         "additionalProperties": false
       }
     }
