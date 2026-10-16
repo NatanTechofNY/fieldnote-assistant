@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { archiveReactionText, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
+import { archiveReactionText, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures, turnAlreadyAnswered } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames, indexedCommentBodies, TODO_COMMENTS_INDEXED, TODO_COMMENTS_INDEXED_BYTES } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling, safeNextPath } from "../server/auth.ts";
@@ -82,7 +82,7 @@ import { resetPageWriteThrottle, setPictureLoadLimit } from "../server/routes/pu
 import { resetWebState } from "../server/web-service.ts";
 import { pullGifLine, rememberImages } from "../server/image-output.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
-import { TransientFailure } from "../server/transient.ts";
+import { isTransientFailure, TransientFailure } from "../server/transient.ts";
 import { sendTwilioSms } from "../server/twilio-service.ts";
 import { GAVE_UP_TEXT, rollRecurringTodos, runWorkerOnce, startWorker, sweepQuietConversation } from "../server/worker.ts";
 import type { Db, TodoRow } from "../server/types.ts";
@@ -2432,6 +2432,73 @@ describe("SMS, reminders, and channel agent execution", () => {
       1,
       "the redelivered text is one message in the archive, not two",
     );
+  });
+
+  describe("a model that answers with nothing", () => {
+    const empty = () => new Response(JSON.stringify({
+      name: "EmptyResponseError", message: "The model returned an empty response. Please try again.",
+    }), { status: 424 });
+    const reply = (text: string) => new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text }] }), { status: 200 });
+
+    it("is asked again inside the turn, not failed", async () => {
+      const { db } = fixture();
+      process.env.ALGOLIA_APPLICATION_ID = "app";
+      process.env.ALGOLIA_SEARCH_API_KEY = "key";
+      process.env.ALGOLIA_AGENT_ID = "agent";
+      let calls = 0;
+      const fetcher: typeof fetch = async () => (calls += 1) < 3 ? empty() : reply("Here you go.");
+      const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "hello", "SB_empty", { fetcher });
+      assert.equal(response.text, "Here you go.");
+      assert.equal(calls, 3);
+    });
+
+    it("is a transient failure once it keeps coming back empty", async () => {
+      const { db } = fixture();
+      process.env.ALGOLIA_APPLICATION_ID = "app";
+      process.env.ALGOLIA_SEARCH_API_KEY = "key";
+      process.env.ALGOLIA_AGENT_ID = "agent";
+      let calls = 0;
+      const fetcher: typeof fetch = async () => { calls += 1; return empty(); };
+      await assert.rejects(
+        runSmsAgent(db, fakeSearch(db), "+17185551111", "hello", "SB_empty2", { fetcher }),
+        (error: unknown) => isTransientFailure(error) && /EmptyResponseError/.test((error as Error).message),
+      );
+      assert.equal(calls, 3, "one try and two more");
+    });
+
+    it("never sends a conversation that ends on an assistant bubble, and does not redo an answered turn", async () => {
+      const { db } = fixture();
+      process.env.ALGOLIA_APPLICATION_ID = "app";
+      process.env.ALGOLIA_SEARCH_API_KEY = "key";
+      process.env.ALGOLIA_AGENT_ID = "agent";
+      const bodies: Array<{ messages: Array<{ role: string }> }> = [];
+      const fetcher: typeof fetch = async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return reply("Done.");
+      };
+      // What a first attempt left: the inbound row, then the bubble its GIF filed.
+      const threadId = recordOutboundChannelMessage(db, "sms", "+17185551111", "earlier", "SB_earlier").threadId;
+      const stamp = new Date().toISOString();
+      const insert = db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,'received',?,?,?)
+      `);
+      insert.run("cm_ask", threadId, "inbound", "user", "send a gif", "SB_gif", "{}", stamp, stamp);
+      insert.run("cm_pic", threadId, "outbound", "assistant", "(picture)", null, '{"kind":"image"}', stamp, stamp);
+
+      const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "send a gif", "SB_gif", { fetcher });
+      assert.equal(response.text, "Done.");
+      assert.equal(bodies[0].messages.at(-1)?.role, "user", "the conversation ends on the text being answered");
+
+      // With the GIF's own send recorded, the retry has nothing left to do.
+      insert.run("cm_tool", threadId, "outbound", "tool", "send_image", null, '{"output":{"success":true},"toolCallId":"call_1"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_gif"), true);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_other"), false);
+      bodies.length = 0;
+      const again = await runSmsAgent(db, fakeSearch(db), "+17185551111", "send a gif", "SB_gif", { fetcher });
+      assert.equal(again.text, "");
+      assert.equal(bodies.length, 0, "no completion, so no second GIF");
+    });
   });
 
   /*
@@ -9883,6 +9950,7 @@ describe("Sendblue provider", () => {
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
       startTypingIndicator: () => () => {},
       fetch: network,
+      groupBursts: true,
     };
     const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
     try {
@@ -9944,11 +10012,42 @@ describe("Sendblue provider", () => {
       },
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
       startTypingIndicator: () => () => {},
+      groupBursts: true,
     });
     for (let i = 0; i < 4; i++) await pass();
     assert.deepEqual(turns, ["bubble 41", "bubble 45"], "forty bubbles ride on the first turn, the rest on the second");
     const open = db.prepare("SELECT count(*) n FROM external_events WHERE status NOT IN ('processed','ignored')").get() as { n: number };
     assert.equal(open.n, 0);
+  });
+
+  it("answers each group text as its own turn, without waiting for the bubbles behind it, unless bursts are switched on", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const post = (text: string) => api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, text)).expect(200);
+    await post("first");
+    await post("second");
+    await post("third");
+    const turns: Array<{ body: string; handle?: string }> = [];
+    const pass = (extra: Record<string, unknown>) => runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async () => ({ sid: "SB_each", status: "queued" as const }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, body: string, handle?: string) => {
+        turns.push({ body, handle });
+        return { text: "ok", threadId: "thread_x" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+      ...extra,
+    });
+    // The running worker's settle wait changes nothing while bursts are off: the first text is answered at once.
+    await pass({ groupSettleMs: 60_000 });
+    assert.deepEqual(turns.map(turn => turn.body), ["first", "second", "third"]);
+    assert.deepEqual(
+      turns.map(turn => turn.handle),
+      [groupMessage(WIFE, "first").message_handle, groupMessage(WIFE, "second").message_handle, groupMessage(WIFE, "third").message_handle],
+      "each turn answers, and so marks, its own message",
+    );
+    const folded = db.prepare("SELECT count(*) n FROM channel_messages WHERE json_extract(metadata_json,'$.foldedInto') IS NOT NULL").get() as { n: number };
+    assert.equal(folded.n, 0);
   });
 
   /*
@@ -10030,6 +10129,7 @@ describe("Sendblue provider", () => {
         runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher }),
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
       startTypingIndicator: () => () => {},
+      groupBursts: true,
     });
     const contextOf = (turn: ReturnType<typeof agentCallingMany>) =>
       ((turn.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;

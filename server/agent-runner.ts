@@ -1770,11 +1770,15 @@ export async function runChannelAgent(
    * message"). A retry whose earlier attempt filed a bubble of its own after
    * the inbound row, a GIF's "(picture)" row, ended on exactly that and failed
    * every time. Whatever trails the inbound text that is not the replay of its
-   * writes is not part of what is being answered.
+   * writes is not part of what is being answered. A turn that was overtaken has
+   * later texts after it, and what follows those is theirs, so it is left.
    */
-  while (messages.length > 1 && messages[messages.length - 1].role === "assistant"
-    && messages[messages.length - 1].id !== replayId) {
-    messages.pop();
+  const answeringAt = messages.indexOf(latestUserMessage);
+  if (answeringAt >= 0 && !messages.slice(answeringAt + 1).some(message => message.role === "user")) {
+    while (messages.length > answeringAt + 1 && messages[messages.length - 1].role === "assistant"
+      && messages[messages.length - 1].id !== replayId) {
+      messages.pop();
+    }
   }
 
   // Best effort at both ends: a runtime tapback that fails to land, or to

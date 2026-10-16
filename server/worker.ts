@@ -59,6 +59,14 @@ export type WorkerDependencies = {
    * direct `runWorkerOnce` call answers at once.
    */
   groupSettleMs?: number;
+  /**
+   * Whether bubbles sent close together in a group are answered as one turn: the
+   * settle wait and the folding into the next waiting text. Off unless asked
+   * for, with `GROUP_BURSTS=1` or here: folded, every tapback landed on the
+   * burst's last bubble and each reply waited on the whole burst. Without it,
+   * each text is its own turn, answered and marked in the order it was sent.
+   */
+  groupBursts?: boolean;
   /** Whether a pass sweeps quiet conversations for facts to keep. The running worker does; a direct call does not. */
   memorySweeps?: boolean;
 };
@@ -1259,6 +1267,7 @@ export async function runWorkerOnce(
   const runAgent = dependencies.runSmsAgent || runSmsAgent;
   const pollMeetings = dependencies.pollGranola || pollGranola;
   const showTyping = dependencies.startTypingIndicator || startTypingIndicator;
+  const bursts = dependencies.groupBursts ?? process.env.GROUP_BURSTS === "1";
   for (const { source, read } of INBOUND_SOURCES) {
     for (const event of claimExternalEvents(db, source, 20)) {
       let stopTyping: StopTypingIndicator | null = null;
@@ -1289,7 +1298,7 @@ export async function runWorkerOnce(
           continue;
         }
         const settleUntil = Date.parse(event.created_at) + (dependencies.groupSettleMs ?? 0);
-        if (group && settleUntil > Date.now()) {
+        if (group && bursts && settleUntil > Date.now()) {
           deferExternalEvent(db, event.id, new Date(settleUntil).toISOString());
           continue;
         }
@@ -1324,7 +1333,7 @@ export async function runWorkerOnce(
         // Another message from the group is already queued: that turn answers
         // this one with it — unless the burst has been gathering long enough
         // (in time or in messages) that it is owed an answer now.
-        const next = group && !retrying && message.messageId ? nextTextWaiting(db, source, read, event, address, true) : undefined;
+        const next = bursts && group && !retrying && message.messageId ? nextTextWaiting(db, source, read, event, address, true) : undefined;
         /*
          * How long the burst has been gathering is measured from when the worker
          * began filing it, not from when its first text arrived. After an outage
