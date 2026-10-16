@@ -31,7 +31,7 @@ import {
   assertNoOwnerPageLinks, getPage, listPages, NO_BASE_URL, pageJson, pollResults, revokePage,
   type PageRow,
 } from "./pages.ts";
-import { localIsoWithOffset, zonedToInstant } from "./local-time.ts";
+import { localIsoWithOffset, localParts, namesOtherWeekday, weekdayOf, zonedToInstant } from "./local-time.ts";
 import { plainText, sendSms, type SmsSender } from "./messaging.ts";
 import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
@@ -1260,7 +1260,11 @@ export async function executeAgentTool(
   if (name === "find_gif") {
     giphyConfig();
     const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 8);
-    const gifs = await countedWebCall(db, context, () => searchGifs(input.query as string, limit));
+    // Asked for a few more than shown, so that dropping a GIF captioned for another weekday still leaves some.
+    const found = await countedWebCall(db, context, () => searchGifs(input.query as string, Math.min(limit * 2, 12)));
+    // "Happy Monday" on a Friday is wrong whoever asked: leave out a GIF whose title names another day of the week.
+    const today = weekdayOf(localParts(new Date(), getNotificationPreferences(db).timezone).date);
+    const gifs = found.filter(gif => !namesOtherWeekday(gif.title, today)).slice(0, limit);
     // Uploaders write the titles, so they are outside text like a search snippet.
     markReadWeb(context);
     rememberImages(context?.threadId ?? "web", gifs.map(gif => gif.url));

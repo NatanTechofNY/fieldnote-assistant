@@ -83,6 +83,7 @@ import { resetWebState } from "../server/web-service.ts";
 import { pullGifLine, rememberImages } from "../server/image-output.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
 import { isTransientFailure, TransientFailure } from "../server/transient.ts";
+import { dayWithWeekday, localParts, namesOtherWeekday, weekdayOf } from "../server/local-time.ts";
 import { sendTwilioSms } from "../server/twilio-service.ts";
 import { GAVE_UP_TEXT, rollRecurringTodos, runWorkerOnce, startWorker, sweepQuietConversation } from "../server/worker.ts";
 import type { Db, TodoRow } from "../server/types.ts";
@@ -3301,6 +3302,42 @@ describe("web tools", () => {
       );
     } finally {
       stub.restore();
+    }
+  });
+
+  it("names the weekday, and leaves out a GIF captioned for another one", async () => {
+    assert.equal(weekdayOf("2026-10-16"), "Friday");
+    assert.equal(dayWithWeekday("2030-01-15"), "Tuesday, 2030-01-15");
+    assert.equal(namesOtherWeekday("Happy Monday GIF by Brand", "Friday"), true);
+    assert.equal(namesOtherWeekday("Happy Mondays", "Friday"), true);
+    assert.equal(namesOtherWeekday("Happy Friday dance", "Friday"), false, "today's own name is welcome");
+    assert.equal(namesOtherWeekday("Monday Mon Sunday-funday", "Friday"), true);
+    assert.equal(namesOtherWeekday("Monkey business", "Friday"), false, "a weekday inside a word is not one");
+
+    const before = process.env.GIPHY_API_KEY;
+    process.env.GIPHY_API_KEY = "giphy_test_key";
+    const realFetch = globalThis.fetch;
+    const { db } = fixture();
+    const today = weekdayOf(localParts(new Date(), getNotificationPreferences(db).timezone).date);
+    const otherDay = today === "Monday" ? "Tuesday" : "Monday";
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.host !== "api.giphy.com") throw new Error(`unexpected ${url.host}`);
+      return Response.json({ data: [
+        { id: "wrong", title: `Happy ${otherDay} GIF`, images: { downsized: { url: "https://media2.giphy.com/media/wrong/giphy.gif" } } },
+        { id: "right", title: `Happy ${today} GIF`, images: { downsized: { url: "https://media2.giphy.com/media/right/giphy.gif" } } },
+        { id: "plain", title: "Coffee please", images: { downsized: { url: "https://media2.giphy.com/media/plain/giphy.gif" } } },
+      ] });
+    }) as typeof fetch;
+    try {
+      const context: ToolTurnContext = { channel: "sms", address: "+15550100", threadId: "thread_weekday" };
+      const found = await executeAgentTool(db, { flushSoon() {} }, "find_gif", { query: "good morning", limit: 5 }, context) as {
+        gifs: Array<{ title: string }>;
+      };
+      assert.deepEqual(found.gifs.map(gif => gif.title), [`Happy ${today} GIF`, "Coffee please"]);
+    } finally {
+      globalThis.fetch = realFetch;
+      if (before === undefined) delete process.env.GIPHY_API_KEY; else process.env.GIPHY_API_KEY = before;
     }
   });
 
@@ -12490,7 +12527,7 @@ describe("worker scheduling", () => {
     assert.match(prompts[0], /board_id 84 "Growth"/, "the pinned catalog is injected rather than guessed");
     assert.match(prompts[0], /space key GROW "Growth space"/);
     assert.match(prompts[0], /do not guess a board ID/);
-    assert.match(prompts[0], /Today is 2030-01-15 in UTC/);
+    assert.match(prompts[0], /Today is Tuesday, 2030-01-15 in UTC/);
     // Atlassian is not connected in this fixture, so the catalog degrades to the
     // pinned names rather than failing the send.
     assert.match(prompts[0], /columns unavailable: Atlassian is not configured/);

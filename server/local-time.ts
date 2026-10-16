@@ -87,3 +87,30 @@ export function zonedToInstant(date: string, time: string, timezone: string): Da
   if (landed < target) guess += target - landed;
   return new Date(guess);
 }
+
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/** The weekday a local `YYYY-MM-DD` falls on. A calendar date has one in every zone, so no zone is needed. */
+export function weekdayOf(date: string): string {
+  const [year, month, day] = date.split("-").map(Number);
+  return WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+}
+
+/**
+ * A local date with its weekday in front, `Friday, 2026-10-16`. A model given
+ * only the digits has to work the weekday out, and one that got it wrong wrote
+ * "happy Monday" into a Friday's morning check-in.
+ */
+export function dayWithWeekday(date: string): string {
+  return `${weekdayOf(date)}, ${date}`;
+}
+
+/**
+ * Whether a title names a weekday other than `today`'s: a GIF captioned "Happy
+ * Monday" has no place in a Friday's message. "Mon", "Tues" and the like are
+ * left alone, since short forms are as often something else.
+ */
+export function namesOtherWeekday(title: string, today: string): boolean {
+  const other = WEEKDAYS.filter(day => day !== today);
+  return new RegExp(`\\b(?:${other.join("|")})s?\\b`, "i").test(title);
+}
