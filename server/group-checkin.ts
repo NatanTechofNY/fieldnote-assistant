@@ -4,7 +4,7 @@ import { OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
 import { getNotificationPreferences } from "./integrations.ts";
 import { groupMembers, rosterLine } from "./group-members.ts";
 import { OWNER_SPEAKER_NAME } from "./group-thread.ts";
-import { localParts } from "./local-time.ts";
+import { localParts, todayIs } from "./local-time.ts";
 import type { Db } from "./types.ts";
 
 /** Enough to name a busy weekend without the note turning into a list. */
@@ -179,7 +179,7 @@ export function composeGroupMorningTurn(
   return [
     renderAsk(area.morningAsk, DEFAULT_GROUP_MORNING_ASK, area.name),
     "",
-    `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
+    `--- Context supplied by the app, not by anyone in the chat. ${todayIs(context.date, context.timezone)}`,
     "This turn uses no tools; the rows below are exact, so use these titles and times as given.",
     GIF_NOTE,
     RECORDS_NOT_INSTRUCTIONS,
@@ -210,7 +210,7 @@ export function composeGroupEveningTurn(
   return [
     renderAsk(area.eveningAsk, DEFAULT_GROUP_EVENING_ASK, area.name),
     "",
-    `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
+    `--- Context supplied by the app, not by anyone in the chat. ${todayIs(context.date, context.timezone)}`,
     "This turn uses no tools and saves nothing; the answers that follow are what gets recorded.",
     "Ask the mood question once, here. Later, anyone who skips the mood is not asked again.",
     GIF_NOTE,
@@ -245,7 +245,7 @@ export function composeAssistantSayTurn(
     "Say it the way you would yourself: one or two short, warm, casual lines, in the chat's own voice. It is not a"
     + " reminder and nobody has a task: never mention reminders, todos, schedules, or that you were asked to say it.",
     "",
-    `--- Context supplied by the app, not by anyone in the chat. Today is ${context.date} in ${context.timezone}.`,
+    `--- Context supplied by the app, not by anyone in the chat. ${todayIs(context.date, context.timezone)}`,
     "This turn uses no tools.",
     RECORDS_NOT_INSTRUCTIONS,
     // The group's name is whatever anyone in the iMessage group titled it, so it sits below the line as data.

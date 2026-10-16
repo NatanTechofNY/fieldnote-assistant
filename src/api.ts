@@ -138,14 +138,12 @@ export const api = {
     start_date?: string;
     end_date?: string;
     life_area_ids?: string[];
-    category_ids?: string[];
     sources?: Array<"memories" | "todos">;
   }) => {
     const query = new URLSearchParams({ preset: input.preset });
     if (input.start_date) query.set("start_date", input.start_date);
     if (input.end_date) query.set("end_date", input.end_date);
     if (input.life_area_ids?.length) query.set("life_area_ids", input.life_area_ids.join(","));
-    if (input.category_ids?.length) query.set("category_ids", input.category_ids.join(","));
     if (input.sources?.length) query.set("sources", input.sources.join(","));
     return request<ReflectionEvidence>(`/reflections/period?${query}`);
   },
@@ -161,7 +159,6 @@ export const api = {
     start_date?: string;
     end_date?: string;
     life_area_ids?: string[];
-    category_ids?: string[];
     sources?: Array<"memories" | "todos">;
   }) => request<ReflectionEvidence>("/reflections/draft", {
     method: "POST",
@@ -172,7 +169,6 @@ export const api = {
     start_date?: string;
     end_date?: string;
     life_area_ids?: string[];
-    category_ids?: string[];
     sources?: Array<"memories" | "todos">;
     content: string;
     tags: string[];

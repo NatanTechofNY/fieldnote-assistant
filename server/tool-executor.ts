@@ -26,12 +26,12 @@ import {
   speakerLabel, speakerNameOf, withoutQuotedSpans,
 } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
-import { createPageFromInput, updatePageFromInput, type PageOrigin } from "./page-service.ts";
+import { createPageFromInput, relatedPicturesResult, updatePageFromInput, type PageOrigin } from "./page-service.ts";
 import {
   assertNoOwnerPageLinks, getPage, listPages, NO_BASE_URL, pageJson, pollResults, revokePage,
   type PageRow,
 } from "./pages.ts";
-import { localIsoWithOffset, zonedToInstant } from "./local-time.ts";
+import { localIsoWithOffset, namesOtherWeekday, todayWeekday, zonedToInstant } from "./local-time.ts";
 import { plainText, sendSms, type SmsSender } from "./messaging.ts";
 import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
@@ -173,14 +173,12 @@ export function getReflectionEvidence(
   period: ReflectionPeriod,
   filters: {
     lifeAreaIds?: string[];
-    categoryIds?: string[];
     sources?: Array<"memories" | "todos">;
     /** Leave out every group chat's records, whatever areas are asked for. */
     ownAreasOnly?: boolean;
   } = {},
 ) {
   const lifeAreaIds = [...new Set(filters.lifeAreaIds || [])];
-  const categoryIds = [...new Set(filters.categoryIds || [])];
   const sources = [...new Set(filters.sources?.length ? filters.sources : ["memories", "todos"])] as Array<"memories" | "todos">;
   const own = (alias: string) => filters.ownAreasOnly ? `AND ${OWN_AREA_CLAUSE(alias)}` : "";
   const memoryCandidates = sources.includes("memories")
@@ -216,15 +214,14 @@ export function getReflectionEvidence(
       ORDER BY t.completed_at DESC
     `).all(USER_ID, period.start, period.endExclusive) as TodoRow[]
     : [];
-  const scopeKey = reflectionScopeKey(period, { lifeAreaIds, categoryIds, sources });
+  const scopeKey = reflectionScopeKey(period, { lifeAreaIds, sources });
   const selections = db.prepare(`
     SELECT entity_type,entity_id FROM reflection_selections
     WHERE user_id=? AND scope_key=?
   `).all(USER_ID, scopeKey) as Array<{ entity_type: "memory" | "todo"; entity_id: string }>;
   const selected = new Set(selections.map(item => `${item.entity_type}:${item.entity_id}`));
   const inScope = (row: MemoryRow | TodoRow) =>
-    (!lifeAreaIds.length || Boolean(row.life_area_id && lifeAreaIds.includes(row.life_area_id)))
-    && (!categoryIds.length || Boolean(row.category_id && categoryIds.includes(row.category_id)));
+    !lifeAreaIds.length || Boolean(row.life_area_id && lifeAreaIds.includes(row.life_area_id));
   const memories = memoryCandidates.filter(memory => inScope(memory) && selected.has(`memory:${memory.id}`));
   const todos = todoCandidates.filter(todo => inScope(todo) && selected.has(`todo:${todo.id}`));
   const draft = (db.prepare(`
@@ -241,7 +238,6 @@ export function getReflectionEvidence(
     scope_key: scopeKey,
     scope: {
       life_area_ids: lifeAreaIds,
-      category_ids: categoryIds,
       sources,
     },
     memories: memories.map(row => memoryJson(row)),
@@ -1102,7 +1098,8 @@ export async function executeAgentTool(
     }
     const { page, wroteTodos } = await createPageFromInput(db, input as never, pageOrigin(context));
     if (wroteTodos) search.flushSoon();
-    return pageResult(db, page);
+    // What the group already kept that belongs on this page (a ticket for the evening it plans): offered, not added.
+    return { ...pageResult(db, page), ...relatedPicturesResult(db, page) };
   }
   if (name === "update_page") {
     const row = scopedPage(db, input.id as string, scope);
@@ -1260,7 +1257,11 @@ export async function executeAgentTool(
   if (name === "find_gif") {
     giphyConfig();
     const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 8);
-    const gifs = await countedWebCall(db, context, () => searchGifs(input.query as string, limit));
+    // Asked for a few more than shown, so that dropping a GIF captioned for another weekday still leaves some.
+    const found = await countedWebCall(db, context, () => searchGifs(input.query as string, Math.min(limit * 2, 12)));
+    // "Happy Monday" on a Friday is wrong whoever asked: leave out a GIF whose title names another day of the week.
+    const today = todayWeekday(getNotificationPreferences(db).timezone);
+    const gifs = found.filter(gif => !namesOtherWeekday(gif.title, today)).slice(0, limit);
     // Uploaders write the titles, so they are outside text like a search snippet.
     markReadWeb(context);
     rememberImages(context?.threadId ?? "web", gifs.map(gif => gif.url));
@@ -2004,7 +2005,6 @@ export async function executeAgentTool(
     });
     return agentEvidence(getReflectionEvidence(db, period, {
       lifeAreaIds: strings("life_area_ids"),
-      categoryIds: strings("category_ids"),
       sources: strings("sources") as Array<"memories" | "todos">,
       ownAreasOnly: ownOnly,
     }));

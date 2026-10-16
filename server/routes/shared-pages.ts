@@ -1,5 +1,5 @@
 import { failure, success } from "../http.ts";
-import { createPageFromInput, updatePageFromInput } from "../page-service.ts";
+import { createPageFromInput, relatedPicturesResult, updatePageFromInput } from "../page-service.ts";
 import { getPage, listPages, pageJson, pollResults, revokePage } from "../pages.ts";
 import { pageCreate, pageUpdate } from "../schemas.ts";
 import type { RouteContext } from "./context.ts";
@@ -19,7 +19,7 @@ export function registerSharedPageRoutes({ app, db, search }: RouteContext): voi
     const body = pageCreate.parse(req.body);
     const { page, wroteTodos } = await createPageFromInput(db, body);
     if (wroteTodos) search.flushSoon();
-    return success(res, pageJson(db, page), 201);
+    return success(res, { ...pageJson(db, page), ...relatedPicturesResult(db, page) }, 201);
   });
 
   app.patch("/api/pages/:id", async (req, res) => {

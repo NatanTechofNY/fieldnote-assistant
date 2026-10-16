@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import request from "supertest";
 import { syncAgentStudioTools } from "../server/agent-studio.ts";
-import { archiveReactionText, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures } from "../server/agent-runner.ts";
+import { archiveReactionText, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage, recordOutboundProviderMessage, runChannelAgent, runSmsAgent, stageInboundPictures, turnAlreadyAnswered } from "../server/agent-runner.ts";
 import { AlgoliaSync, configuredIndexNames, indexedCommentBodies, TODO_COMMENTS_INDEXED, TODO_COMMENTS_INDEXED_BYTES } from "../server/algolia.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling, safeNextPath } from "../server/auth.ts";
@@ -30,7 +30,7 @@ import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } fr
 import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
 import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } from "../server/group-thread.ts";
 import {
-  adoptStagedAttachments, attachmentsFull, attachmentTextForMemory, deleteAttachment, dropUnadoptedAttachments,
+  adoptStagedAttachments, attachmentsFull, attachmentTextForMemory, deleteAttachment, dropUnadoptedAttachments, linkMemoryAttachments,
   setAttachmentDescription, stageAttachment, sweepOrphanedAttachmentFiles,
 } from "../server/attachments.ts";
 import {
@@ -82,7 +82,8 @@ import { resetPageWriteThrottle, setPictureLoadLimit } from "../server/routes/pu
 import { resetWebState } from "../server/web-service.ts";
 import { pullGifLine, rememberImages } from "../server/image-output.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
-import { TransientFailure } from "../server/transient.ts";
+import { isTransientFailure, TransientFailure } from "../server/transient.ts";
+import { dayWithWeekday, localParts, namesOtherWeekday, weekdayOf } from "../server/local-time.ts";
 import { sendTwilioSms } from "../server/twilio-service.ts";
 import { GAVE_UP_TEXT, rollRecurringTodos, runWorkerOnce, startWorker, sweepQuietConversation } from "../server/worker.ts";
 import type { Db, TodoRow } from "../server/types.ts";
@@ -830,7 +831,9 @@ describe("frontend API contract", () => {
     assert.equal(work.memories.length, 0);
     assert.equal(work.memory_candidates.length, 1);
     const categoryOnly = (await api.get(`/api/reflections/period?preset=custom&start_date=2026-06-01&end_date=2026-06-30&sources=memories&category_ids=${category.id}`).expect(200)).body.data;
-    assert.equal(categoryOnly.memory_candidates.length, 1);
+    assert.equal(categoryOnly.memory_candidates.length, 2, "reflections no longer filter by category, so the parameter changes nothing");
+    assert.equal(categoryOnly.scope_key, all.scope_key);
+    assert.equal("category_ids" in categoryOnly.scope, false);
     await api.patch("/api/reflections/selections").send({
       scope_key: work.scope_key,
       items: [{ type: "memory", id: memory.id, selected: true }],
@@ -871,7 +874,6 @@ describe("frontend API contract", () => {
       start_date: "2026-06-01",
       end_date: "2026-06-30",
       life_area_ids: ["area_personal"],
-      category_ids: [],
       sources: ["memories"],
     };
     const evidence = (await api.get("/api/reflections/period?preset=custom&start_date=2026-06-01&end_date=2026-06-30&sources=memories&life_area_ids=area_personal").expect(200)).body.data;
@@ -2434,6 +2436,103 @@ describe("SMS, reminders, and channel agent execution", () => {
     );
   });
 
+  describe("a model that answers with nothing", () => {
+    const empty = () => new Response(JSON.stringify({
+      name: "EmptyResponseError", message: "The model returned an empty response. Please try again.",
+    }), { status: 424 });
+    const reply = (text: string) => new Response(JSON.stringify({ role: "assistant", parts: [{ type: "text", text }] }), { status: 200 });
+
+    it("is asked again inside the turn, not failed", async () => {
+      const { db } = fixture();
+      process.env.ALGOLIA_APPLICATION_ID = "app";
+      process.env.ALGOLIA_SEARCH_API_KEY = "key";
+      process.env.ALGOLIA_AGENT_ID = "agent";
+      let calls = 0;
+      const fetcher: typeof fetch = async () => (calls += 1) < 3 ? empty() : reply("Here you go.");
+      const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "hello", "SB_empty", { fetcher });
+      assert.equal(response.text, "Here you go.");
+      assert.equal(calls, 3);
+    });
+
+    it("is a transient failure once it keeps coming back empty", async () => {
+      const { db } = fixture();
+      process.env.ALGOLIA_APPLICATION_ID = "app";
+      process.env.ALGOLIA_SEARCH_API_KEY = "key";
+      process.env.ALGOLIA_AGENT_ID = "agent";
+      let calls = 0;
+      const fetcher: typeof fetch = async () => { calls += 1; return empty(); };
+      await assert.rejects(
+        runSmsAgent(db, fakeSearch(db), "+17185551111", "hello", "SB_empty2", { fetcher }),
+        (error: unknown) => isTransientFailure(error) && /EmptyResponseError/.test((error as Error).message),
+      );
+      assert.equal(calls, 3, "one try and two more");
+    });
+
+    it("never sends a conversation that ends on an assistant bubble, and does not redo an answered turn", async () => {
+      const { db } = fixture();
+      process.env.ALGOLIA_APPLICATION_ID = "app";
+      process.env.ALGOLIA_SEARCH_API_KEY = "key";
+      process.env.ALGOLIA_AGENT_ID = "agent";
+      const bodies: Array<{ messages: Array<{ role: string }> }> = [];
+      const fetcher: typeof fetch = async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return reply("Done.");
+      };
+      // What a first attempt left: the inbound row, then the bubble its GIF filed.
+      const threadId = recordOutboundChannelMessage(db, "sms", "+17185551111", "earlier", "SB_earlier").threadId;
+      const stamp = new Date().toISOString();
+      const insert = db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,'received',?,?,?)
+      `);
+      insert.run("cm_ask", threadId, "inbound", "user", "send a gif", "SB_gif", "{}", stamp, stamp);
+      insert.run("cm_pic", threadId, "outbound", "assistant", "(picture)", null, '{"kind":"image"}', stamp, stamp);
+
+      const response = await runSmsAgent(db, fakeSearch(db), "+17185551111", "send a gif", "SB_gif", { fetcher });
+      assert.equal(response.text, "Done.");
+      assert.equal(bodies[0].messages.at(-1)?.role, "user", "the conversation ends on the text being answered");
+
+      // With the GIF's own send recorded, the retry has nothing left to do.
+      insert.run("cm_tool", threadId, "outbound", "tool", "send_image", null, '{"output":{"success":true},"toolCallId":"call_1"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_gif"), true);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_other"), false);
+      bodies.length = 0;
+      const again = await runSmsAgent(db, fakeSearch(db), "+17185551111", "send a gif", "SB_gif", { fetcher });
+      assert.equal(again.text, "");
+      assert.equal(bodies.length, 0, "no completion, so no second GIF");
+    });
+
+    it("counts a post to another group as an answer too, but not a tapback", async () => {
+      const { db } = fixture();
+      const threadId = recordOutboundChannelMessage(db, "sms", "+17185551111", "earlier", "SB_earlier").threadId;
+      const stamp = new Date().toISOString();
+      const insert = db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,'received',?,?,?)
+      `);
+      insert.run("cm_ask2", threadId, "inbound", "user", "tell the group", "SB_tell", "{}", stamp, stamp);
+      insert.run("cm_react", threadId, "outbound", "tool", "react_to_message", null, '{"output":{"success":true},"toolCallId":"call_1"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_tell"), false, "a tapback can be asked for again");
+      insert.run("cm_post", threadId, "outbound", "tool", "send_to_group", null, '{"output":{"success":true},"toolCallId":"call_2"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_tell"), true, "a post cannot be repeated unseen");
+    });
+
+    it("still owes a confirmation for a record written after the turn went quiet", async () => {
+      const { db } = fixture();
+      const threadId = recordOutboundChannelMessage(db, "sms", "+17185551111", "earlier", "SB_earlier").threadId;
+      const stamp = new Date().toISOString();
+      const insert = db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,'received',?,?,?)
+      `);
+      insert.run("cm_ask3", threadId, "inbound", "user", "add milk", "SB_milk", "{}", stamp, stamp);
+      insert.run("cm_q3", threadId, "outbound", "tool", "stay_quiet", null, '{"output":{"success":true},"toolCallId":"call_1"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_milk"), true);
+      insert.run("cm_w3", threadId, "outbound", "tool", "create_todo", null, '{"output":{"success":true},"toolCallId":"call_2"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_milk"), false, "the todo was written and nobody was told");
+    });
+  });
+
   /*
    * A scheduled send composes the same instruction again on its next attempt, so
    * the abandoned copy has to leave the recent window. It stayed once, and the
@@ -3234,6 +3333,43 @@ describe("web tools", () => {
       );
     } finally {
       stub.restore();
+    }
+  });
+
+  it("names the weekday, and leaves out a GIF captioned for another one", async () => {
+    assert.equal(weekdayOf("2026-10-16"), "Friday");
+    assert.equal(dayWithWeekday("2030-01-15"), "Tuesday, 2030-01-15");
+    assert.equal(namesOtherWeekday("Happy Monday GIF by Brand", "Friday"), true);
+    assert.equal(namesOtherWeekday("Happy Mondays", "Friday"), true);
+    assert.equal(namesOtherWeekday("Happy Friday dance", "Friday"), false, "today's own name is welcome");
+    assert.equal(namesOtherWeekday("Friday, not Monday", "Friday"), false, "a title that names today as well is left alone");
+    assert.equal(namesOtherWeekday("Monday Mon Sunday-funday", "Friday"), true);
+    assert.equal(namesOtherWeekday("Monkey business", "Friday"), false, "a weekday inside a word is not one");
+
+    const before = process.env.GIPHY_API_KEY;
+    process.env.GIPHY_API_KEY = "giphy_test_key";
+    const realFetch = globalThis.fetch;
+    const { db } = fixture();
+    const today = weekdayOf(localParts(new Date(), getNotificationPreferences(db).timezone).date);
+    const otherDay = today === "Monday" ? "Tuesday" : "Monday";
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.host !== "api.giphy.com") throw new Error(`unexpected ${url.host}`);
+      return Response.json({ data: [
+        { id: "wrong", title: `Happy ${otherDay} GIF`, images: { downsized: { url: "https://media2.giphy.com/media/wrong/giphy.gif" } } },
+        { id: "right", title: `Happy ${today} GIF`, images: { downsized: { url: "https://media2.giphy.com/media/right/giphy.gif" } } },
+        { id: "plain", title: "Coffee please", images: { downsized: { url: "https://media2.giphy.com/media/plain/giphy.gif" } } },
+      ] });
+    }) as typeof fetch;
+    try {
+      const context: ToolTurnContext = { channel: "sms", address: "+15550100", threadId: "thread_weekday" };
+      const found = await executeAgentTool(db, { flushSoon() {} }, "find_gif", { query: "good morning", limit: 5 }, context) as {
+        gifs: Array<{ title: string }>;
+      };
+      assert.deepEqual(found.gifs.map(gif => gif.title), [`Happy ${today} GIF`, "Coffee please"]);
+    } finally {
+      globalThis.fetch = realFetch;
+      if (before === undefined) delete process.env.GIPHY_API_KEY; else process.env.GIPHY_API_KEY = before;
     }
   });
 
@@ -7037,7 +7173,11 @@ describe("Sendblue provider", () => {
     const retry = agentCallingMany([], "Made all sixteen.");
     await runSmsAgent(db, search, address, "yes, make those todos", "SB_yes", groupTurnOptions(retry.fetcher));
     const retryWindow = retry.requests[0].messages as Message[];
-    assert.deepEqual(retryWindow.map(message => message.role), ["user", "assistant", "user", "assistant"]);
+    assert.deepEqual(
+      retryWindow.map(message => message.role),
+      ["user", "assistant", "user"],
+      "the reply to the text behind it would end the window on an assistant bubble, which Agent Studio refuses",
+    );
     assert.equal(retryWindow.filter(message => message.id.startsWith("alg_msg_writes_")).length, 1);
     assert.equal(retryWindow[1].parts.length, 16, "and they sit right after the message they answer");
     assert.equal(new Set(retryWindow.map(message => message.id)).size, retryWindow.length);
@@ -7159,6 +7299,67 @@ describe("Sendblue provider", () => {
     db.prepare("UPDATE external_events SET status='failed',attempts=4,available_at=? WHERE id=?").run(new Date(Date.now() + 3600_000).toISOString(), stuck);
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.deepEqual(turns, ["hello?"], "ordering is worth a few short retries, not an hour of silence");
+  });
+
+  it("ends a turn that already went quiet, rather than failing it, when the model then answers with nothing", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    await runSmsAgent(db, fakeSearch(db), `group:${GROUP}`, "hi, this is Sarah", "SB_intro_q", groupTurnOptions(agentCallingMany([], "Hi Sarah!").fetcher, RECIPIENT, "the owner"));
+    let round = 0;
+    const quietThenNothing: typeof fetch = async () => {
+      round += 1;
+      return round === 1
+        ? new Response(JSON.stringify({
+          role: "assistant",
+          parts: [{ type: "tool-stay_quiet", tool_call_id: "call_quiet", state: "input-available", input: { reason: "just chatter" } }],
+        }), { status: 200 })
+        : new Response(JSON.stringify({ name: "EmptyResponseError", message: "The model returned an empty response." }), { status: 424 });
+    };
+    const response = await runSmsAgent(db, fakeSearch(db), `group:${GROUP}`, "lol", "SB_quiet_empty", groupTurnOptions(quietThenNothing));
+    assert.equal(response.text, "");
+    assert.equal(round, 4, "the quiet call, then one try and two more");
+  });
+
+  it("sends no give-up text for a message the assistant already answered", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const sends: string[] = [];
+    const worker = {
+      sendSms: async (_db: Db, _to: string, body: string) => { sends.push(body); return { sid: `SB_${sends.length}`, status: "queued" as const }; },
+      runSmsAgent: async () => { throw new Error("the model broke after the turn had answered"); },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    };
+    const status = (content: string) => (db.prepare("SELECT status FROM external_events WHERE json_extract(payload_json,'$.content')=?")
+      .get(content) as { status: string }).status;
+    const dueNow = () => db.prepare("UPDATE external_events SET available_at=? WHERE status IN ('failed','pending')").run(new Date(Date.now() - 1000).toISOString());
+    const threadId = recordOutboundChannelMessage(db, "sms", `group:${GROUP}`, "earlier reply", "SB_earlier").threadId;
+    const stamp = new Date().toISOString();
+    const insert = db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,'received',?,?,?)
+    `);
+    // One text whose turn went quiet on purpose before it failed, one whose turn had sent a bubble of its own.
+    const quiet = groupMessage(WIFE, "just chatter");
+    const spoke = groupMessage(WIFE, "ask me something");
+    const unanswered = groupMessage(WIFE, "no luck at all");
+    for (const payload of [quiet, spoke, unanswered]) {
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(payload).expect(200);
+    }
+    insert.run("cm_quiet", threadId, "inbound", "user", "just chatter", quiet.message_handle, "{}", stamp, stamp);
+    insert.run("cm_quiet_tool", threadId, "outbound", "tool", "stay_quiet", null, '{"output":{"success":true},"toolCallId":"call_q"}', stamp, stamp);
+    insert.run("cm_spoke", threadId, "inbound", "user", "ask me something", spoke.message_handle, "{}", stamp, stamp);
+    insert.run("cm_spoke_reply", threadId, "outbound", "assistant", "On it.", null, '{"kind":"message"}', stamp, stamp);
+    insert.run("cm_none", threadId, "inbound", "user", "no luck at all", unanswered.message_handle, "{}", stamp, stamp);
+
+    // Each text holds the ones behind it until it settles, so the three take their turns in order.
+    for (let pass = 0; pass < 3 * MAX_EVENT_ATTEMPTS_FINAL; pass += 1) {
+      await runWorkerOnce(db, fakeSearch(db), worker);
+      dueNow();
+    }
+    assert.deepEqual([status("just chatter"), status("ask me something"), status("no luck at all")], ["ignored", "ignored", "ignored"]);
+    assert.deepEqual(sends, [GAVE_UP_TEXT], "only the text nothing was answered for is told, and once");
   });
 
   /*
@@ -7614,6 +7815,59 @@ describe("Sendblue provider", () => {
     assert.equal(holdUntilNamed(db, address, "lol same", "SB_in_assistant_thread", {
       provider: "sendblue", groupId: GROUP, replyTo: "SB_anxious", threadOriginator: "SB_assistant_line",
     }, metadata), false, "a reply in the assistant's own thread still reaches it");
+  });
+
+  /*
+   * The assistant asked "Which song do you mean?", two people laughed, and
+   * the owner's answer without its name was held and never answered.
+   */
+  it("lets the person the assistant just asked answer it without its name, even after others spoke", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const address = `group:${GROUP}`;
+    await runSmsAgent(db, fakeSearch(db), address, "hello", "SB_hello_ask", groupTurnOptions(agentCallingMany([], "Hi!").fetcher, RECIPIENT, "the owner"));
+    const threadId = (db.prepare("SELECT id FROM channel_threads WHERE address=?").get(address) as { id: string }).id;
+    db.prepare("UPDATE life_areas SET reply_mode='named_only' WHERE thread_id=?").run(threadId);
+    const inbound = { provider: "sendblue" as const, groupId: GROUP };
+    const owner = { groupId: GROUP, speaker: RECIPIENT, speakerName: "the owner", speakerIsOwner: true };
+    const sarah = { groupId: GROUP, speaker: WIFE, speakerName: "Sarah", speakerIsOwner: false };
+
+    // The owner names the assistant, so that one is answered; what it asked comes next.
+    recordOutboundChannelMessage(db, "sms", address, "Which song do you mean?", "SB_which_song");
+    assert.equal(holdUntilNamed(db, address, "ha", "SB_sarah_1", inbound, sarah), true, "someone else's remark is not an answer");
+    assert.equal(holdUntilNamed(db, address, "the one with the lyrics I sent", "SB_owner_1", inbound, owner), false, "the person it asked is answering, others in between or not");
+    assert.equal(holdUntilNamed(db, address, "lol", "SB_sarah_2", inbound, sarah), true);
+
+    // The owner's answer is filed as a held message would be, and that closes the question.
+    const said = (speaker: string, text: string, handle: string) => {
+      const stamp = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+        VALUES(?,?,'inbound','user',?,?,'received',?,?,?)
+      `).run(`cm_${handle}`, threadId, text, handle, JSON.stringify({ speaker }), stamp, stamp);
+    };
+    said(RECIPIENT, "the one with the lyrics I sent", "SB_owner_1");
+    assert.equal(holdUntilNamed(db, address, "ok", "SB_owner_1b", inbound, owner), true, "answered, so what follows is the room's again");
+
+    // A question with something after it still asks, and a link's own question mark does not.
+    recordOutboundChannelMessage(db, "sms", address, "Which one? 🎵 I can look it up.", "SB_which_one");
+    assert.equal(holdUntilNamed(db, address, "the first", "SB_owner_1c", inbound, owner), false);
+    said(RECIPIENT, "the first", "SB_owner_1c");
+    recordOutboundChannelMessage(db, "sms", address, "Here it is: https://example.com/watch?v=abc", "SB_link");
+    assert.equal(holdUntilNamed(db, address, "thanks", "SB_owner_1d", inbound, owner), true, "a link is not a question");
+
+    // A statement from the assistant is not a question, so what follows it is still the room's.
+    recordOutboundChannelMessage(db, "sms", address, "Done, it is on the list.", "SB_done");
+    assert.equal(holdUntilNamed(db, address, "nice", "SB_owner_2", inbound, owner), true);
+
+    // A question stays open past a long stretch of room talk, and past the assistant's own remark to someone else.
+    recordOutboundChannelMessage(db, "sms", address, "Which day works?", "SB_which_day");
+    for (let i = 0; i < 20; i += 1) said(WIFE, `chatter ${i}`, `SB_chatter_${i}`);
+    recordOutboundChannelMessage(db, "sms", address, "Agreed, Sarah.", "SB_agreed");
+    said(WIFE, "ha", "SB_chatter_end");
+    assert.equal(holdUntilNamed(db, address, "saturday", "SB_owner_3", inbound, owner), false, "still the owner's question to answer");
+    assert.equal(holdUntilNamed(db, address, "me too", "SB_sarah_3", inbound, sarah), true, "and not Sarah's");
   });
 
   /*
@@ -9883,6 +10137,7 @@ describe("Sendblue provider", () => {
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
       startTypingIndicator: () => () => {},
       fetch: network,
+      groupBursts: true,
     };
     const stub = stubSendblue({ "/api/send-reaction": () => json({ status: "OK" }) });
     try {
@@ -9927,7 +10182,7 @@ describe("Sendblue provider", () => {
     assert.ok(Date.parse(settling.available_at) > Date.now());
   }));
 
-  it("folds a backlog of old group texts into a few turns instead of one turn each", async () => {
+  it("folds a backlog of old group texts into a few turns instead of one turn each, with bursts off", async () => {
     const { db, api } = connectedFixture();
     withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
     const post = (text: string) => api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, text)).expect(200);
@@ -9949,6 +10204,36 @@ describe("Sendblue provider", () => {
     assert.deepEqual(turns, ["bubble 41", "bubble 45"], "forty bubbles ride on the first turn, the rest on the second");
     const open = db.prepare("SELECT count(*) n FROM external_events WHERE status NOT IN ('processed','ignored')").get() as { n: number };
     assert.equal(open.n, 0);
+  });
+
+  it("answers each group text as its own turn, without waiting for the bubbles behind it, unless bursts are switched on", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const post = (text: string) => api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, text)).expect(200);
+    await post("first");
+    await post("second");
+    await post("third");
+    const turns: Array<{ body: string; handle?: string }> = [];
+    const pass = (extra: Record<string, unknown>) => runWorkerOnce(db, fakeSearch(db), {
+      sendSms: async () => ({ sid: "SB_each", status: "queued" as const }),
+      runSmsAgent: async (_db: Db, _search: unknown, _address: string, body: string, handle?: string) => {
+        turns.push({ body, handle });
+        return { text: "ok", threadId: "thread_x" };
+      },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+      ...extra,
+    });
+    // The running worker's settle wait changes nothing while bursts are off: the first text is answered at once.
+    await pass({ groupSettleMs: 60_000 });
+    assert.deepEqual(turns.map(turn => turn.body), ["first", "second", "third"]);
+    assert.deepEqual(
+      turns.map(turn => turn.handle),
+      [groupMessage(WIFE, "first").message_handle, groupMessage(WIFE, "second").message_handle, groupMessage(WIFE, "third").message_handle],
+      "each turn answers, and so marks, its own message",
+    );
+    const folded = db.prepare("SELECT count(*) n FROM channel_messages WHERE json_extract(metadata_json,'$.foldedInto') IS NOT NULL").get() as { n: number };
+    assert.equal(folded.n, 0);
   });
 
   /*
@@ -10030,6 +10315,7 @@ describe("Sendblue provider", () => {
         runSmsAgent(args[0], args[1], args[2], args[3], args[4], { ...args[5], fetcher }),
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
       startTypingIndicator: () => () => {},
+      groupBursts: true,
     });
     const contextOf = (turn: ReturnType<typeof agentCallingMany>) =>
       ((turn.requests[0].messages as Array<Record<string, unknown>>).at(-1)!.metadata as { turnContext: Record<string, unknown> }).turnContext;
@@ -12363,7 +12649,7 @@ describe("worker scheduling", () => {
     assert.match(prompts[0], /board_id 84 "Growth"/, "the pinned catalog is injected rather than guessed");
     assert.match(prompts[0], /space key GROW "Growth space"/);
     assert.match(prompts[0], /do not guess a board ID/);
-    assert.match(prompts[0], /Today is 2030-01-15 in UTC/);
+    assert.match(prompts[0], /Today is Tuesday, 2030-01-15 in UTC/);
     // Atlassian is not connected in this fixture, so the catalog degrades to the
     // pinned names rather than failing the send.
     assert.match(prompts[0], /columns unavailable: Atlassian is not configured/);
@@ -14048,6 +14334,77 @@ describe("hosted pages", () => {
     await api.delete(`/api/pages/${shared.id}`).set("Authorization", basic).expect(200);
     await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(404);
     delete process.env.APP_ADMIN_PASSWORD;
+  });
+
+  it("offers a group page the pictures its own memories kept, and never another chat's", async () => {
+    const { api, db } = pageFixture();
+    const stamp = new Date().toISOString();
+    const jpeg = (byte: number) => Buffer.from([0xff, 0xd8, 0xff, byte]);
+    const stage = (threadId: string, handle: string, byte: number, description: string) => {
+      const picture = stageAttachment(db, {
+        threadId, providerMessageId: handle, sourceUrl: `https://cdn.sendblue.example/${handle}.jpg`, contentType: "image/jpeg", bytes: jpeg(byte),
+      });
+      setAttachmentDescription(db, picture.id, description, "document");
+      return picture;
+    };
+    const remember = (areaId: string, title: string, content: string, pictures: string[], threadId: string) => {
+      const id = `memory_${title.replaceAll(" ", "_")}`;
+      db.prepare(`
+        INSERT INTO memories(id,user_id,title,content,kind,life_area_id,created_at,updated_at) VALUES(?,?,?,?,'fact',?,?,?)
+      `).run(id, USER_ID, title, content, areaId, stamp, stamp);
+      linkMemoryAttachments(db, id, pictures, threadId);
+      return id;
+    };
+    ownerTurn(db);
+    const { context: group, areaId } = groupTurn(db, "thread_friends_crew");
+    const { areaId: otherArea } = groupTurn(db, "thread_other_crew");
+
+    const ticket = stage("thread_friends_crew", "SB_ticket_pic", 1, "Order #3 Event: Example Band Concert Saturday, Example Hall");
+    const unrelated = stage("thread_friends_crew", "SB_cat_pic", 2, "A cat asleep");
+    const theirs = stage("thread_other_crew", "SB_their_ticket", 3, "Concert ticket for another crew");
+    const mine = stage("thread_owner_pages", "SB_my_ticket", 4, "My own concert ticket");
+    remember(areaId, "Concert tickets", "Going to the show on Saturday", [ticket.id], "thread_friends_crew");
+    remember(areaId, "Cat photos", "Asleep on the sofa", [unrelated.id], "thread_friends_crew");
+    remember(otherArea, "Other concert tickets", "Their night out", [theirs.id], "thread_other_crew");
+
+    const made = await run(db, "create_page", {
+      template: "trip", title: "Concert at Example Hall", items: ["Sat 9 PM | Doors open", "Before | Eat at home"],
+    }, group);
+    assert.deepEqual(
+      (made.related_pictures as Array<{ attachment_id: string }>).map(picture => picture.attachment_id),
+      [ticket.id],
+      "the ticket matches the page; the cat, another crew's ticket, and the owner's own do not",
+    );
+    assert.match(made.related_pictures[0].memory_title, /Concert tickets/);
+    assert.ok([unrelated.id, theirs.id, mine.id].every(id => !JSON.stringify(made.related_pictures).includes(id)));
+
+    // Once the page carries it, it is not offered again; the model adds it with update_page.
+    const updated = await run(db, "update_page", {
+      id: made.id, blocks: [
+        { type: "itinerary", text: "Plan", items: ["Sat 9 PM | Doors open", "Before | Eat at home"], attachment_ids: [ticket.id, ""] },
+      ],
+    }, group);
+    assert.equal(updated.related_pictures, undefined);
+    const again = await run(db, "create_page", {
+      title: "Concert at Example Hall, take two", blocks: [
+        { type: "itinerary", text: "Plan", items: ["Sat 9 PM | Doors open"], attachment_ids: [ticket.id] },
+      ],
+    }, group);
+    assert.equal(again.related_pictures, undefined, "nothing left to offer");
+
+    // The Pages screen's route files a page under a group the same way and is offered the same pictures.
+    const viaRoute = await api.post("/api/pages").send({
+      template: "trip", title: "Concert at Example Hall, again", items: ["Sat 9 PM | Doors open"], audience: "shared", thread_id: "thread_friends_crew",
+    }).expect(201);
+    assert.deepEqual(
+      (viaRoute.body.data.related_pictures as Array<{ attachment_id: string }>).map(picture => picture.attachment_id),
+      [ticket.id],
+    );
+
+    // The owner's own page is not one a group's pictures are offered to.
+    const owner = ownerTurn(db);
+    const private_ = await run(db, "create_page", { template: "trip", title: "Concert", items: ["Sat | Show"] }, owner);
+    assert.equal(private_.related_pictures, undefined);
   });
 
   it("refuses to send an owner page's link to anyone else", async () => {

@@ -4,6 +4,7 @@
  * scope whichever way it was asked for.
  */
 import type { z } from "zod";
+import { attachmentsForMemories } from "./attachments.ts";
 import { USER_ID } from "./db.ts";
 import { groupIdOfAddress } from "./group-thread.ts";
 import { assertSendableImage } from "./image-output.ts";
@@ -212,4 +213,85 @@ export async function ensureGroupReviewPage(
     title: built.title, blocks: built.blocks, kind: "custom", template: "group_week_review", audience: "shared",
     lifeAreaId: area.id, threadId: area.thread_id, groupId: area.groupId, expiresInDays: built.expiresInDays, dedupeKey: key,
   });
+}
+
+/* Pictures the group already saved that belong on a page ---------------------- */
+
+const TOPIC_STOPWORDS = new Set([
+  "this", "that", "with", "from", "have", "will", "your", "plan", "page", "list", "what", "when", "where", "about", "into",
+  "before", "after", "going", "there", "their", "them", "then", "than", "some", "just", "check", "the", "and",
+]);
+
+const topicWords = (text: string): string[] =>
+  [...new Set(text.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? [])].filter(word => !TOPIC_STOPWORDS.has(word));
+
+/** The most pictures one page is offered. */
+const RELATED_PICTURE_LIMIT = 5;
+
+type RelatedPicture = {
+  attachment_id: string;
+  description: string | null;
+  memory_title: string | null;
+};
+
+/**
+ * The pictures a group has kept with its memories that bear on a page it has
+ * just made, so the agent can put a ticket or a confirmation on the page that
+ * plans the evening the ticket is for. Nothing is added here: the model is
+ * handed the candidates and decides.
+ *
+ * Only a group's own page looks, and only among that group's own memories: a
+ * memory is read by its area, and each picture has to be one a page of this
+ * audience and area may show (`pictureProblem`), so the owner's own pictures and
+ * another group's never turn up. A memory matches on the page's words beyond
+ * the group's own name, which every memory of the group shares, in its title,
+ * text, and what its pictures say. Pictures already on the page are left out.
+ */
+function relatedPagePictures(db: Db, page: PageRow): RelatedPicture[] {
+  if (!page.life_area_id || !page.group_id) return [];
+  const area = db.prepare("SELECT name FROM life_areas WHERE id=? AND user_id=?").get(page.life_area_id, USER_ID) as { name: string | null } | undefined;
+  const groupWords = new Set(topicWords(area?.name ?? ""));
+  const blocks = pageBlocks(page);
+  const words = topicWords([page.title, ...blocks.flatMap(block => [block.text, ...(block.items ?? [])])].filter(Boolean).join(" "))
+    .filter(word => !groupWords.has(word));
+  if (!words.length) return [];
+  const memories = db.prepare(`
+    SELECT id,title,content FROM memories
+    WHERE user_id=? AND life_area_id=? AND id IN (SELECT memory_id FROM memory_attachments)
+    ORDER BY created_at DESC LIMIT 200
+  `).all(USER_ID, page.life_area_id) as Array<{ id: string; title: string | null; content: string }>;
+  const pictures = attachmentsForMemories(db, memories.map(memory => memory.id));
+  const onPage = new Set(pageAttachmentIds(blocks));
+  const found: Array<RelatedPicture & { score: number }> = [];
+  const seen = new Set<string>();
+  for (const memory of memories) {
+    const kept = (pictures.get(memory.id) ?? []).filter(picture => !onPage.has(picture.id) && !seen.has(picture.id)
+      && pictureProblem(db, picture.id, page.audience, page.life_area_id) === null);
+    if (!kept.length) continue;
+    const text = [memory.title, memory.content, ...kept.map(picture => picture.description)].join(" ").toLowerCase();
+    const score = words.filter(word => text.includes(word)).length;
+    if (!score) continue;
+    for (const picture of kept) {
+      seen.add(picture.id);
+      found.push({
+        attachment_id: picture.id, description: picture.description ? picture.description.slice(0, 200) : null,
+        memory_title: memory.title, score,
+      });
+    }
+  }
+  return found.sort((a, b) => b.score - a.score).slice(0, RELATED_PICTURE_LIMIT).map(({ score: _score, ...picture }) => picture);
+}
+
+/**
+ * The `related_pictures` fields a just-created page's result carries, or nothing
+ * when there are none. The agent tool and the Pages screen's REST route both
+ * return it, so a page made either way is offered what its group kept.
+ */
+export function relatedPicturesResult(db: Db, page: PageRow): Record<string, unknown> {
+  const related = relatedPagePictures(db, page);
+  if (!related.length) return {};
+  return {
+    related_pictures: related,
+    related_pictures_note: "Pictures this group saved with memories that match the page. Add the ones that belong with update_page (attachment_ids), a ticket on its own itinerary stop.",
+  };
 }

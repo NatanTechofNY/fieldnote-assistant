@@ -199,7 +199,6 @@ export interface ReflectionEvidence {
   scope_key: string;
   scope: {
     life_area_ids: string[];
-    category_ids: string[];
     sources: Array<"memories" | "todos">;
   };
   memories: Memory[];

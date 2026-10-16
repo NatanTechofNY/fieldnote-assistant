@@ -2,7 +2,7 @@ import { recentMemoryContext } from "./checkin-context.ts";
 import { DEFAULT_OWNER_EVENING_ASK, GIF_NOTE, GIF_NOTE_WITH_TOOLS, RECORDS_NOT_INSTRUCTIONS, renderAsk } from "./checkin-prompts.ts";
 import { dayTodoTitles, titleList } from "./group-checkin.ts";
 import { getReminders, OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
-import { localParts } from "./local-time.ts";
+import { localParts, todayIs } from "./local-time.ts";
 import type { Db } from "./types.ts";
 
 /** Enough for a morning summary without letting one messy day bloat the turn. */
@@ -136,7 +136,7 @@ export function composeEveningCheckinTurn(
   return [
     renderAsk(context.ask, DEFAULT_OWNER_EVENING_ASK),
     "",
-    `--- Context supplied by the app, not by me. Today is ${context.date} in ${context.timezone}.`,
+    `--- Context supplied by the app, not by me. ${todayIs(context.date, context.timezone)}`,
     "This turn uses no tools and saves nothing; my answer is the entry.",
     GIF_NOTE,
     RECORDS_NOT_INSTRUCTIONS,
@@ -178,7 +178,7 @@ export function composeDigestTurn(
   return [
     lead,
     "",
-    `--- Context supplied by the app, not by me. Today is ${context.date} in ${context.timezone}.`,
+    `--- Context supplied by the app, not by me. ${todayIs(context.date, context.timezone)}`,
     ...today.length ? ["Open todos that are due today or set to remind me today:", ...today] : [],
     ...options.includeToday && !today.length && overdue.length
       ? ["Nothing open is due today and nothing is set to remind me today, but the day is not clear:"

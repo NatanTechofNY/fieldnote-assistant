@@ -943,7 +943,7 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
         startDate: "2026-07-01", endDate: "2026-07-31", timezone: "America/New_York",
       },
       scope_key: "reflection:1234567890abcdef1234",
-      scope: { life_area_ids: [], category_ids: [], sources: ["memories", "todos"] },
+      scope: { life_area_ids: [], sources: ["memories", "todos"] },
       memories: [],
       todos: [],
       memory_candidates: [{

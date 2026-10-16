@@ -551,7 +551,6 @@ export const toolInput = {
     end_date: z.string().min(1).nullable().optional(),
     timezone,
     life_area_ids: z.array(z.string().min(1)).nullable().optional(),
-    category_ids: z.array(z.string().min(1)).nullable().optional(),
     sources: z.array(z.enum(["memories", "todos"])).nullable().optional(),
   }),
   get_todo: z.object({ id: entityId }),

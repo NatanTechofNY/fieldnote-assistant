@@ -813,6 +813,9 @@ export function holdUntilNamed(
   const voice = groupVoiceForThread(db, thread.id);
   if (voice?.replyMode !== "named_only") return false;
   if (addressesAssistant(body, voice.assistantNickname) || repliesToAssistant(db, thread.id, inbound)) return false;
+  // The person the assistant just asked something is answering it, name or no name.
+  const speakerPhone = typeof metadata.speaker === "string" ? metadata.speaker : undefined;
+  if (answersAssistant(db, thread.id, undefined, speakerPhone, "answeringQuestion")) return false;
   // A burst's earlier message that named the assistant is answered by this turn.
   const burst = burstRows(db, thread.id, providerMessageId);
   if (burst.some(row => row.forAssistant(db, thread.id, voice.assistantNickname))) return false;
@@ -967,24 +970,81 @@ function aimedAtAssistant(
   if (repliesToAssistant(db, threadId, inbound)) return true;
   if (burstRows(db, threadId, handle).some(row => row.forAssistant(db, threadId, nickname))) return true;
   if (!speakerPhone) return false;
-  // The last few rows before this one, newest first, read off the thread's
-  // (thread_id, created_at) index rather than a sort of the whole thread.
-  const earlier = db.prepare(`
-    SELECT role,created_at,json_extract(metadata_json,'$.speaker') speaker,
+  return answersAssistant(db, threadId, inboundId, speakerPhone, "carryingOn");
+}
+
+/** Whether a bubble asks something: a question mark outside any link, wherever it falls, so "Which one? 🎵" counts. */
+function asksQuestion(text: string): boolean {
+  return text.replace(/https?:\/\/\S+/g, "").includes("?");
+}
+
+/**
+ * What counts as the assistant's follow-up: `carryingOn` is anyone it has just
+ * answered, `answeringQuestion` only the person it asked something of.
+ */
+type FollowUpKind = "carryingOn" | "answeringQuestion";
+
+/**
+ * Whether this speaker is carrying on with the assistant: it replied to them a
+ * moment ago and they are answering it. Right behind its reply that holds for
+ * anything they say. Once other people have spoken in between, the room has
+ * moved on and only an answer to a question the assistant asked still counts:
+ * "Which song do you mean?", then two other people laughing, then the
+ * owner's "the one with the lyrics I sent" was held for want of the assistant's
+ * name and never answered.
+ *
+ * A question stays open until its person speaks again, however much was said
+ * by others, or by the assistant to them, in between: the thread is read back
+ * over the follow-up window, not a fixed number of rows. `inboundId` bounds the
+ * look at the rows before that message; without it (a text not filed yet) the
+ * whole window of the thread so far is read.
+ */
+function answersAssistant(
+  db: Db,
+  threadId: string,
+  inboundId: string | undefined,
+  speakerPhone: string | undefined,
+  kind: FollowUpKind,
+): boolean {
+  if (!speakerPhone) return false;
+  // Newest first, over twice the window so the text a reply answered is in view. The index seeks on (thread_id, created_at).
+  const since = new Date(Date.now() - 2 * FOLLOW_UP_WINDOW_MS).toISOString();
+  const rows = db.prepare(`
+    SELECT role,content,created_at,json_extract(metadata_json,'$.speaker') speaker,
       COALESCE(json_extract(metadata_json,'$.internal'),0) internal
     FROM channel_messages
     WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
-      AND json_extract(metadata_json,'$.reactionText') IS NULL
-      AND created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?
-    ORDER BY created_at DESC,rowid DESC LIMIT 6
-  `).all(threadId, inboundId, inboundId) as Array<{ role: string; created_at: string; speaker: string | null; internal: number }>;
-  const latest = earlier[0];
-  if (latest?.role !== "assistant" || Date.now() - Date.parse(latest.created_at) >= FOLLOW_UP_WINDOW_MS) return false;
-  // Past the assistant's reply, which may have been two bubbles, to what it answered.
-  const answered = earlier.find(row => row.role === "user");
-  // A scheduled check-in asked the room something; whoever answers it is talking to the assistant.
-  if (answered?.internal) return true;
-  return answered?.speaker === speakerPhone;
+      AND json_extract(metadata_json,'$.reactionText') IS NULL AND created_at>=?
+      ${inboundId ? "AND created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?" : ""}
+    ORDER BY created_at DESC,rowid DESC LIMIT 200
+  `).all(threadId, since, ...(inboundId ? [inboundId, inboundId] : [])) as Array<{
+    role: string; content: string; created_at: string; speaker: string | null; internal: number;
+  }>;
+  // Whether this speaker has already said something since the reply being looked at: if so, it was answered.
+  let spoken = false;
+  for (let at = 0; at < rows.length; at += 1) {
+    const row = rows[at];
+    if (row.role === "user") {
+      spoken ||= row.speaker === speakerPhone;
+      continue;
+    }
+    if (rows[at - 1]?.role === "assistant") continue;
+    // The reply may have been two bubbles; what it asked can be in either.
+    let lastBubble = at;
+    while (rows[lastBubble + 1]?.role === "assistant") lastBubble += 1;
+    // Past this one every reply is older, and the speaker has spoken since all of them.
+    if (spoken || Date.now() - Date.parse(row.created_at) >= FOLLOW_UP_WINDOW_MS) return false;
+    const asked = rows.slice(at, lastBubble + 1).some(bubble => asksQuestion(bubble.content));
+    const answered = rows.slice(lastBubble + 1).find(earlier => earlier.role === "user");
+    // A scheduled check-in asked the room something; whoever answers it is talking to the assistant.
+    const toThem = Boolean(answered?.internal) || answered?.speaker === speakerPhone;
+    const right = at === 0
+      ? kind === "carryingOn" || asked
+      : asked;
+    if (right && toThem) return true;
+    // A reply to someone else, or one that asked nothing, does not close an earlier question: keep reading back.
+  }
+  return false;
 }
 
 /** How recently the assistant has to have spoken to still be part of the exchange. */
@@ -1324,9 +1384,130 @@ async function completion(
     if (response.status === 429 || response.status >= 500) {
       throw new TransientFailure(`Agent Studio is unavailable (${response.status}): ${detail}`);
     }
+    // The model answered with nothing at all. The request was valid: asking again usually gets an answer.
+    if (response.status === 424 && namesEmptyResponse(detail)) {
+      throw new EmptyModelResponse(`Agent Studio completion failed (${response.status}): ${detail}`);
+    }
     throw new Error(`Agent Studio completion failed (${response.status}): ${detail}`);
   }
   return await response.json() as AgentMessage;
+}
+
+/** Whether a 424 body is Agent Studio's `EmptyResponseError`: its `name` field, or the word where the body is not JSON. */
+function namesEmptyResponse(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as { name?: unknown };
+    if (parsed && typeof parsed === "object") return parsed.name === "EmptyResponseError";
+  } catch {
+    // A truncated or plain-text body: fall through to the word.
+  }
+  return body.includes("EmptyResponseError");
+}
+
+/** Agent Studio's `424 EmptyResponseError`: the model returned no text and no tool call. */
+class EmptyModelResponse extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EmptyModelResponse";
+  }
+}
+
+/** How many times an empty answer is asked for again inside the turn, and how long each wait grows by. */
+const EMPTY_RESPONSE_RETRIES = 2;
+const EMPTY_RESPONSE_BACKOFF_MS = 400;
+
+/**
+ * An empty answer is asked for again in place. Failing the turn instead reran
+ * the whole of it, tools included, and an attempt that had already sent its GIF
+ * sent it again before the room was told "Sorry, I couldn't get through that
+ * one". Still empty after the retries, the error reaches the caller.
+ */
+async function completionRetryingEmpty(
+  conversationId: string,
+  messages: AgentMessage[],
+  fetcher: typeof fetch,
+  searchParameters?: Record<string, { filters: string }>,
+): Promise<AgentMessage> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await completion(conversationId, messages, fetcher, searchParameters);
+    } catch (error) {
+      if (!(error instanceof EmptyModelResponse) || attempt >= EMPTY_RESPONSE_RETRIES) throw error;
+      await new Promise(resolve => setTimeout(resolve, EMPTY_RESPONSE_BACKOFF_MS * (attempt + 1)));
+    }
+  }
+}
+
+/**
+ * The tools whose success means the room already got its answer to a message, and
+ * that cannot be run twice without the room seeing it: a GIF sent, a post to
+ * another group, or a deliberate silence. A tapback is left out: asking for it
+ * again lands on the same message and changes nothing.
+ *
+ * The cost is that a turn which failed after one of these, before the words that
+ * were to follow, is not retried and sends none. Sending the GIF or the post a
+ * second time is the worse of the two.
+ */
+const ANSWERING_TOOLS = ["send_image", "send_to_group", "stay_quiet"];
+
+/**
+ * Whether an earlier attempt at a turn already answered it. The tool rows an
+ * attempt files after its inbound row, up to the next text, say so, and the
+ * retry that follows a failure after that point has nothing left to do:
+ * running it again sends the GIF twice or goes quiet twice.
+ */
+function answeredEarlier(db: Db, threadId: string, afterRowid: number, beforeRowid?: number): boolean {
+  const records = [...RECORD_WRITE_TOOLS];
+  // A record written alongside the answer is owed a confirmation, which a turn that failed before it never sent.
+  return Boolean(db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role='tool' AND content IN (${ANSWERING_TOOLS.map(() => "?").join(",")})
+      AND json_extract(metadata_json,'$.output.success')=1
+      AND rowid>? AND (? IS NULL OR rowid<?)
+      AND NOT EXISTS (
+        SELECT 1 FROM channel_messages written
+        WHERE written.thread_id=? AND written.role='tool' AND written.content IN (${records.map(() => "?").join(",")})
+          AND json_extract(written.metadata_json,'$.output.success')=1
+          AND written.rowid>? AND (? IS NULL OR written.rowid<?)
+      )
+    LIMIT 1
+  `).get(
+    threadId, ...ANSWERING_TOOLS, afterRowid, beforeRowid ?? null, beforeRowid ?? null,
+    threadId, ...records, afterRowid, beforeRowid ?? null, beforeRowid ?? null,
+  ));
+}
+
+/** The rowid of the next text in the thread after one, where a turn's own writes stop. */
+function nextTextAfter(db: Db, threadId: string, rowid: number): number | undefined {
+  return (db.prepare(`
+    SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>? ORDER BY rowid LIMIT 1
+  `).get(threadId, rowid) as { rowid: number } | undefined)?.rowid;
+}
+
+/**
+ * Whether a text's turn already sent its answer or chose silence, for the
+ * worker to check before it tells the sender it could not get through. A GIF,
+ * a post to another group, or a chosen silence says so, and so does any bubble
+ * the turn already filed as its own (a plain reply, an "on it"): the room has
+ * been answered, and "couldn't get through" would not be true.
+ */
+export function turnAlreadyAnswered(db: Db, address: string, providerMessageId: string): boolean {
+  const thread = db.prepare("SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address=?")
+    .get(USER_ID, address) as { id: string } | undefined;
+  if (!thread) return false;
+  const inbound = db.prepare(`
+    SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND provider_message_id=? ORDER BY rowid LIMIT 1
+  `).get(thread.id, providerMessageId) as { rowid: number } | undefined;
+  if (!inbound) return false;
+  const next = nextTextAfter(db, thread.id, inbound.rowid);
+  if (answeredEarlier(db, thread.id, inbound.rowid, next)) return true;
+  return Boolean(db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role='assistant' AND status<>'failed'
+      AND COALESCE(json_extract(metadata_json,'$.kind'),'message') IN ('message','image','product_card','product_note')
+      AND rowid>? AND (? IS NULL OR rowid<?)
+    LIMIT 1
+  `).get(thread.id, inbound.rowid, next ?? null, next ?? null));
 }
 
 /**
@@ -1681,13 +1862,28 @@ export async function runChannelAgent(
     .get(inboundId) as { rowid: number }).rowid;
   // Bounded at the next text in the thread, as in the window: a turn that was
   // overtaken does not own the writes the texts behind it made.
-  const nextInbound = db.prepare(`
-    SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>? ORDER BY rowid LIMIT 1
-  `).get(thread.id, inboundRowid) as { rowid: number } | undefined;
-  const priorWrites = orphanedWrites(db, thread.id, inboundRowid, nextInbound?.rowid);
+  const nextInbound = nextTextAfter(db, thread.id, inboundRowid);
+  const priorWrites = orphanedWrites(db, thread.id, inboundRowid, nextInbound);
   const replayId = orphanedWritesMessageId(inboundId);
   if (priorWrites.length && !messages.some(message => message.id === replayId)) {
     messages.push({ id: replayId, role: "assistant", parts: priorWrites });
+  }
+  /*
+   * Agent Studio refuses a conversation that ends on an assistant message that
+   * is not a set of resolved tool results ("Conversation must end with a user
+   * message"). A retry whose earlier attempt filed a bubble of its own after
+   * the inbound row, a GIF's "(picture)" row, ended on exactly that and failed
+   * every time. Whatever trails the inbound text that is not the replay of its
+   * writes is not part of what is being answered. That holds for a turn that was
+   * overtaken too: the texts behind it stay in the window, and the reply to the
+   * last of them, which would otherwise end the conversation, does not.
+   */
+  const answeringAt = messages.indexOf(latestUserMessage);
+  if (answeringAt >= 0) {
+    while (messages.length > answeringAt + 1 && messages[messages.length - 1].role === "assistant"
+      && messages[messages.length - 1].id !== replayId) {
+      messages.pop();
+    }
   }
 
   // Best effort at both ends: a runtime tapback that fails to land, or to
@@ -1773,6 +1969,15 @@ export async function runChannelAgent(
     return undefined;
   };
 
+  // A retry of a text an earlier attempt already answered, with a GIF or with
+  // a chosen silence, has nothing left to do; its working mark comes down and
+  // the turn ends rather than doing it all over again.
+  if (!options.internal && answeredEarlier(db, thread.id, inboundRowid, nextInbound)) {
+    await setMark(undefined);
+    search.flushSoon();
+    return { text: "", threadId: thread.id, inboundMessageId: inboundId };
+  }
+
   /*
    * A group's profile is written on a scratch thread with no scope of its own,
    * so its hosted search is fenced to that group the way a group turn's is.
@@ -1830,7 +2035,21 @@ export async function runChannelAgent(
       if (Date.now() >= deadline) {
         throw new Error(`Agent exceeded its time budget of ${budgetMs / 60_000} minutes`);
       }
-      const response = await completion(thread.agent_conversation_id, messages, options.fetcher || fetch, searchParameters);
+      let response: AgentMessage;
+      try {
+        response = await completionRetryingEmpty(thread.agent_conversation_id, messages, options.fetcher || fetch, searchParameters);
+      } catch (error) {
+        if (!(error instanceof EmptyModelResponse)) throw error;
+        // Still nothing after asking again. A turn that already answered, with
+        // a GIF, a tapback, or a chosen silence, is complete as it stands;
+        // failing it would only end in an apology for a message that was
+        // answered. Otherwise the attempt fails and is tried again later.
+        const turnDidSomething = context.sentText || context.reacted || context.stayedQuiet || context.adjustedVoice;
+        if (!turnDidSomething) throw new TransientFailure(error.message, { cause: error });
+        await setMark(context.stayedQuiet && !changedRecord ? undefined : closingMark());
+        search.flushSoon();
+        return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };
+      }
       response.id ||= `alg_msg_${crypto.randomUUID().replaceAll("-", "")}`;
       /*
        * Agent Studio checks a tool call's input against the tool's schema before

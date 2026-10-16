@@ -5,7 +5,7 @@ import { getTodo, groupAreas, id, now, queueIndexJob, syncTodoReminders, USER_ID
 import { materializeRecurrence, parseRecurrence } from "./recurrence.ts";
 import {
   archivedInboundText, archiveReactionText, burstState, failAgentTurn, foldIntoNextTurn, holdUntilNamed, liftProgressMark, NO_TEXT_FALLBACK, recordOutboundChannelMessage,
-  recordOutboundProviderMessage, runSmsAgent, stageInboundPictures,
+  recordOutboundProviderMessage, runSmsAgent, stageInboundPictures, turnAlreadyAnswered,
 } from "./agent-runner.ts";
 import { composeDigestTurn, composeEveningCheckinTurn } from "./daily-digest.ts";
 import { composeBriefTurn, dueDigestBriefs } from "./digest-briefs.ts";
@@ -59,6 +59,16 @@ export type WorkerDependencies = {
    * direct `runWorkerOnce` call answers at once.
    */
   groupSettleMs?: number;
+  /**
+   * Whether bubbles sent close together in a group are answered as one turn: the
+   * settle wait and the folding into the next waiting text. Off unless asked
+   * for, with `GROUP_BURSTS=1` or here: folded, every tapback landed on the
+   * burst's last bubble and each reply waited on the whole burst. Without it,
+   * each text is its own turn, answered and marked in the order it was sent.
+   * A backlog (texts the worker reaches long after they arrived) is still folded
+   * into a few turns either way.
+   */
+  groupBursts?: boolean;
   /** Whether a pass sweeps quiet conversations for facts to keep. The running worker does; a direct call does not. */
   memorySweeps?: boolean;
 };
@@ -69,6 +79,13 @@ export const GROUP_SETTLE_MS = 3_000;
 const MAX_BURST_MS = 15_000;
 /** The most messages one turn answers together, so a long backlog is answered in a few turns and not in hundreds. */
 const MAX_BURST_MESSAGES = 40;
+/**
+ * How old a group text is when the worker reaches it before it is called a
+ * backlog. A text this old means the worker was away or is behind, and folding
+ * is then the only way to catch up: a turn each would grow the queue faster than
+ * it drains. Folding stays on for a backlog even while bursts are off.
+ */
+const BACKLOG_AFTER_MS = 120_000;
 
 /**
  * Inbound texts are queued verbatim in the provider's own vocabulary, so each
@@ -295,6 +312,9 @@ async function giveUpOnTurn(
   const address = inboundAddress(message);
   // The progress tapback was left up for a retry that is no longer coming.
   if (source === "sendblue" && message.messageId) await liftProgressMark(db, address, message.messageId);
+  // A text whose GIF went out, or which the agent chose to leave alone, was
+  // answered: the failure came after, and "couldn't get through" would be false.
+  if (message.messageId && turnAlreadyAnswered(db, address, message.messageId)) return;
   let sent: Awaited<ReturnType<typeof sendSms>>;
   try {
     // Threaded under the text it is about: by now the texts behind it have
@@ -1256,6 +1276,7 @@ export async function runWorkerOnce(
   const runAgent = dependencies.runSmsAgent || runSmsAgent;
   const pollMeetings = dependencies.pollGranola || pollGranola;
   const showTyping = dependencies.startTypingIndicator || startTypingIndicator;
+  const bursts = dependencies.groupBursts ?? process.env.GROUP_BURSTS === "1";
   for (const { source, read } of INBOUND_SOURCES) {
     for (const event of claimExternalEvents(db, source, 20)) {
       let stopTyping: StopTypingIndicator | null = null;
@@ -1286,7 +1307,7 @@ export async function runWorkerOnce(
           continue;
         }
         const settleUntil = Date.parse(event.created_at) + (dependencies.groupSettleMs ?? 0);
-        if (group && settleUntil > Date.now()) {
+        if (group && bursts && settleUntil > Date.now()) {
           deferExternalEvent(db, event.id, new Date(settleUntil).toISOString());
           continue;
         }
@@ -1321,7 +1342,8 @@ export async function runWorkerOnce(
         // Another message from the group is already queued: that turn answers
         // this one with it — unless the burst has been gathering long enough
         // (in time or in messages) that it is owed an answer now.
-        const next = group && !retrying && message.messageId ? nextTextWaiting(db, source, read, event, address, true) : undefined;
+        const behind = Date.now() - Date.parse(event.created_at) > BACKLOG_AFTER_MS;
+        const next = (bursts || behind) && group && !retrying && message.messageId ? nextTextWaiting(db, source, read, event, address, true) : undefined;
         /*
          * How long the burst has been gathering is measured from when the worker
          * began filing it, not from when its first text arrived. After an outage

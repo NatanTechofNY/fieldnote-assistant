@@ -112,12 +112,13 @@ export function reflectionPeriod(
 
 export function reflectionScopeKey(
   period: ReflectionPeriod,
-  filters: { lifeAreaIds: string[]; categoryIds: string[]; sources: string[] },
+  filters: { lifeAreaIds: string[]; sources: string[] },
 ): string {
   const scope = JSON.stringify({
     period: period.key,
     lifeAreas: [...filters.lifeAreaIds].sort(),
-    categories: [...filters.categoryIds].sort(),
+    // Reflections no longer filter by category. The empty list stays in the hash so a draft kept under an earlier key is still found.
+    categories: [],
     sources: [...filters.sources].sort(),
   });
   return `reflection:${createHash("sha256").update(scope).digest("hex").slice(0, 20)}`;

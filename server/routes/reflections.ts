@@ -47,7 +47,6 @@ export function registerReflectionRoutes({ app, db, search, draftWithAgent }: Ro
       period: reflectionPeriod(preset, timezone, { startDate, endDate }),
       filters: {
         lifeAreaIds: list("life_area_ids"),
-        categoryIds: list("category_ids"),
         sources: (sources.length ? sources : ["memories", "todos"]) as Array<"memories" | "todos">,
       },
     };
@@ -118,7 +117,7 @@ export function registerReflectionRoutes({ app, db, search, draftWithAgent }: Ro
     const prompt = [
       `Draft a personal reflection for ${period.label}.`,
       `Call get_reflection_evidence with preset=${period.preset}, start_date=${period.startDate}, end_date=${period.endDate}, timezone=${period.timezone},`,
-      `life_area_ids=${JSON.stringify(filters.lifeAreaIds)}, category_ids=${JSON.stringify(filters.categoryIds)}, sources=${JSON.stringify(filters.sources)}.`,
+      `life_area_ids=${JSON.stringify(filters.lifeAreaIds)}, sources=${JSON.stringify(filters.sources)}.`,
       "Use only the rows in the returned todos and memories arrays, which are the ones I selected. Ignore todo_candidates and memory_candidates: those cover the whole range, including what I chose to leave out.",
       "Organize concise grounded notes under Highlights, Progress, Lessons, and Next steps.",
       "Include the supporting memory or todo title in parentheses when available. Never invent outcomes.",
