@@ -973,6 +973,11 @@ function aimedAtAssistant(
   return answersAssistant(db, threadId, inboundId, speakerPhone, "carryingOn");
 }
 
+/** Whether a bubble asks something: a question mark outside any link, wherever it falls, so "Which one? 🎵" counts. */
+function asksQuestion(text: string): boolean {
+  return text.replace(/https?:\/\/\S+/g, "").includes("?");
+}
+
 /**
  * What counts as the assistant's follow-up: `carryingOn` is anyone it has just
  * answered, `answeringQuestion` only the person it asked something of.
@@ -1029,7 +1034,7 @@ function answersAssistant(
     while (rows[lastBubble + 1]?.role === "assistant") lastBubble += 1;
     // Past this one every reply is older, and the speaker has spoken since all of them.
     if (spoken || Date.now() - Date.parse(row.created_at) >= FOLLOW_UP_WINDOW_MS) return false;
-    const asked = rows.slice(at, lastBubble + 1).some(bubble => /\?\s*$/.test(bubble.content.trim()));
+    const asked = rows.slice(at, lastBubble + 1).some(bubble => asksQuestion(bubble.content));
     const answered = rows.slice(lastBubble + 1).find(earlier => earlier.role === "user");
     // A scheduled check-in asked the room something; whoever answers it is talking to the assistant.
     const toThem = Boolean(answered?.internal) || answered?.speaker === speakerPhone;
@@ -1452,13 +1457,24 @@ const ANSWERING_TOOLS = ["send_image", "send_to_group", "stay_quiet"];
  * running it again sends the GIF twice or goes quiet twice.
  */
 function answeredEarlier(db: Db, threadId: string, afterRowid: number, beforeRowid?: number): boolean {
+  const records = [...RECORD_WRITE_TOOLS];
+  // A record written alongside the answer is owed a confirmation, which a turn that failed before it never sent.
   return Boolean(db.prepare(`
     SELECT 1 found FROM channel_messages
     WHERE thread_id=? AND role='tool' AND content IN (${ANSWERING_TOOLS.map(() => "?").join(",")})
       AND json_extract(metadata_json,'$.output.success')=1
       AND rowid>? AND (? IS NULL OR rowid<?)
+      AND NOT EXISTS (
+        SELECT 1 FROM channel_messages written
+        WHERE written.thread_id=? AND written.role='tool' AND written.content IN (${records.map(() => "?").join(",")})
+          AND json_extract(written.metadata_json,'$.output.success')=1
+          AND written.rowid>? AND (? IS NULL OR written.rowid<?)
+      )
     LIMIT 1
-  `).get(threadId, ...ANSWERING_TOOLS, afterRowid, beforeRowid ?? null, beforeRowid ?? null));
+  `).get(
+    threadId, ...ANSWERING_TOOLS, afterRowid, beforeRowid ?? null, beforeRowid ?? null,
+    threadId, ...records, afterRowid, beforeRowid ?? null, beforeRowid ?? null,
+  ));
 }
 
 /** The rowid of the next text in the thread after one, where a turn's own writes stop. */

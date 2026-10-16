@@ -2516,6 +2516,21 @@ describe("SMS, reminders, and channel agent execution", () => {
       insert.run("cm_post", threadId, "outbound", "tool", "send_to_group", null, '{"output":{"success":true},"toolCallId":"call_2"}', stamp, stamp);
       assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_tell"), true, "a post cannot be repeated unseen");
     });
+
+    it("still owes a confirmation for a record written after the turn went quiet", async () => {
+      const { db } = fixture();
+      const threadId = recordOutboundChannelMessage(db, "sms", "+17185551111", "earlier", "SB_earlier").threadId;
+      const stamp = new Date().toISOString();
+      const insert = db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,'received',?,?,?)
+      `);
+      insert.run("cm_ask3", threadId, "inbound", "user", "add milk", "SB_milk", "{}", stamp, stamp);
+      insert.run("cm_q3", threadId, "outbound", "tool", "stay_quiet", null, '{"output":{"success":true},"toolCallId":"call_1"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_milk"), true);
+      insert.run("cm_w3", threadId, "outbound", "tool", "create_todo", null, '{"output":{"success":true},"toolCallId":"call_2"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_milk"), false, "the todo was written and nobody was told");
+    });
   });
 
   /*
@@ -7834,6 +7849,13 @@ describe("Sendblue provider", () => {
     };
     said(RECIPIENT, "the one with the lyrics I sent", "SB_owner_1");
     assert.equal(holdUntilNamed(db, address, "ok", "SB_owner_1b", inbound, owner), true, "answered, so what follows is the room's again");
+
+    // A question with something after it still asks, and a link's own question mark does not.
+    recordOutboundChannelMessage(db, "sms", address, "Which one? 🎵 I can look it up.", "SB_which_one");
+    assert.equal(holdUntilNamed(db, address, "the first", "SB_owner_1c", inbound, owner), false);
+    said(RECIPIENT, "the first", "SB_owner_1c");
+    recordOutboundChannelMessage(db, "sms", address, "Here it is: https://example.com/watch?v=abc", "SB_link");
+    assert.equal(holdUntilNamed(db, address, "thanks", "SB_owner_1d", inbound, owner), true, "a link is not a question");
 
     // A statement from the assistant is not a question, so what follows it is still the room's.
     recordOutboundChannelMessage(db, "sms", address, "Done, it is on the list.", "SB_done");
