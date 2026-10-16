@@ -225,11 +225,12 @@ const TOPIC_STOPWORDS = new Set([
 const topicWords = (text: string): string[] =>
   [...new Set(text.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? [])].filter(word => !TOPIC_STOPWORDS.has(word));
 
-export type RelatedPicture = {
+/** The most pictures one page is offered. */
+const RELATED_PICTURE_LIMIT = 5;
+
+type RelatedPicture = {
   attachment_id: string;
   description: string | null;
-  kind: string;
-  memory_id: string;
   memory_title: string | null;
 };
 
@@ -246,7 +247,7 @@ export type RelatedPicture = {
  * the group's own name, which every memory of the group shares, in its title,
  * text, and what its pictures say. Pictures already on the page are left out.
  */
-export function relatedPagePictures(db: Db, page: PageRow, limit = 5): RelatedPicture[] {
+function relatedPagePictures(db: Db, page: PageRow): RelatedPicture[] {
   if (!page.life_area_id || !page.group_id) return [];
   const area = db.prepare("SELECT name FROM life_areas WHERE id=? AND user_id=?").get(page.life_area_id, USER_ID) as { name: string | null } | undefined;
   const groupWords = new Set(topicWords(area?.name ?? ""));
@@ -274,11 +275,11 @@ export function relatedPagePictures(db: Db, page: PageRow, limit = 5): RelatedPi
       seen.add(picture.id);
       found.push({
         attachment_id: picture.id, description: picture.description ? picture.description.slice(0, 200) : null,
-        kind: picture.kind, memory_id: memory.id, memory_title: memory.title, score,
+        memory_title: memory.title, score,
       });
     }
   }
-  return found.sort((a, b) => b.score - a.score).slice(0, limit).map(({ score: _score, ...picture }) => picture);
+  return found.sort((a, b) => b.score - a.score).slice(0, RELATED_PICTURE_LIMIT).map(({ score: _score, ...picture }) => picture);
 }
 
 /**

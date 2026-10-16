@@ -3327,6 +3327,7 @@ describe("web tools", () => {
     assert.equal(namesOtherWeekday("Happy Monday GIF by Brand", "Friday"), true);
     assert.equal(namesOtherWeekday("Happy Mondays", "Friday"), true);
     assert.equal(namesOtherWeekday("Happy Friday dance", "Friday"), false, "today's own name is welcome");
+    assert.equal(namesOtherWeekday("Friday, not Monday", "Friday"), false, "a title that names today as well is left alone");
     assert.equal(namesOtherWeekday("Monday Mon Sunday-funday", "Friday"), true);
     assert.equal(namesOtherWeekday("Monkey business", "Friday"), false, "a weekday inside a word is not one");
 
@@ -7157,7 +7158,11 @@ describe("Sendblue provider", () => {
     const retry = agentCallingMany([], "Made all sixteen.");
     await runSmsAgent(db, search, address, "yes, make those todos", "SB_yes", groupTurnOptions(retry.fetcher));
     const retryWindow = retry.requests[0].messages as Message[];
-    assert.deepEqual(retryWindow.map(message => message.role), ["user", "assistant", "user", "assistant"]);
+    assert.deepEqual(
+      retryWindow.map(message => message.role),
+      ["user", "assistant", "user"],
+      "the reply to the text behind it would end the window on an assistant bubble, which Agent Studio refuses",
+    );
     assert.equal(retryWindow.filter(message => message.id.startsWith("alg_msg_writes_")).length, 1);
     assert.equal(retryWindow[1].parts.length, 16, "and they sit right after the message they answer");
     assert.equal(new Set(retryWindow.map(message => message.id)).size, retryWindow.length);
@@ -7279,6 +7284,67 @@ describe("Sendblue provider", () => {
     db.prepare("UPDATE external_events SET status='failed',attempts=4,available_at=? WHERE id=?").run(new Date(Date.now() + 3600_000).toISOString(), stuck);
     await runWorkerOnce(db, fakeSearch(db), worker);
     assert.deepEqual(turns, ["hello?"], "ordering is worth a few short retries, not an hour of silence");
+  });
+
+  it("ends a turn that already went quiet, rather than failing it, when the model then answers with nothing", async () => {
+    const { db } = connectedFixture();
+    agentStudioEnv();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    await runSmsAgent(db, fakeSearch(db), `group:${GROUP}`, "hi, this is Sarah", "SB_intro_q", groupTurnOptions(agentCallingMany([], "Hi Sarah!").fetcher, RECIPIENT, "the owner"));
+    let round = 0;
+    const quietThenNothing: typeof fetch = async () => {
+      round += 1;
+      return round === 1
+        ? new Response(JSON.stringify({
+          role: "assistant",
+          parts: [{ type: "tool-stay_quiet", tool_call_id: "call_quiet", state: "input-available", input: { reason: "just chatter" } }],
+        }), { status: 200 })
+        : new Response(JSON.stringify({ name: "EmptyResponseError", message: "The model returned an empty response." }), { status: 424 });
+    };
+    const response = await runSmsAgent(db, fakeSearch(db), `group:${GROUP}`, "lol", "SB_quiet_empty", groupTurnOptions(quietThenNothing));
+    assert.equal(response.text, "");
+    assert.equal(round, 4, "the quiet call, then one try and two more");
+  });
+
+  it("sends no give-up text for a message the assistant already answered", async () => {
+    const { db, api } = connectedFixture();
+    withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
+    const sends: string[] = [];
+    const worker = {
+      sendSms: async (_db: Db, _to: string, body: string) => { sends.push(body); return { sid: `SB_${sends.length}`, status: "queued" as const }; },
+      runSmsAgent: async () => { throw new Error("the model broke after the turn had answered"); },
+      pollGranola: async () => ({ fetched: 0, queued: 0 }),
+      startTypingIndicator: () => () => {},
+    };
+    const status = (content: string) => (db.prepare("SELECT status FROM external_events WHERE json_extract(payload_json,'$.content')=?")
+      .get(content) as { status: string }).status;
+    const dueNow = () => db.prepare("UPDATE external_events SET available_at=? WHERE status IN ('failed','pending')").run(new Date(Date.now() - 1000).toISOString());
+    const threadId = recordOutboundChannelMessage(db, "sms", `group:${GROUP}`, "earlier reply", "SB_earlier").threadId;
+    const stamp = new Date().toISOString();
+    const insert = db.prepare(`
+      INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,'received',?,?,?)
+    `);
+    // One text whose turn went quiet on purpose before it failed, one whose turn had sent a bubble of its own.
+    const quiet = groupMessage(WIFE, "just chatter");
+    const spoke = groupMessage(WIFE, "ask me something");
+    const unanswered = groupMessage(WIFE, "no luck at all");
+    for (const payload of [quiet, spoke, unanswered]) {
+      await api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(payload).expect(200);
+    }
+    insert.run("cm_quiet", threadId, "inbound", "user", "just chatter", quiet.message_handle, "{}", stamp, stamp);
+    insert.run("cm_quiet_tool", threadId, "outbound", "tool", "stay_quiet", null, '{"output":{"success":true},"toolCallId":"call_q"}', stamp, stamp);
+    insert.run("cm_spoke", threadId, "inbound", "user", "ask me something", spoke.message_handle, "{}", stamp, stamp);
+    insert.run("cm_spoke_reply", threadId, "outbound", "assistant", "On it.", null, '{"kind":"message"}', stamp, stamp);
+    insert.run("cm_none", threadId, "inbound", "user", "no luck at all", unanswered.message_handle, "{}", stamp, stamp);
+
+    // Each text holds the ones behind it until it settles, so the three take their turns in order.
+    for (let pass = 0; pass < 3 * MAX_EVENT_ATTEMPTS_FINAL; pass += 1) {
+      await runWorkerOnce(db, fakeSearch(db), worker);
+      dueNow();
+    }
+    assert.deepEqual([status("just chatter"), status("ask me something"), status("no luck at all")], ["ignored", "ignored", "ignored"]);
+    assert.deepEqual(sends, [GAVE_UP_TEXT], "only the text nothing was answered for is told, and once");
   });
 
   /*
@@ -7758,9 +7824,28 @@ describe("Sendblue provider", () => {
     assert.equal(holdUntilNamed(db, address, "the one with the lyrics I sent", "SB_owner_1", inbound, owner), false, "the person it asked is answering, others in between or not");
     assert.equal(holdUntilNamed(db, address, "lol", "SB_sarah_2", inbound, sarah), true);
 
+    // The owner's answer is filed as a held message would be, and that closes the question.
+    const said = (speaker: string, text: string, handle: string) => {
+      const stamp = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+        VALUES(?,?,'inbound','user',?,?,'received',?,?,?)
+      `).run(`cm_${handle}`, threadId, text, handle, JSON.stringify({ speaker }), stamp, stamp);
+    };
+    said(RECIPIENT, "the one with the lyrics I sent", "SB_owner_1");
+    assert.equal(holdUntilNamed(db, address, "ok", "SB_owner_1b", inbound, owner), true, "answered, so what follows is the room's again");
+
     // A statement from the assistant is not a question, so what follows it is still the room's.
     recordOutboundChannelMessage(db, "sms", address, "Done, it is on the list.", "SB_done");
     assert.equal(holdUntilNamed(db, address, "nice", "SB_owner_2", inbound, owner), true);
+
+    // A question stays open past a long stretch of room talk, and past the assistant's own remark to someone else.
+    recordOutboundChannelMessage(db, "sms", address, "Which day works?", "SB_which_day");
+    for (let i = 0; i < 20; i += 1) said(WIFE, `chatter ${i}`, `SB_chatter_${i}`);
+    recordOutboundChannelMessage(db, "sms", address, "Agreed, Sarah.", "SB_agreed");
+    said(WIFE, "ha", "SB_chatter_end");
+    assert.equal(holdUntilNamed(db, address, "saturday", "SB_owner_3", inbound, owner), false, "still the owner's question to answer");
+    assert.equal(holdUntilNamed(db, address, "me too", "SB_sarah_3", inbound, sarah), true, "and not Sarah's");
   });
 
   /*

@@ -1,7 +1,7 @@
 import { describeJiraBoards } from "./atlassian-service.ts";
 import { GIF_NOTE_WITH_TOOLS } from "./checkin-prompts.ts";
 import { USER_ID } from "./db.ts";
-import { dayWithWeekday } from "./local-time.ts";
+import { todayIs } from "./local-time.ts";
 import type { Db, DigestBriefResource, DigestBriefRow } from "./types.ts";
 
 /** `sendSms` truncates at 1500, so the draft is asked to stop short of that. */
@@ -94,7 +94,7 @@ export async function composeBriefTurn(
   return [
     brief.prompt,
     "",
-    `--- Context supplied by the app, not by me. Today is ${dayWithWeekday(context.date)} in ${context.timezone}.`,
+    `--- Context supplied by the app, not by me. ${todayIs(context.date, context.timezone)}`,
     "This covers my own records. Group chats' notes and open todos belong to their own check-ins and are left out. Reflection evidence also lists, as group_todos_done, tasks completed in group chats today by chat; anyone in the chat may have finished them, so do not say I did.",
     ...catalog,
     catalog.length

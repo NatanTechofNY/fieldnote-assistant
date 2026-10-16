@@ -815,7 +815,7 @@ export function holdUntilNamed(
   if (addressesAssistant(body, voice.assistantNickname) || repliesToAssistant(db, thread.id, inbound)) return false;
   // The person the assistant just asked something is answering it, name or no name.
   const speakerPhone = typeof metadata.speaker === "string" ? metadata.speaker : undefined;
-  if (answersAssistant(db, thread.id, undefined, speakerPhone, true)) return false;
+  if (answersAssistant(db, thread.id, undefined, speakerPhone, "answeringQuestion")) return false;
   // A burst's earlier message that named the assistant is answered by this turn.
   const burst = burstRows(db, thread.id, providerMessageId);
   if (burst.some(row => row.forAssistant(db, thread.id, voice.assistantNickname))) return false;
@@ -970,8 +970,14 @@ function aimedAtAssistant(
   if (repliesToAssistant(db, threadId, inbound)) return true;
   if (burstRows(db, threadId, handle).some(row => row.forAssistant(db, threadId, nickname))) return true;
   if (!speakerPhone) return false;
-  return answersAssistant(db, threadId, inboundId, speakerPhone, false);
+  return answersAssistant(db, threadId, inboundId, speakerPhone, "carryingOn");
 }
+
+/**
+ * What counts as the assistant's follow-up: `carryingOn` is anyone it has just
+ * answered, `answeringQuestion` only the person it asked something of.
+ */
+type FollowUpKind = "carryingOn" | "answeringQuestion";
 
 /**
  * Whether this speaker is carrying on with the assistant: it replied to them a
@@ -982,48 +988,58 @@ function aimedAtAssistant(
  * owner's "the one with the lyrics I sent" was held for want of the assistant's
  * name and never answered.
  *
- * `inboundId` bounds the look at the rows before that message; without it (a
- * text not filed yet) the whole thread so far is read. `askedOnly` is for a
- * caller that lets a message past a hold: there the answer has to be to a
- * question even when nobody else spoke.
+ * A question stays open until its person speaks again, however much was said
+ * by others, or by the assistant to them, in between: the thread is read back
+ * over the follow-up window, not a fixed number of rows. `inboundId` bounds the
+ * look at the rows before that message; without it (a text not filed yet) the
+ * whole window of the thread so far is read.
  */
 function answersAssistant(
   db: Db,
   threadId: string,
   inboundId: string | undefined,
   speakerPhone: string | undefined,
-  askedOnly: boolean,
+  kind: FollowUpKind,
 ): boolean {
   if (!speakerPhone) return false;
-  // The last few rows before this one, newest first, read off the thread's
-  // (thread_id, created_at) index rather than a sort of the whole thread.
-  type Earlier = { role: string; content: string; created_at: string; speaker: string | null; internal: number };
-  const columns = `
+  // Newest first, over twice the window so the text a reply answered is in view. The index seeks on (thread_id, created_at).
+  const since = new Date(Date.now() - 2 * FOLLOW_UP_WINDOW_MS).toISOString();
+  const rows = db.prepare(`
     SELECT role,content,created_at,json_extract(metadata_json,'$.speaker') speaker,
       COALESCE(json_extract(metadata_json,'$.internal'),0) internal
     FROM channel_messages
     WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
-      AND json_extract(metadata_json,'$.reactionText') IS NULL`;
-  // Two statements rather than one with an optional bound: a range on created_at lets the index seek straight to the inbound row.
-  const earlier = (inboundId
-    ? db.prepare(`${columns}
-      AND created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?
-      ORDER BY created_at DESC,rowid DESC LIMIT 12`).all(threadId, inboundId, inboundId)
-    : db.prepare(`${columns}
-      ORDER BY created_at DESC,rowid DESC LIMIT 12`).all(threadId)) as Earlier[];
-  const lastSaid = earlier.findIndex(row => row.role === "assistant");
-  if (lastSaid < 0 || Date.now() - Date.parse(earlier[lastSaid].created_at) >= FOLLOW_UP_WINDOW_MS) return false;
-  // The reply may have been two bubbles; what it asked can be in either.
-  let firstBubble = lastSaid;
-  while (earlier[firstBubble + 1]?.role === "assistant") firstBubble += 1;
-  const asked = earlier.slice(lastSaid, firstBubble + 1).some(row => /\?\s*$/.test(row.content.trim()));
-  // Past the assistant's reply to what it answered.
-  const answered = earlier.slice(firstBubble + 1).find(row => row.role === "user");
-  if (lastSaid > 0 && !asked) return false;
-  if (lastSaid === 0 && askedOnly && !asked) return false;
-  // A scheduled check-in asked the room something; whoever answers it is talking to the assistant.
-  if (answered?.internal) return true;
-  return answered?.speaker === speakerPhone;
+      AND json_extract(metadata_json,'$.reactionText') IS NULL AND created_at>=?
+      ${inboundId ? "AND created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?" : ""}
+    ORDER BY created_at DESC,rowid DESC LIMIT 200
+  `).all(threadId, since, ...(inboundId ? [inboundId, inboundId] : [])) as Array<{
+    role: string; content: string; created_at: string; speaker: string | null; internal: number;
+  }>;
+  // Whether this speaker has already said something since the reply being looked at: if so, it was answered.
+  let spoken = false;
+  for (let at = 0; at < rows.length; at += 1) {
+    const row = rows[at];
+    if (row.role === "user") {
+      spoken ||= row.speaker === speakerPhone;
+      continue;
+    }
+    if (rows[at - 1]?.role === "assistant") continue;
+    // The reply may have been two bubbles; what it asked can be in either.
+    let lastBubble = at;
+    while (rows[lastBubble + 1]?.role === "assistant") lastBubble += 1;
+    // Past this one every reply is older, and the speaker has spoken since all of them.
+    if (spoken || Date.now() - Date.parse(row.created_at) >= FOLLOW_UP_WINDOW_MS) return false;
+    const asked = rows.slice(at, lastBubble + 1).some(bubble => /\?\s*$/.test(bubble.content.trim()));
+    const answered = rows.slice(lastBubble + 1).find(earlier => earlier.role === "user");
+    // A scheduled check-in asked the room something; whoever answers it is talking to the assistant.
+    const toThem = Boolean(answered?.internal) || answered?.speaker === speakerPhone;
+    const right = at === 0
+      ? kind === "carryingOn" || asked
+      : asked;
+    if (right && toThem) return true;
+    // A reply to someone else, or one that asked nothing, does not close an earlier question: keep reading back.
+  }
+  return false;
 }
 
 /** How recently the assistant has to have spoken to still be part of the exchange. */
@@ -1364,12 +1380,23 @@ async function completion(
       throw new TransientFailure(`Agent Studio is unavailable (${response.status}): ${detail}`);
     }
     // The model answered with nothing at all. The request was valid: asking again usually gets an answer.
-    if (response.status === 424 && detail.includes("EmptyResponseError")) {
+    if (response.status === 424 && namesEmptyResponse(detail)) {
       throw new EmptyModelResponse(`Agent Studio completion failed (${response.status}): ${detail}`);
     }
     throw new Error(`Agent Studio completion failed (${response.status}): ${detail}`);
   }
   return await response.json() as AgentMessage;
+}
+
+/** Whether a 424 body is Agent Studio's `EmptyResponseError`: its `name` field, or the word where the body is not JSON. */
+function namesEmptyResponse(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as { name?: unknown };
+    if (parsed && typeof parsed === "object") return parsed.name === "EmptyResponseError";
+  } catch {
+    // A truncated or plain-text body: fall through to the word.
+  }
+  return body.includes("EmptyResponseError");
 }
 
 /** Agent Studio's `424 EmptyResponseError`: the model returned no text and no tool call. */
@@ -1434,9 +1461,19 @@ function answeredEarlier(db: Db, threadId: string, afterRowid: number, beforeRow
   `).get(threadId, ...ANSWERING_TOOLS, afterRowid, beforeRowid ?? null, beforeRowid ?? null));
 }
 
+/** The rowid of the next text in the thread after one, where a turn's own writes stop. */
+function nextTextAfter(db: Db, threadId: string, rowid: number): number | undefined {
+  return (db.prepare(`
+    SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>? ORDER BY rowid LIMIT 1
+  `).get(threadId, rowid) as { rowid: number } | undefined)?.rowid;
+}
+
 /**
  * Whether a text's turn already sent its answer or chose silence, for the
- * worker to check before it tells the sender it could not get through.
+ * worker to check before it tells the sender it could not get through. A GIF,
+ * a post to another group, or a chosen silence says so, and so does any bubble
+ * the turn already filed as its own (a plain reply, an "on it"): the room has
+ * been answered, and "couldn't get through" would not be true.
  */
 export function turnAlreadyAnswered(db: Db, address: string, providerMessageId: string): boolean {
   const thread = db.prepare("SELECT id FROM channel_threads WHERE user_id=? AND channel='sms' AND address=?")
@@ -1446,10 +1483,15 @@ export function turnAlreadyAnswered(db: Db, address: string, providerMessageId: 
     SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND provider_message_id=? ORDER BY rowid LIMIT 1
   `).get(thread.id, providerMessageId) as { rowid: number } | undefined;
   if (!inbound) return false;
-  const next = db.prepare(`
-    SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>? ORDER BY rowid LIMIT 1
-  `).get(thread.id, inbound.rowid) as { rowid: number } | undefined;
-  return answeredEarlier(db, thread.id, inbound.rowid, next?.rowid);
+  const next = nextTextAfter(db, thread.id, inbound.rowid);
+  if (answeredEarlier(db, thread.id, inbound.rowid, next)) return true;
+  return Boolean(db.prepare(`
+    SELECT 1 found FROM channel_messages
+    WHERE thread_id=? AND role='assistant' AND status<>'failed'
+      AND COALESCE(json_extract(metadata_json,'$.kind'),'message') IN ('message','image','product_card','product_note')
+      AND rowid>? AND (? IS NULL OR rowid<?)
+    LIMIT 1
+  `).get(thread.id, inbound.rowid, next ?? null, next ?? null));
 }
 
 /**
@@ -1804,10 +1846,8 @@ export async function runChannelAgent(
     .get(inboundId) as { rowid: number }).rowid;
   // Bounded at the next text in the thread, as in the window: a turn that was
   // overtaken does not own the writes the texts behind it made.
-  const nextInbound = db.prepare(`
-    SELECT rowid FROM channel_messages WHERE thread_id=? AND role='user' AND rowid>? ORDER BY rowid LIMIT 1
-  `).get(thread.id, inboundRowid) as { rowid: number } | undefined;
-  const priorWrites = orphanedWrites(db, thread.id, inboundRowid, nextInbound?.rowid);
+  const nextInbound = nextTextAfter(db, thread.id, inboundRowid);
+  const priorWrites = orphanedWrites(db, thread.id, inboundRowid, nextInbound);
   const replayId = orphanedWritesMessageId(inboundId);
   if (priorWrites.length && !messages.some(message => message.id === replayId)) {
     messages.push({ id: replayId, role: "assistant", parts: priorWrites });
@@ -1818,11 +1858,12 @@ export async function runChannelAgent(
    * message"). A retry whose earlier attempt filed a bubble of its own after
    * the inbound row, a GIF's "(picture)" row, ended on exactly that and failed
    * every time. Whatever trails the inbound text that is not the replay of its
-   * writes is not part of what is being answered. A turn that was overtaken has
-   * later texts after it, and what follows those is theirs, so it is left.
+   * writes is not part of what is being answered. That holds for a turn that was
+   * overtaken too: the texts behind it stay in the window, and the reply to the
+   * last of them, which would otherwise end the conversation, does not.
    */
   const answeringAt = messages.indexOf(latestUserMessage);
-  if (answeringAt >= 0 && !messages.slice(answeringAt + 1).some(message => message.role === "user")) {
+  if (answeringAt >= 0) {
     while (messages.length > answeringAt + 1 && messages[messages.length - 1].role === "assistant"
       && messages[messages.length - 1].id !== replayId) {
       messages.pop();
@@ -1915,7 +1956,7 @@ export async function runChannelAgent(
   // A retry of a text an earlier attempt already answered, with a GIF or with
   // a chosen silence, has nothing left to do; its working mark comes down and
   // the turn ends rather than doing it all over again.
-  if (!options.internal && answeredEarlier(db, thread.id, inboundRowid, nextInbound?.rowid)) {
+  if (!options.internal && answeredEarlier(db, thread.id, inboundRowid, nextInbound)) {
     await setMark(undefined);
     search.flushSoon();
     return { text: "", threadId: thread.id, inboundMessageId: inboundId };
@@ -1987,8 +2028,8 @@ export async function runChannelAgent(
         // a GIF, a tapback, or a chosen silence, is complete as it stands;
         // failing it would only end in an apology for a message that was
         // answered. Otherwise the attempt fails and is tried again later.
-        const answered = context.sentText || context.reacted || context.stayedQuiet || context.adjustedVoice;
-        if (!answered) throw new TransientFailure(error.message, { cause: error });
+        const turnDidSomething = context.sentText || context.reacted || context.stayedQuiet || context.adjustedVoice;
+        if (!turnDidSomething) throw new TransientFailure(error.message, { cause: error });
         await setMark(context.stayedQuiet && !changedRecord ? undefined : closingMark());
         search.flushSoon();
         return { text: "", threadId: thread.id, replyTo: context.replyToMessageHandle, inboundMessageId: inboundId };

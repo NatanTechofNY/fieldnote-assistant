@@ -7,7 +7,7 @@
 
 import { RECORDS_NOT_INSTRUCTIONS } from "./checkin-prompts.ts";
 import { now, OWN_AREA_CLAUSE, USER_ID } from "./db.ts";
-import { dayWithWeekday, localParts } from "./local-time.ts";
+import { localParts, todayIs } from "./local-time.ts";
 import type { Db } from "./types.ts";
 
 /** A due time has to be this far behind before it counts as dropped, so "tonight" is asked about the next day. */
@@ -80,7 +80,7 @@ export function composeFollowUpTurn(items: FollowUpItem[], context: { date: stri
     "Write me one short text following up on what I said I would do and have not marked done.",
     "Ask, like a person would, whether it happened or when to move it. One or two plain sentences; name the things the way I would; no list, no guilt, and nothing else.",
     "",
-    `--- Context supplied by the app, not by me. Today is ${dayWithWeekday(context.date)} in ${context.timezone}.`,
+    `--- Context supplied by the app, not by me. ${todayIs(context.date, context.timezone)}`,
     "This turn uses no tools; my reply to it is where anything gets marked done or moved.",
     RECORDS_NOT_INSTRUCTIONS,
     ...lines,
