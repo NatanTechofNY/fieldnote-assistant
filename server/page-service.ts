@@ -280,3 +280,17 @@ export function relatedPagePictures(db: Db, page: PageRow, limit = 5): RelatedPi
   }
   return found.sort((a, b) => b.score - a.score).slice(0, limit).map(({ score: _score, ...picture }) => picture);
 }
+
+/**
+ * The `related_pictures` fields a just-created page's result carries, or nothing
+ * when there are none. The agent tool and the Pages screen's REST route both
+ * return it, so a page made either way is offered what its group kept.
+ */
+export function relatedPicturesResult(db: Db, page: PageRow): Record<string, unknown> {
+  const related = relatedPagePictures(db, page);
+  if (!related.length) return {};
+  return {
+    related_pictures: related,
+    related_pictures_note: "Pictures this group saved with memories that match the page. Add the ones that belong with update_page (attachment_ids), a ticket on its own itinerary stop.",
+  };
+}

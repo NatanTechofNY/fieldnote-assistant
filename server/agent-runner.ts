@@ -997,17 +997,20 @@ function answersAssistant(
   if (!speakerPhone) return false;
   // The last few rows before this one, newest first, read off the thread's
   // (thread_id, created_at) index rather than a sort of the whole thread.
-  const earlier = db.prepare(`
+  type Earlier = { role: string; content: string; created_at: string; speaker: string | null; internal: number };
+  const columns = `
     SELECT role,content,created_at,json_extract(metadata_json,'$.speaker') speaker,
       COALESCE(json_extract(metadata_json,'$.internal'),0) internal
     FROM channel_messages
     WHERE thread_id=? AND role IN ('user','assistant') AND status<>'failed'
-      AND json_extract(metadata_json,'$.reactionText') IS NULL
-      AND (? IS NULL OR (created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?))
-    ORDER BY created_at DESC,rowid DESC LIMIT 12
-  `).all(threadId, inboundId ?? null, inboundId ?? null, inboundId ?? null) as Array<{
-    role: string; content: string; created_at: string; speaker: string | null; internal: number;
-  }>;
+      AND json_extract(metadata_json,'$.reactionText') IS NULL`;
+  // Two statements rather than one with an optional bound: a range on created_at lets the index seek straight to the inbound row.
+  const earlier = (inboundId
+    ? db.prepare(`${columns}
+      AND created_at<=(SELECT created_at FROM channel_messages WHERE id=?) AND id<>?
+      ORDER BY created_at DESC,rowid DESC LIMIT 12`).all(threadId, inboundId, inboundId)
+    : db.prepare(`${columns}
+      ORDER BY created_at DESC,rowid DESC LIMIT 12`).all(threadId)) as Earlier[];
   const lastSaid = earlier.findIndex(row => row.role === "assistant");
   if (lastSaid < 0 || Date.now() - Date.parse(earlier[lastSaid].created_at) >= FOLLOW_UP_WINDOW_MS) return false;
   // The reply may have been two bubbles; what it asked can be in either.
@@ -1403,8 +1406,17 @@ async function completionRetryingEmpty(
   }
 }
 
-/** The tools whose success means the room already got its answer to a message: a GIF sent, or a deliberate silence. */
-const ANSWERING_TOOLS = ["send_image", "stay_quiet"];
+/**
+ * The tools whose success means the room already got its answer to a message, and
+ * that cannot be run twice without the room seeing it: a GIF sent, a post to
+ * another group, or a deliberate silence. A tapback is left out: asking for it
+ * again lands on the same message and changes nothing.
+ *
+ * The cost is that a turn which failed after one of these, before the words that
+ * were to follow, is not retried and sends none. Sending the GIF or the post a
+ * second time is the worse of the two.
+ */
+const ANSWERING_TOOLS = ["send_image", "send_to_group", "stay_quiet"];
 
 /**
  * Whether an earlier attempt at a turn already answered it. The tool rows an

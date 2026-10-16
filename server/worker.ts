@@ -65,6 +65,8 @@ export type WorkerDependencies = {
    * for, with `GROUP_BURSTS=1` or here: folded, every tapback landed on the
    * burst's last bubble and each reply waited on the whole burst. Without it,
    * each text is its own turn, answered and marked in the order it was sent.
+   * A backlog (texts the worker reaches long after they arrived) is still folded
+   * into a few turns either way.
    */
   groupBursts?: boolean;
   /** Whether a pass sweeps quiet conversations for facts to keep. The running worker does; a direct call does not. */
@@ -77,6 +79,13 @@ export const GROUP_SETTLE_MS = 3_000;
 const MAX_BURST_MS = 15_000;
 /** The most messages one turn answers together, so a long backlog is answered in a few turns and not in hundreds. */
 const MAX_BURST_MESSAGES = 40;
+/**
+ * How old a group text is when the worker reaches it before it is called a
+ * backlog. A text this old means the worker was away or is behind, and folding
+ * is then the only way to catch up: a turn each would grow the queue faster than
+ * it drains. Folding stays on for a backlog even while bursts are off.
+ */
+const BACKLOG_AFTER_MS = 120_000;
 
 /**
  * Inbound texts are queued verbatim in the provider's own vocabulary, so each
@@ -1333,7 +1342,8 @@ export async function runWorkerOnce(
         // Another message from the group is already queued: that turn answers
         // this one with it — unless the burst has been gathering long enough
         // (in time or in messages) that it is owed an answer now.
-        const next = bursts && group && !retrying && message.messageId ? nextTextWaiting(db, source, read, event, address, true) : undefined;
+        const behind = Date.now() - Date.parse(event.created_at) > BACKLOG_AFTER_MS;
+        const next = (bursts || behind) && group && !retrying && message.messageId ? nextTextWaiting(db, source, read, event, address, true) : undefined;
         /*
          * How long the burst has been gathering is measured from when the worker
          * began filing it, not from when its first text arrived. After an outage

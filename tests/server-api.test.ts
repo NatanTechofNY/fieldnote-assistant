@@ -2501,6 +2501,21 @@ describe("SMS, reminders, and channel agent execution", () => {
       assert.equal(again.text, "");
       assert.equal(bodies.length, 0, "no completion, so no second GIF");
     });
+
+    it("counts a post to another group as an answer too, but not a tapback", async () => {
+      const { db } = fixture();
+      const threadId = recordOutboundChannelMessage(db, "sms", "+17185551111", "earlier", "SB_earlier").threadId;
+      const stamp = new Date().toISOString();
+      const insert = db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,provider_message_id,status,metadata_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,'received',?,?,?)
+      `);
+      insert.run("cm_ask2", threadId, "inbound", "user", "tell the group", "SB_tell", "{}", stamp, stamp);
+      insert.run("cm_react", threadId, "outbound", "tool", "react_to_message", null, '{"output":{"success":true},"toolCallId":"call_1"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_tell"), false, "a tapback can be asked for again");
+      insert.run("cm_post", threadId, "outbound", "tool", "send_to_group", null, '{"output":{"success":true},"toolCallId":"call_2"}', stamp, stamp);
+      assert.equal(turnAlreadyAnswered(db, "+17185551111", "SB_tell"), true, "a post cannot be repeated unseen");
+    });
   });
 
   /*
@@ -10060,7 +10075,7 @@ describe("Sendblue provider", () => {
     assert.ok(Date.parse(settling.available_at) > Date.now());
   }));
 
-  it("folds a backlog of old group texts into a few turns instead of one turn each", async () => {
+  it("folds a backlog of old group texts into a few turns instead of one turn each, with bursts off", async () => {
     const { db, api } = connectedFixture();
     withTrustedContacts(db, [{ phone: WIFE, name: "Sarah" }]);
     const post = (text: string) => api.post(`/api/webhooks/sendblue/inbound?token=${SECRET}`).send(groupMessage(WIFE, text)).expect(200);
@@ -10077,7 +10092,6 @@ describe("Sendblue provider", () => {
       },
       pollGranola: async () => ({ fetched: 0, queued: 0 }),
       startTypingIndicator: () => () => {},
-      groupBursts: true,
     });
     for (let i = 0; i < 4; i++) await pass();
     assert.deepEqual(turns, ["bubble 41", "bubble 45"], "forty bubbles ride on the first turn, the rest on the second");
@@ -14216,7 +14230,7 @@ describe("hosted pages", () => {
   });
 
   it("offers a group page the pictures its own memories kept, and never another chat's", async () => {
-    const { db } = pageFixture();
+    const { api, db } = pageFixture();
     const stamp = new Date().toISOString();
     const jpeg = (byte: number) => Buffer.from([0xff, 0xd8, 0xff, byte]);
     const stage = (threadId: string, handle: string, byte: number, description: string) => {
@@ -14270,6 +14284,15 @@ describe("hosted pages", () => {
       ],
     }, group);
     assert.equal(again.related_pictures, undefined, "nothing left to offer");
+
+    // The Pages screen's route files a page under a group the same way and is offered the same pictures.
+    const viaRoute = await api.post("/api/pages").send({
+      template: "trip", title: "Concert at Example Hall, again", items: ["Sat 9 PM | Doors open"], audience: "shared", thread_id: "thread_friends_crew",
+    }).expect(201);
+    assert.deepEqual(
+      (viaRoute.body.data.related_pictures as Array<{ attachment_id: string }>).map(picture => picture.attachment_id),
+      [ticket.id],
+    );
 
     // The owner's own page is not one a group's pictures are offered to.
     const owner = ownerTurn(db);
