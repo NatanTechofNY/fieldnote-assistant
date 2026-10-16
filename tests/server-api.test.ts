@@ -30,7 +30,7 @@ import { enqueueExternalEvent, MAX_EVENT_ATTEMPTS, MAX_EVENT_ATTEMPTS_FINAL } fr
 import { composeGroupEveningTurn, composeGroupMorningTurn, groupCheckinItems } from "../server/group-checkin.ts";
 import { addressesAssistant, cleanGroupName, isReactionText, redactedNumber } from "../server/group-thread.ts";
 import {
-  adoptStagedAttachments, attachmentsFull, attachmentTextForMemory, deleteAttachment, dropUnadoptedAttachments,
+  adoptStagedAttachments, attachmentsFull, attachmentTextForMemory, deleteAttachment, dropUnadoptedAttachments, linkMemoryAttachments,
   setAttachmentDescription, stageAttachment, sweepOrphanedAttachmentFiles,
 } from "../server/attachments.ts";
 import {
@@ -14212,6 +14212,68 @@ describe("hosted pages", () => {
     await api.delete(`/api/pages/${shared.id}`).set("Authorization", basic).expect(200);
     await api.get(`/p/${sharedSlug}/pictures/${groupPhoto.id}`).expect(404);
     delete process.env.APP_ADMIN_PASSWORD;
+  });
+
+  it("offers a group page the pictures its own memories kept, and never another chat's", async () => {
+    const { db } = pageFixture();
+    const stamp = new Date().toISOString();
+    const jpeg = (byte: number) => Buffer.from([0xff, 0xd8, 0xff, byte]);
+    const stage = (threadId: string, handle: string, byte: number, description: string) => {
+      const picture = stageAttachment(db, {
+        threadId, providerMessageId: handle, sourceUrl: `https://cdn.sendblue.example/${handle}.jpg`, contentType: "image/jpeg", bytes: jpeg(byte),
+      });
+      setAttachmentDescription(db, picture.id, description, "document");
+      return picture;
+    };
+    const remember = (areaId: string, title: string, content: string, pictures: string[], threadId: string) => {
+      const id = `memory_${title.replaceAll(" ", "_")}`;
+      db.prepare(`
+        INSERT INTO memories(id,user_id,title,content,kind,life_area_id,created_at,updated_at) VALUES(?,?,?,?,'fact',?,?,?)
+      `).run(id, USER_ID, title, content, areaId, stamp, stamp);
+      linkMemoryAttachments(db, id, pictures, threadId);
+      return id;
+    };
+    ownerTurn(db);
+    const { context: group, areaId } = groupTurn(db, "thread_friends_crew");
+    const { areaId: otherArea } = groupTurn(db, "thread_other_crew");
+
+    const ticket = stage("thread_friends_crew", "SB_ticket_pic", 1, "Order #3 Event: Example Band Concert Saturday, Example Hall");
+    const unrelated = stage("thread_friends_crew", "SB_cat_pic", 2, "A cat asleep");
+    const theirs = stage("thread_other_crew", "SB_their_ticket", 3, "Concert ticket for another crew");
+    const mine = stage("thread_owner_pages", "SB_my_ticket", 4, "My own concert ticket");
+    remember(areaId, "Concert tickets", "Going to the show on Saturday", [ticket.id], "thread_friends_crew");
+    remember(areaId, "Cat photos", "Asleep on the sofa", [unrelated.id], "thread_friends_crew");
+    remember(otherArea, "Other concert tickets", "Their night out", [theirs.id], "thread_other_crew");
+
+    const made = await run(db, "create_page", {
+      template: "trip", title: "Concert at Example Hall", items: ["Sat 9 PM | Doors open", "Before | Eat at home"],
+    }, group);
+    assert.deepEqual(
+      (made.related_pictures as Array<{ attachment_id: string }>).map(picture => picture.attachment_id),
+      [ticket.id],
+      "the ticket matches the page; the cat, another crew's ticket, and the owner's own do not",
+    );
+    assert.match(made.related_pictures[0].memory_title, /Concert tickets/);
+    assert.ok([unrelated.id, theirs.id, mine.id].every(id => !JSON.stringify(made.related_pictures).includes(id)));
+
+    // Once the page carries it, it is not offered again; the model adds it with update_page.
+    const updated = await run(db, "update_page", {
+      id: made.id, blocks: [
+        { type: "itinerary", text: "Plan", items: ["Sat 9 PM | Doors open", "Before | Eat at home"], attachment_ids: [ticket.id, ""] },
+      ],
+    }, group);
+    assert.equal(updated.related_pictures, undefined);
+    const again = await run(db, "create_page", {
+      title: "Concert at Example Hall, take two", blocks: [
+        { type: "itinerary", text: "Plan", items: ["Sat 9 PM | Doors open"], attachment_ids: [ticket.id] },
+      ],
+    }, group);
+    assert.equal(again.related_pictures, undefined, "nothing left to offer");
+
+    // The owner's own page is not one a group's pictures are offered to.
+    const owner = ownerTurn(db);
+    const private_ = await run(db, "create_page", { template: "trip", title: "Concert", items: ["Sat | Show"] }, owner);
+    assert.equal(private_.related_pictures, undefined);
   });
 
   it("refuses to send an owner page's link to anyone else", async () => {

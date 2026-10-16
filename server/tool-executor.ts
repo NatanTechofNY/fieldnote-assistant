@@ -26,7 +26,7 @@ import {
   speakerLabel, speakerNameOf, withoutQuotedSpans,
 } from "./group-thread.ts";
 import { getNotificationPreferences, type SmsProvider } from "./integrations.ts";
-import { createPageFromInput, updatePageFromInput, type PageOrigin } from "./page-service.ts";
+import { createPageFromInput, relatedPagePictures, updatePageFromInput, type PageOrigin } from "./page-service.ts";
 import {
   assertNoOwnerPageLinks, getPage, listPages, NO_BASE_URL, pageJson, pollResults, revokePage,
   type PageRow,
@@ -1102,7 +1102,15 @@ export async function executeAgentTool(
     }
     const { page, wroteTodos } = await createPageFromInput(db, input as never, pageOrigin(context));
     if (wroteTodos) search.flushSoon();
-    return pageResult(db, page);
+    // What the group already kept that belongs on this page (a ticket for the evening it plans): offered, not added.
+    const related = relatedPagePictures(db, page);
+    return {
+      ...pageResult(db, page),
+      ...(related.length ? {
+        related_pictures: related,
+        related_pictures_note: "Pictures this group saved with memories that match the page. Add the ones that belong with update_page (attachment_ids), a ticket on its own itinerary stop.",
+      } : {}),
+    };
   }
   if (name === "update_page") {
     const row = scopedPage(db, input.id as string, scope);
