@@ -541,6 +541,80 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 .mood-day { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: 10px; }
 .mood-latest { margin: 12px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .mood-latest strong { color: var(--text); font-weight: 500; }
+
+/* Insights: a dashboard, so unlike Today it takes the page's whole width. The
+   charts are plain elements coloured from the theme's tokens. */
+.ins-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; margin-bottom: 14px; }
+.ins-toolbar .area-filter { margin: 0; }
+.ins-period { margin: 0 0 18px; color: var(--text-tertiary); font-size: 12px; }
+/* Cells share one-pixel rules, so the strip stays tidy however many wrap onto a row. */
+.kpi-strip.ins-kpis {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--border);
+}
+.kpi-strip.ins-kpis > div { border-left: 0; background: color-mix(in oklab, var(--kpi, transparent) 7%, var(--surface)); }
+.kpi-strip.ins-kpis strong { font-size: 24px; }
+.kpi-strip.ins-kpis small { display: block; margin-top: 5px; color: var(--text-tertiary); font-size: 11px; line-height: 1.35; }
+.ins-section { margin: 26px 0 12px; display: flex; align-items: baseline; gap: 10px; }
+.ins-section h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.012em; }
+.ins-section p { margin: 0; color: var(--text-tertiary); font-size: 12px; }
+.ins-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 18px; }
+.ins-card.wide { grid-column: 1 / -1; }
+.ins-card .card-title { margin-bottom: 12px; }
+.ins-card .card-title h3 { font-size: 14px; }
+.ins-note { color: var(--text-tertiary); font-size: 11px; text-align: right; }
+.ins-card .empty { padding: 26px 0; }
+.ins-chart { margin: 0; }
+.ins-bars { display: flex; align-items: stretch; gap: 2px; height: 132px; }
+.ins-bars-col { flex: 1 1 0; min-width: 0; display: flex; align-items: flex-end; gap: 1px; border-radius: 2px; }
+.ins-bars-col:hover { background: var(--surface-hover); }
+.ins-bars-col > i { flex: 1 1 0; min-width: 1px; min-height: 0; border-radius: 2px 2px 0 0; }
+.ins-bars-col > i[style*="height: 0%"] { visibility: hidden; }
+.ins-bars.stacked .ins-bars-col { flex-direction: column-reverse; align-items: stretch; gap: 0; }
+.ins-bars.stacked .ins-bars-col > i { flex: none; border-radius: 0; }
+.ins-axis { display: flex; justify-content: space-between; margin-top: 6px; color: var(--text-tertiary); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.ins-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 10px 0 0; padding: 0; list-style: none; color: var(--text-secondary); font-size: 12px; }
+.ins-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.ins-legend i { width: 8px; height: 8px; border-radius: 2px; }
+.ins-legend strong { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ins-line { position: relative; height: 132px; margin-left: 14px; }
+.ins-line svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.ins-gridline { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ins-dot { position: absolute; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: var(--radius-pill); box-shadow: 0 0 0 2px var(--surface); }
+.ins-line-max, .ins-line-min { position: absolute; left: -14px; color: var(--text-tertiary); font-size: 10px; line-height: 1; font-variant-numeric: tabular-nums; }
+.ins-line-max { top: -2px; }
+.ins-line-min { bottom: -2px; }
+.ins-columns { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 10px; align-items: end; }
+.ins-column { display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 0; }
+.ins-column strong { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ins-column small { max-width: 100%; color: var(--text-tertiary); font-size: 10.5px; text-align: center; line-height: 1.25; }
+.ins-column-track { display: flex; align-items: flex-end; justify-content: center; width: 100%; height: 88px; }
+.ins-column-track > i { width: 100%; max-width: 44px; min-height: 2px; border-radius: var(--radius-sm) var(--radius-sm) 2px 2px; }
+.ins-barlist { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.ins-barlist li { display: grid; grid-template-columns: minmax(70px, 34%) minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; font-size: 12.5px; }
+.ins-barlist-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.ins-barlist-track { height: 8px; border-radius: var(--radius-pill); background: var(--surface-sunken); overflow: hidden; }
+.ins-barlist-track > i { display: block; height: 100%; min-width: 2px; border-radius: var(--radius-pill); }
+.ins-barlist strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ins-barlist small { grid-column: 2 / -1; margin-top: -4px; color: var(--text-tertiary); font-size: 11px; }
+.ins-share-bar { display: flex; gap: 2px; height: 14px; border-radius: var(--radius-pill); overflow: hidden; }
+.ins-share-bar > i { min-width: 3px; }
+.ins-heat { display: grid; gap: 3px; }
+.ins-heat-head, .ins-heat-row { display: grid; grid-template-columns: 30px repeat(var(--cols), minmax(0, 1fr)); gap: 3px; align-items: center; }
+.ins-heat-head small { color: var(--text-tertiary); font-size: 9.5px; line-height: 1; white-space: nowrap; overflow: visible; }
+.ins-heat-label { color: var(--text-tertiary); font-size: 11px; }
+.ins-heat-row > i {
+  display: block; aspect-ratio: 1; min-height: 14px; border-radius: 3px;
+  background: color-mix(in oklab, var(--heat-color, var(--accent)) calc(var(--heat, 0) * 100%), var(--surface-sunken));
+}
+.ins-heat-row > i.empty { background: transparent; box-shadow: inset 0 0 0 1px var(--border); }
+.ins-stat-row { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 14px 0 0; color: var(--text-secondary); font-size: 12px; }
+.ins-stat-row strong { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ins-stat-row span { display: inline-flex; gap: 6px; align-items: baseline; }
+.ins-period-toggle { margin-left: auto; }
+@media (max-width: 720px) {
+  .ins-heat-row > i { min-height: 8px; }
+  .ins-barlist li { grid-template-columns: minmax(60px, 40%) minmax(0, 1fr) auto; }
+}
 /* A grid track refuses to go below the min-content of its contents, and a
    nowrap line has no min-content to speak of, so the track has to be told it may
    shrink or the row grows past the card instead of ellipsising. */
@@ -922,7 +996,21 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 .cal-chip.dense .cal-chip-title { font-weight:400; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 /* Indented only where a step sits directly under its task, which is the one
    place the offset reads as belonging rather than as a stray margin. */
-.cal-rail-body .cal-chip.subtask { width:auto; margin-left:9px; }
+.cal-rail-body .cal-chip-wrap.subtask { width:auto; margin-left:9px; }
+/* The attach and edit controls float over the chip's top corner, found by
+   hovering or tabbing into the chip, and always there where there is no hover. */
+.cal-chip-wrap { position:relative; width:100%; min-width:0; }
+.cal-chip-actions {
+  position:absolute; top:2px; right:2px; z-index:2; display:none; align-items:center; gap:1px;
+  padding:1px; border-radius:var(--radius-sm); background:var(--surface);
+  box-shadow:0 0 0 1px var(--border);
+}
+.cal-chip-wrap:hover .cal-chip-actions,
+.cal-chip-wrap:focus-within .cal-chip-actions { display:inline-flex; }
+.cal-chip-actions .attach-button { padding:3px; min-height:0; opacity:1; }
+@media (hover: none) {
+  .cal-chip-actions { display:inline-flex; }
+}
 
 /* The lines from a task to its steps. Decoration over the grid, so they take
    no clicks and never sit between a chip and the pointer dragging it. */
@@ -1457,6 +1545,13 @@ tr:hover .attach-button,
 /* A subtask line is 12px tall text, so the default icon button dwarfs it. */
 .subtask-list .attach-button { flex:none; padding:3px; min-height:0; }
 .data-table .cell-actions { white-space:nowrap; }
+/* The buttons sit against the title they act on, in the list and on a card,
+   rather than in a column of their own at the far edge of the row. */
+.data-table .title-cell .title-open { width:auto; flex:0 1 auto; }
+.row-actions, .card-actions { display:inline-flex; flex:none; align-items:center; gap:2px; }
+.card-actions { align-self:flex-start; }
+.row-actions .attach-button { padding:3px 5px; min-height:0; }
+.todo-card:hover .edit-button, tr:hover .edit-button { opacity:1; }
 
 .health-grid { display:grid; gap:0; border:1px solid var(--border); border-radius:var(--radius-md); overflow:hidden; }
 .health-card {

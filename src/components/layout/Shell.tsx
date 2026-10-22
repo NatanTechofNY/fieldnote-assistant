@@ -12,6 +12,7 @@ import { ThemeToggle } from "../ui";
 import { AgentPanel } from "./AgentPanel";
 import { ConversationHistoryPage } from "../../features/history/ConversationHistoryPage";
 import { AttachmentsPage } from "../../features/attachments/AttachmentsPage";
+import { InsightsPage } from "../../features/insights/InsightsPage";
 import { MemoriesPage } from "../../features/memories/MemoriesPage";
 import { OverviewPage } from "../../features/overview/OverviewPage";
 import { PagesPage } from "../../features/pages/PagesPage";
@@ -86,6 +87,7 @@ function ShellBody() {
         <Route path="/" element={<OverviewPage />} />
         <Route path="/todos" element={<TodosPage />} />
         <Route path="/memories" element={<MemoriesPage />} />
+        <Route path="/insights" element={<InsightsPage />} />
         <Route path="/reflections" element={<ReflectionsPage />} />
         <Route path="/reviews" element={<ReflectionsPage />} />
         {/* The agent used to be a page; the panel replaces it, so old links

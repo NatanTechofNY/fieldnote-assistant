@@ -1,6 +1,6 @@
 import type {
   AgentTurnMemory, AttachmentPage, BackgroundActivity, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
-  ExternalEvent, Health, HostedPage, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
+  ExternalEvent, Health, HostedPage, Insights, InsightsRange, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoComment, TodoCompletion, TodoStatus,
   PageBlockResult, UniversalSearchResult,
 } from "./types";
@@ -53,6 +53,12 @@ export const api = {
   overview: () => request<Overview>("/overview"),
   /** The mood chart's other view; `mine` is what /overview already carries. */
   moodTrend: (scope: MoodTrendScope) => request<MoodPoint[]>(`/overview/mood-trend?scope=${scope}`),
+  insights: (days: InsightsRange, area: { life_area_id?: string; scope?: "mine" } = {}) => {
+    const params = new URLSearchParams({ days: String(days) });
+    if (area.life_area_id) params.set("life_area_id", area.life_area_id);
+    if (area.scope) params.set("scope", area.scope);
+    return request<Insights>(`/insights?${params}`);
+  },
   health: () => request<Health>("/health"),
   todos: (includeDone = true, lifeAreaId?: string, scope?: "mine") => {
     const query = new URLSearchParams({ includeDone: String(includeDone) });

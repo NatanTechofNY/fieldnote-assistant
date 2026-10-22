@@ -20,6 +20,7 @@ import { SettingsTabs, type SettingsTabDef } from "./SettingsTabs";
 import { SoulEditor } from "./SoulEditor";
 import { UnderHoodSettings } from "./UnderHoodSettings";
 import { WebhookUrlField } from "./WebhookUrlField";
+import { TASK_OPEN_MODES, useTaskOpenMode } from "../../lib/task-open-mode";
 import { currentPublicOrigin } from "../../lib/public-origin";
 import { humanTime, timezoneLabel, timezoneNames } from "../../lib/timezone";
 
@@ -52,6 +53,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
   const queryClient = useQueryClient();
   const demoMode = useDemoMode();
   const redact = useRedact();
+  const [openMode, setOpenMode] = useTaskOpenMode();
   const { data = initialData } = useQuery({
     queryKey: ["integrations"],
     queryFn: api.integrations,
@@ -357,6 +359,19 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             <span>Mark the parent done when its last subtask is completed</span>
             {taskPreferences.isPending && <LoaderCircle className="spin" size={13}/>}
           </label>
+          <div className="card-title"><h3>Opening a task</h3><MessageSquare size={18}/></div>
+          <p className="integration-copy">
+            What clicking a task, or an empty day on the calendar, does. In chat the task is attached to the
+            agent, or a new-task message is started, so you can ask it to create or change things. Hold{" "}
+            <kbd>⌥</kbd> while clicking, or use the pencil beside a task, to open the editor instead.
+            Applies to this browser only.
+          </p>
+          <div role="radiogroup" aria-label="Opening a task">
+            {TASK_OPEN_MODES.map(mode => <label key={mode} className="toggle-row compact">
+              <input type="radio" name="task-open-mode" checked={openMode === mode} onChange={() => setOpenMode(mode)}/>
+              <span>{mode === "chat" ? "Open in chat" : "Open the editor"}</span>
+            </label>)}
+          </div>
         </SettingsSection>
         </div>}
         {visited.has("organize") && <div className="settings-stack" hidden={activeTab !== "organize"}>

@@ -81,6 +81,7 @@ import { closePollsNow, createPage, getPage, MAX_VOTERS, optionId, pageIsLive, r
 import { resetPageWriteThrottle, setPictureLoadLimit } from "../server/routes/public-pages.ts";
 import { resetWebState } from "../server/web-service.ts";
 import { pullGifLine, rememberImages } from "../server/image-output.ts";
+import { buildInsights } from "../server/insights.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
 import { isTransientFailure, TransientFailure } from "../server/transient.ts";
 import { dayWithWeekday, localParts, namesOtherWeekday, weekdayOf } from "../server/local-time.ts";
@@ -14800,5 +14801,283 @@ describe("hosted pages", () => {
     const slug = briefing.slice(briefing.lastIndexOf("/") + 1);
     const row = db.prepare("SELECT audience,template FROM shared_pages WHERE slug=?").get(slug) as { audience: string; template: string };
     assert.deepEqual({ ...row }, { audience: "owner", template: "today" });
+  });
+});
+
+describe("Insights", () => {
+  const DAY = 86_400_000;
+  /** An instant some days back, kept away from midnight so the owner's day does not depend on the zone. */
+  const ago = (days: number) => {
+    const date = new Date(Date.now() - days * DAY);
+    date.setUTCHours(16, 0, 0, 0);
+    return date.toISOString();
+  };
+
+  function insightsFixture() {
+    const { api, db } = fixture();
+    const todo = (id: string, fields: { status?: string; created?: number; completed?: number; due?: number; area?: string; says?: number; recurring?: boolean; priority?: string }) =>
+      db.prepare(`
+        INSERT INTO todos(id,user_id,title,status,priority,life_area_id,due_at,completed_at,recurrence_json,assistant_says,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        id, USER_ID, `Task ${id}`, fields.status ?? "pending", fields.priority ?? null, fields.area ?? null,
+        fields.due === undefined ? null : ago(fields.due), fields.completed === undefined ? null : ago(fields.completed),
+        fields.recurring ? "{}" : null, fields.says ?? 0, ago(fields.created ?? 1), ago(fields.created ?? 1),
+      );
+    const memory = (id: string, fields: { kind?: string; score?: number | null; label?: string; moods?: string; tags?: string[]; days?: number; area?: string; review?: number }) =>
+      db.prepare(`
+        INSERT INTO memories(id,user_id,title,content,kind,mood_label,mood_score,moods_json,life_area_id,review_worthy,tags_json,occurred_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        id, USER_ID, id, `Content ${id}`, fields.kind ?? "note", fields.label ?? null, fields.score ?? null, fields.moods ?? null,
+        fields.area ?? null, fields.review ?? 0, JSON.stringify(fields.tags ?? []), ago(fields.days ?? 1), ago(fields.days ?? 1), ago(fields.days ?? 1),
+      );
+    const thread = (id: string, channel: string, address: string) =>
+      db.prepare(`
+        INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?)
+      `).run(id, USER_ID, channel, address, `conversation_${id}`, ago(30), ago(30));
+    const message = (id: string, threadId: string, role: string, content: string, days: number, metadata: Record<string, unknown> = {}) =>
+      db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,metadata_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?)
+      `).run(id, threadId, role === "user" ? "inbound" : "outbound", role, content, JSON.stringify(metadata), ago(days), ago(days));
+    const group = () => {
+      thread("thread_group", "sms", "group:home");
+      db.prepare(`
+        INSERT INTO life_areas(id,user_id,slug,name,color,thread_id,created_at,updated_at) VALUES('area_home',?,'home','Home','#2f7d6d','thread_group',?,?)
+      `).run(USER_ID, ago(30), ago(30));
+    };
+    return { api, db, todo, memory, thread, message, group };
+  }
+
+  const data = async (api: ReturnType<typeof fixture>["api"], query = "") =>
+    (await api.get(`/api/insights${query}`).expect(200)).body.data;
+  const total = (values: number[]) => values.reduce((sum, value) => sum + value, 0);
+
+  it("counts what was finished, owed and late on the owner's own days", async () => {
+    const { api, db, todo } = insightsFixture();
+    todo("a", { status: "done", created: 5, completed: 2, priority: "high" });
+    todo("b", { status: "pending", created: 1, due: 3 });
+    todo("c", { status: "pending", created: 2, recurring: true });
+    todo("said", { status: "done", created: 2, completed: 1, says: 1 });
+    // A repeating task is finished by occurrence: its log, not its own row, says how often.
+    for (const [index, days] of [3, 1].entries()) {
+      db.prepare("INSERT INTO todo_completions(id,user_id,todo_id,occurrence_at,completed_at,created_at) VALUES(?,?,?,?,?,?)")
+        .run(`completion_${index}`, USER_ID, "c", ago(days + 0.5), ago(days), ago(days));
+    }
+    const { range, tasks } = await data(api);
+    assert.equal(range.days, 30);
+    assert.equal(range.granularity, "day");
+    assert.equal(range.buckets.length, 30);
+    assert.equal(tasks.kpis.created, 3, "a task the assistant says is not a task");
+    assert.equal(tasks.kpis.completed, 3, "one finished task and two occurrences");
+    assert.equal(tasks.kpis.open, 2);
+    assert.equal(tasks.kpis.overdue, 1);
+    assert.equal(tasks.kpis.completion_rate, 0.5, "of the two one-off tasks, one is done; the repeating one never finishes");
+    assert.equal(tasks.kpis.median_days_to_finish, 3);
+    assert.equal(total(tasks.created), 3);
+    assert.equal(total(tasks.completed), 3);
+    assert.equal(total(tasks.heatmap.flat()), 3);
+    assert.deepEqual(tasks.recurring, [{ label: "Task c", count: 2 }]);
+    assert.equal(tasks.by_status.find((item: { label: string }) => item.label === "done").count, 1);
+    assert.equal(tasks.by_priority.find((item: { label: string }) => item.label === "high").count, 1);
+    assert.equal(total(tasks.overdue_aging.map((item: { count: number }) => item.count)), 1);
+    assert.equal(tasks.kpis.streak, 3, "finishing something on each of the last three days, today still to come");
+    assert.equal(tasks.kpis.best_streak, 3);
+  });
+
+  it("summarises memories, tags and mood, and charts a year by the week", async () => {
+    const { api, memory } = insightsFixture();
+    memory("m1", { kind: "journal", score: 4, label: "Good", tags: ["Work", "gym"], days: 2, review: 1 });
+    memory("m2", { kind: "note", score: 2, label: "rough", tags: ["work"], days: 1 });
+    memory("m3", { kind: "fact", tags: [], days: 3 });
+    const { memories } = await data(api);
+    assert.equal(memories.kpis.saved, 3);
+    assert.equal(memories.kpis.average_mood, 3);
+    assert.equal(memories.kpis.mood_entries, 2);
+    assert.equal(memories.kpis.review_worthy, 1);
+    assert.deepEqual(memories.mood.distribution, [0, 1, 0, 1, 0]);
+    assert.deepEqual(memories.top_tags[0], { label: "work", count: 2 }, "tags are counted without regard to case");
+    assert.deepEqual(memories.by_kind.map((item: { count: number }) => item.count), [1, 1, 1]);
+    assert.equal(total(memories.volume.journal), 1);
+    assert.equal(memories.kpis.journal_streak, 0, "no entry yesterday or today");
+
+    const year = await data(api, "?days=365");
+    assert.equal(year.range.granularity, "week");
+    assert.ok(year.range.buckets.length >= 52 && year.range.buckets.length <= 54);
+    assert.equal(total(year.memories.volume.note), 1);
+    assert.equal(year.memories.volume.note.length, year.range.buckets.length, "every series lines up with the buckets");
+  });
+
+  it("keeps a group's records out of the owner's own view and shows them in its own", async () => {
+    const { api, todo, memory, message, thread, group } = insightsFixture();
+    group();
+    thread("thread_owner", "sms", "+17185551111");
+    thread("thread_digest", "sms", "digest:+17185551111");
+    todo("own", { status: "done", created: 3, completed: 2 });
+    todo("shared", { status: "done", created: 3, completed: 2, area: "area_home" });
+    memory("private", { score: 5, days: 2 });
+    memory("home", { score: 1, days: 2, area: "area_home" });
+    // An entry with other people's moods is the household's evening, whatever area it ended up under.
+    memory("orphan", { score: 3, days: 2, moods: JSON.stringify([{ name: "Sarah", label: "tired", score: 3 }]) });
+    message("u1", "thread_owner", "user", "add milk", 2);
+    message("u2", "thread_group", "user", "dinner?", 2, { speakerIsOwner: true });
+    // What the rest of the group says, and what is held until the assistant is named, is not the owner using it.
+    message("u5", "thread_group", "user", "I'll bring dessert", 2, { speakerIsOwner: false });
+    message("u6", "thread_group", "user", "anyone seen the keys", 2, { speakerIsOwner: true, heldUntilNamed: true });
+    message("u3", "thread_digest", "user", "compose the digest", 2);
+    message("u4", "thread_owner", "user", "compose a draft", 2, { internal: true });
+    for (const [index, ok] of [true, true, false].entries()) {
+      message(`t${index}`, index === 2 ? "thread_group" : "thread_owner", "tool", index === 2 ? "web_search" : "create_todo", 2, { output: { success: ok } });
+    }
+    // A group's memory sweep keeps what it reads on a thread of its own; the work is still the group's.
+    thread("thread_sweep", "sms", "sweep:thread_group");
+    message("t3", "thread_sweep", "tool", "create_memory", 2, { output: { success: true } });
+    // The owner's own digest runs on a scratch thread too, and is the owner's.
+    message("t4", "thread_digest", "tool", "create_todo", 2, { output: { success: true } });
+
+    const everything = await data(api);
+    assert.equal(everything.tasks.kpis.completed, 2);
+    assert.equal(everything.memories.kpis.saved, 3);
+    assert.equal(everything.assistant.kpis.messages, 2, "the owner's text and the group's, not the app's own turns");
+    assert.equal(everything.assistant.kpis.tool_calls, 5);
+
+    const mine = await data(api, "?scope=mine");
+    assert.equal(mine.tasks.kpis.completed, 1);
+    assert.equal(mine.memories.kpis.saved, 2, "the group's entry is left out");
+    assert.equal(mine.memories.kpis.mood_entries, 1, "the entry carrying Sarah's mood is not the owner's day");
+    assert.equal(mine.memories.kpis.average_mood, 5);
+    assert.equal(mine.assistant.kpis.messages, 1);
+    assert.equal(mine.assistant.kpis.tool_calls, 3, "the group's sweep is not the owner's, the owner's digest is");
+    assert.deepEqual(mine.assistant.did_for_you, [{ label: "Tasks added", count: 3 }]);
+    assert.deepEqual(mine.assistant.top_tools, [{ tool: "create_todo", calls: 3, success_rate: 1 }]);
+    assert.equal(total(mine.assistant.messages.group), 0);
+
+    const home = await data(api, "?life_area_id=area_home");
+    assert.equal(home.tasks.kpis.completed, 1);
+    assert.equal(home.memories.kpis.saved, 1);
+    assert.equal(home.assistant.kpis.messages, 1);
+    assert.equal(total(home.assistant.messages.group), 1);
+    assert.deepEqual(home.assistant.top_tools, [
+      { tool: "create_memory", calls: 1, success_rate: 1 },
+      { tool: "web_search", calls: 1, success_rate: 0 },
+    ], "the group's own view includes what its sweep did");
+    assert.deepEqual(home.assistant.did_for_you, [{ label: "Memories saved", count: 1 }]);
+  });
+
+  it("counts the app's own chat panel, and does not score a call that never said how it went as a failure", async () => {
+    const { api, thread, message } = insightsFixture();
+    thread("thread_web", "web", "browser-agent");
+    thread("thread_owner", "sms", "+17185551111");
+    // The browser runs its tools itself and syncs them as parts on the assistant's message.
+    message("w1", "thread_web", "assistant", "Tools: create_todo", 2, { parts: [
+      { type: "tool-create_todo", state: "output-available", output: { success: true } },
+      { type: "tool-update_todo", state: "output-error", output: { success: false } },
+      { type: "tool-algolia_search_index_todos", state: "output-available", output: { hits: [] } },
+      { type: "text", text: "done" },
+    ] });
+    message("w2", "thread_web", "assistant", "not json parts", 2, {});
+    // A call the log holds no outcome for is counted, but neither a success nor a failure.
+    message("t1", "thread_owner", "tool", "mystery_tool", 2, {});
+    const { assistant } = await data(api);
+    assert.equal(assistant.kpis.tool_calls, 4);
+    assert.equal(assistant.kpis.tool_success_rate, 0.667, "two worked and one failed; the silent call is left out");
+    assert.deepEqual(assistant.did_for_you, [{ label: "Tasks added", count: 1 }]);
+    assert.equal(assistant.top_tools.find((item: { tool: string }) => item.tool === "mystery_tool").success_rate, null);
+    assert.equal(assistant.top_tools.find((item: { tool: string }) => item.tool === "algolia_search_index_todos").success_rate, 1);
+  });
+
+  it("puts a day at the owner's midnight, across a clock change, and reads a year in whole weeks", async () => {
+    const { db } = insightsFixture();
+    db.prepare("UPDATE notification_preferences SET timezone='America/New_York' WHERE user_id=?").run(USER_ID);
+    const note = (id: string, at: string) =>
+      db.prepare(`
+        INSERT INTO memories(id,user_id,title,content,kind,tags_json,occurred_at,created_at,updated_at) VALUES(?,?,?,?,'note','[]',?,?,?)
+      `).run(id, USER_ID, id, id, at, at, at);
+    // New York's clocks went forward at 07:00 UTC on 8 March 2026, so that day was 23 hours long.
+    note("late_on_the_7th", "2026-03-08T04:30:00.000Z");
+    note("early_on_the_8th", "2026-03-08T05:30:00.000Z");
+    note("last_minute_of_the_8th", "2026-03-09T03:59:00.000Z");
+    note("first_minute_of_the_9th", "2026-03-09T04:00:00.000Z");
+    const now = new Date("2026-03-09T12:00:00.000Z");
+    const { memories, range } = buildInsights(db, { days: 30, scope: { kind: "all" }, now });
+    assert.equal(range.to, "2026-03-09");
+    const volume = (date: string) => memories.volume.note[range.buckets.indexOf(date)];
+    assert.equal(volume("2026-03-07"), 1, "04:30 UTC is 23:30 the evening before in New York");
+    assert.equal(volume("2026-03-08"), 2, "from 05:30 UTC until the next local midnight at 04:00 UTC");
+    assert.equal(volume("2026-03-09"), 1);
+
+    const year = buildInsights(db, { days: 365, scope: { kind: "all" }, now });
+    assert.equal(new Date(`${year.range.from}T00:00:00Z`).getUTCDay(), 1, "the first bar is a whole week, starting on a Monday");
+    assert.equal(year.range.buckets[0], year.range.from);
+    assert.equal(total(year.memories.volume.note), 4);
+  });
+
+  it("has no conversation to count for an area that owns no group chat", async () => {
+    const { api, db, todo, message, thread } = insightsFixture();
+    thread("thread_owner", "sms", "+17185551111");
+    db.prepare("INSERT INTO life_areas(id,user_id,slug,name,color,created_at,updated_at) VALUES('area_insights_work',?,'insights-work','Insights Work','#445',?,?)")
+      .run(USER_ID, ago(30), ago(30));
+    todo("work", { status: "done", created: 3, completed: 2, area: "area_insights_work" });
+    message("u1", "thread_owner", "user", "add milk", 2);
+    message("t1", "thread_owner", "tool", "create_todo", 2, { output: { success: true } });
+    const work = await data(api, "?life_area_id=area_insights_work");
+    assert.equal(work.tasks.kpis.completed, 1, "the area's own tasks are still counted");
+    assert.equal(work.assistant.kpis.messages, 0, "the owner's other conversations are not the area's");
+    assert.equal(work.assistant.kpis.tool_calls, 0);
+    assert.deepEqual(work.assistant.did_for_you, []);
+  });
+
+  it("counts only the sweeps inside the window and keeps a group's out of the owner's own", async () => {
+    const { api, db, group } = insightsFixture();
+    group();
+    const sweep = (id: string, key: string, days: number, status: string) =>
+      db.prepare(`
+        INSERT INTO scheduled_dispatches(id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at)
+        VALUES(?,?,'memory_sweep',?,?,?,1,?,?)
+      `).run(id, USER_ID, key, ago(days), status, ago(days), ago(days));
+    sweep("s_in", "memory_sweep:thread_owner:1", 2, "sent");
+    sweep("s_fail", "memory_sweep:thread_owner:2", 3, "failed");
+    sweep("s_group", "memory_sweep:thread_group:1", 2, "sent");
+    sweep("s_old", "memory_sweep:thread_owner:3", 31, "sent");
+    const all = await data(api);
+    assert.deepEqual(all.assistant.sweeps, { runs: 3, sent: 2, failed: 1 }, "a sweep from before the window is not counted");
+    const mine = await data(api, "?scope=mine");
+    assert.deepEqual(mine.assistant.sweeps, { runs: 2, sent: 1, failed: 1 });
+  });
+
+  it("counts a memory saved today whose entry is dated long before the history it reads", async () => {
+    const { api, db, memory } = insightsFixture();
+    memory("backdated", { kind: "journal", days: 1 });
+    db.prepare("UPDATE memories SET occurred_at=? WHERE id='backdated'").run(ago(500));
+    const { memories } = await data(api);
+    assert.equal(memories.kpis.saved, 1);
+  });
+
+  it("answers an empty install with zeros rather than failing, and refuses a range it does not chart", async () => {
+    const { api } = insightsFixture();
+    const empty = await data(api, "?days=90");
+    assert.equal(empty.range.buckets.length, 90);
+    assert.equal(empty.tasks.kpis.completion_rate, null);
+    assert.equal(empty.tasks.kpis.median_days_to_finish, null);
+    assert.equal(empty.memories.kpis.average_mood, null);
+    assert.equal(empty.assistant.kpis.tool_success_rate, null);
+    assert.equal(total(empty.tasks.heatmap.flat()), 0);
+    await api.get("/api/insights?days=7").expect(400);
+    await api.get("/api/insights?scope=everyone").expect(400);
+  });
+
+  it("sits behind the sign-in", async () => {
+    process.env.APP_ADMIN_PASSWORD = "correct-horse-battery-staple";
+    resetThrottling();
+    try {
+      const { api } = fixture();
+      await api.get("/api/insights").expect(401);
+      await api.get("/api/insights").auth("admin", "correct-horse-battery-staple").expect(200);
+    } finally {
+      delete process.env.APP_ADMIN_PASSWORD;
+      resetThrottling();
+    }
   });
 });

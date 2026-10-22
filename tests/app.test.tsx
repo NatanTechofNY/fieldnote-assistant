@@ -24,6 +24,11 @@ beforeEach(() => {
   // Views and filters are remembered between visits, which would otherwise make
   // each test open in whatever state the one before it left behind.
   window.localStorage.clear();
+  // The app opens a task in the chat by default. The editor flows below are the
+  // ones this suite grew up on, so they run in editor mode and the chat-first
+  // tests opt in.
+  window.localStorage.setItem("fieldnote:todos:open-in", "editor");
+  insightsRequests.length = 0;
   servedLifeAreas = lifeAreas;
   todoNotes = [];
   noteWrites.length = 0;
@@ -69,6 +74,41 @@ let servedLifeAreas: Array<Record<string, unknown>> = lifeAreas;
 const lifeAreaPatches: Array<{ id: string; body: Record<string, unknown> }> = [];
 const askDrafts: Array<Record<string, unknown>> = [];
 const moodTrendRequests: string[] = [];
+const insightsRequests: string[] = [];
+
+/** One window of the Insights payload: series line up with the buckets, one value each. */
+function insightsFixture(days: number): import("../src/types").Insights {
+  const buckets = Array.from({ length: days }, (_, index) => new Date(Date.UTC(2026, 6, 24) - (days - 1 - index) * 86_400_000).toISOString().slice(0, 10));
+  const zeros = buckets.map(() => 0);
+  return {
+    range: { days, from: buckets[0], to: buckets[buckets.length - 1], timezone: "America/New_York", granularity: "day", buckets },
+    tasks: {
+      kpis: { created: 14, completed: 9, completion_rate: 0.64, open: 5, overdue: 2, median_days_to_finish: 2, streak: 4, best_streak: 6, subtask_completion_rate: 0.5 },
+      created: zeros, completed: zeros,
+      by_status: [{ label: "pending", count: 3 }, { label: "done", count: 9 }],
+      by_priority: [{ label: "high", count: 4 }, { label: "normal", count: 10 }],
+      by_area: [{ id: null, name: "No area", color: null, created: 14, completed: 9 }],
+      time_to_finish: [{ label: "Same day", count: 6 }, { label: "1–2 days", count: 3 }],
+      overdue_aging: [{ label: "Today", count: 2 }],
+      heatmap: Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0)),
+      recurring: [{ label: "Water the plants", count: 5 }],
+    },
+    memories: {
+      kpis: { saved: 11, journal_streak: 3, review_worthy: 2, with_pictures: 1, average_mood: 3.6, mood_entries: 5 },
+      by_kind: [{ label: "note", count: 8 }, { label: "journal", count: 3 }],
+      volume: { fact: zeros, note: zeros, journal: zeros },
+      top_tags: [{ label: "work", count: 4 }],
+      mood: { daily: buckets.map(() => null), distribution: [0, 1, 1, 2, 1], by_weekday: [4, null, null, null, null, null, null], top_labels: [{ label: "calm", count: 2 }] },
+    },
+    assistant: {
+      kpis: { messages: 27, active_days: 8, tool_calls: 31, tool_success_rate: 0.9 },
+      messages: { web: zeros, sms: zeros, group: zeros },
+      top_tools: [{ tool: "create_todo", calls: 12, success_rate: 1 }],
+      did_for_you: [{ label: "Tasks added", count: 12 }],
+      sweeps: { runs: 4, sent: 3, failed: 1 },
+    },
+  };
+}
 
 const todo = (over: Partial<Record<string, unknown>> = {}) => ({
   id: "todo_1",
@@ -425,6 +465,11 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
         hits,
       },
     }));
+  }
+  if (url.includes("/api/insights")) {
+    insightsRequests.push(url.slice(url.indexOf("insights")));
+    const days = Number(new URLSearchParams(url.split("?")[1] || "").get("days") ?? 30);
+    return new Response(JSON.stringify({ success: true, data: insightsFixture(days) }));
   }
   if (url.includes("/api/overview/mood-trend")) {
     moodTrendRequests.push(url.slice(url.indexOf("scope=") + 6));
@@ -2981,6 +3026,77 @@ it("switches to a week of half-hour slots and captures a task from an empty one"
   expect(within(dialog).getByLabelText(/^Due/)).toHaveValue("2026-07-31T09:00");
 });
 
+describe("opening a task in the chat", () => {
+  beforeEach(() => { window.localStorage.removeItem("fieldnote:todos:open-in"); });
+
+  it("starts a new-task message when an empty day is pressed, and opens no form", async () => {
+    await openCalendar();
+    await userEvent.click(screen.getByRole("button", { name: "Add a task on Friday, July 31" }));
+    await expectPanel(true);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(within(agentPanel() as HTMLElement).getByPlaceholderText(/Ask about your work/))
+      .toHaveValue("Add a task due Friday, July 31 (2026-07-31) at 9:00 AM: ");
+  });
+
+  it("names the area a task is for when the filter picks one of yours, but never a group's name", async () => {
+    window.localStorage.setItem("fieldnote:todos:area", "area_work");
+    await openCalendar();
+    await userEvent.click(screen.getByRole("button", { name: "Add a task on Friday, July 31" }));
+    expect(within(agentPanel() as HTMLElement).getByPlaceholderText(/Ask about your work/))
+      .toHaveValue("Add a task in Work due Friday, July 31 (2026-07-31) at 9:00 AM: ");
+
+    cleanup();
+    window.localStorage.setItem("fieldnote:todos:area", "area_group");
+    await openCalendar();
+    await userEvent.click(screen.getByRole("button", { name: "Add a task on Friday, July 31" }));
+    // A group's name is whatever its members called it, so it is not written into the owner's own sentence.
+    expect(within(agentPanel() as HTMLElement).getByPlaceholderText(/Ask about your work/))
+      .toHaveValue("Add a task due Friday, July 31 (2026-07-31) at 9:00 AM: ");
+  });
+
+  it("attaches a chip, and offers the same button on the chip itself", async () => {
+    await openCalendar();
+    await userEvent.click(screen.getByRole("button", { name: "Due · Review RFC for Alex · Jul 29" }));
+    await expectPanel(true);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(within(agentPanel() as HTMLElement).getByText("Review RFC for Alex")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^Attached to chat: Review RFC for Alex/ }).length).toBeGreaterThan(0);
+  });
+
+  it("opens the form from the pencil, and on an Alt-click", async () => {
+    await openCalendar();
+    await userEvent.click(screen.getAllByRole("button", { name: "Edit: Review RFC for Alex" })[0]);
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    cleanup();
+
+    window.localStorage.setItem("fieldnote:todos:view", "table");
+    renderAt("/todos");
+    expect(await screen.findByText("The board.")).toBeInTheDocument();
+    fireEvent.click(within(taskRow("Prepare the DevCon demo")).getByRole("button", { name: "Prepare the DevCon demo" }), { altKey: true });
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("attaches a list row on a plain click", async () => {
+    renderAt("/todos");
+    expect(await screen.findByText("The board.")).toBeInTheDocument();
+    const row = taskRow("Prepare the DevCon demo");
+    await userEvent.click(within(row).getByRole("button", { name: "Prepare the DevCon demo" }));
+    await expectPanel(true);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "Attached to chat: Prepare the DevCon demo" }))
+      .toBeInTheDocument();
+  });
+
+  it("is a setting that defaults to chat and is remembered", async () => {
+    renderAt("/settings");
+    const chat = await screen.findByRole("radio", { name: "Open in chat" });
+    expect(chat).toBeChecked();
+    await userEvent.click(screen.getByRole("radio", { name: "Open the editor" }));
+    expect(window.localStorage.getItem("fieldnote:todos:open-in")).toBe("editor");
+  });
+});
+
 it("comes back to the view and filters the last visit left set", async () => {
   const first = await openCalendar();
   expect(first).toBeInTheDocument();
@@ -3457,4 +3573,47 @@ it("aborts an agent tool call whose response never arrives", async () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+describe("the Insights page", () => {
+  it("is one of the secondary pages", async () => {
+    renderAt("/");
+    const more = await screen.findByRole("navigation", { name: "Secondary pages" });
+    expect(within(more).getByRole("link", { name: "Insights" })).toHaveAttribute("href", "/insights");
+  });
+
+  it("shows the headline numbers and a section each for tasks, memories and the assistant", async () => {
+    renderAt("/insights");
+    const highlights = await screen.findByRole("region", { name: "Highlights" });
+    expect(within(highlights).getByText("Tasks completed").closest("div")).toHaveTextContent(/^Tasks completed9/);
+    expect(within(highlights).getByText("64%")).toBeInTheDocument();
+    expect(within(highlights).getByText("4 days")).toBeInTheDocument();
+    expect(within(highlights).getByText("27")).toBeInTheDocument();
+    for (const name of ["Tasks", "Memories and mood", "Assistant"]) {
+      expect(screen.getByRole("heading", { level: 2, name })).toBeInTheDocument();
+    }
+    expect(screen.getByText("Water the plants")).toBeInTheDocument();
+    expect(screen.getByText("create todo")).toBeInTheDocument();
+    expect(insightsRequests[0]).toContain("days=30");
+  });
+
+  it("reads a chart's values out beside it, not only on hover", async () => {
+    renderAt("/insights");
+    await screen.findByRole("region", { name: "Highlights" });
+    const group = screen.getByRole("group", { name: "Average mood by weekday" });
+    expect(within(group).getByText("Mon: 4.0 of 5")).toBeInTheDocument();
+  });
+
+  it("asks again for a longer window and remembers the choice", async () => {
+    renderAt("/insights");
+    await screen.findByRole("region", { name: "Highlights" });
+    await userEvent.click(within(screen.getByRole("group", { name: "Period" })).getByRole("button", { name: "90 days" }));
+    await waitFor(() => expect(insightsRequests.some(request => request.includes("days=90"))).toBe(true));
+    expect(window.localStorage.getItem("fieldnote:insights:range")).toBe("90");
+
+    cleanup();
+    renderAt("/insights");
+    await screen.findByRole("region", { name: "Highlights" });
+    expect(screen.getByRole("button", { name: "90 days" })).toHaveAttribute("aria-pressed", "true");
+  });
 });

@@ -26,6 +26,7 @@ import { registerConversationRoutes } from "./routes/conversations.ts";
 import { registerCheckinRoutes } from "./routes/checkins.ts";
 import { registerDigestBriefRoutes } from "./routes/digest-briefs.ts";
 import { registerHealthRoutes } from "./routes/health.ts";
+import { registerInsightsRoutes } from "./routes/insights.ts";
 import { registerIntegrationRoutes } from "./routes/integrations.ts";
 import { registerMemoryRoutes } from "./routes/memories.ts";
 import { registerOverviewRoutes } from "./routes/overview.ts";
@@ -64,6 +65,7 @@ const registerRoutes = [
   // After the gate, which lets `/p/*` through: these routes decide per page who may open it.
   registerPublicPageRoutes,
   registerOverviewRoutes,
+  registerInsightsRoutes,
   registerTaxonomyRoutes,
   registerTodoRoutes,
   registerMemoryRoutes,

@@ -1,4 +1,4 @@
-import { Award, BookOpen, Brain, Images, LayoutDashboard, ListTodo, Network, Settings2, Share2 } from "lucide-react";
+import { Award, BookOpen, ChartColumn, Brain, Images, LayoutDashboard, ListTodo, Network, Settings2, Share2 } from "lucide-react";
 
 // The agent is not here on purpose: it is a side panel reachable from anywhere
 // with Cmd/Ctrl+I rather than a page you navigate to.
@@ -13,6 +13,7 @@ export const nav = [
  * the three surfaces used every day.
  */
 export const navMore = [
+  { to: "/insights", label: "Insights", icon: ChartColumn },
   { to: "/reflections", label: "Reflections", icon: Award },
   { to: "/history", label: "History", icon: BookOpen },
   { to: "/pages", label: "Pages", icon: Share2 },
