@@ -61,6 +61,8 @@ Press `⌘K` (`Ctrl+K`) for universal search across memories, todos, and convers
 
 `⌘⇧D` (`Ctrl+Shift+D`) toggles demo mode, which masks the values that identify one installation — phone numbers, provider account identifiers, the public webhook URL, the Atlassian account, and the agent id — so the app can be screen-shared or recorded as it is. It is a browser-local display setting, also available under Settings > Appearance. Masked inputs keep their real value, so saving a card while it is on writes the stored value rather than the mask.
 
+The **Insights** page (`/insights`, under the secondary pages in the sidebar) is a dashboard over your own records for the last 30 days, 90 days, or year (a year is charted by the week), and it can be narrowed to one life area or to just your own items. It covers tasks (created against completed, status and priority, how long they take to finish, what is overdue and how late, a weekday-by-hour map of when you finish things, completion streaks, and the repeating tasks you keep up), memories and mood (what you save by kind, mood over time and by weekday, the moods and tags you use most), and the assistant (messages by app, text, and group chat, what it did for you, which tools it uses, and its background memory reading). It only reads what is already in SQLite, so it works without Algolia.
+
 Without Algolia credentials the app still runs: todos, memories, reminders, and conversation history all work against SQLite, and universal search, memory search, and conversation search each fall back to a SQLite `LIKE` scan. The agent panel serves a small deterministic fallback assistant rather than Agent Studio. To enable semantic search and the real agent, fill in the Algolia values in `.env` and run:
 
 ```bash

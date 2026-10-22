@@ -14802,3 +14802,180 @@ describe("hosted pages", () => {
     assert.deepEqual({ ...row }, { audience: "owner", template: "today" });
   });
 });
+
+describe("Insights", () => {
+  const DAY = 86_400_000;
+  /** An instant some days back, kept away from midnight so the owner's day does not depend on the zone. */
+  const ago = (days: number) => {
+    const date = new Date(Date.now() - days * DAY);
+    date.setUTCHours(16, 0, 0, 0);
+    return date.toISOString();
+  };
+
+  function insightsFixture() {
+    const { api, db } = fixture();
+    const todo = (id: string, fields: { status?: string; created?: number; completed?: number; due?: number; area?: string; says?: number; recurring?: boolean; priority?: string }) =>
+      db.prepare(`
+        INSERT INTO todos(id,user_id,title,status,priority,life_area_id,due_at,completed_at,recurrence_json,assistant_says,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        id, USER_ID, `Task ${id}`, fields.status ?? "pending", fields.priority ?? null, fields.area ?? null,
+        fields.due === undefined ? null : ago(fields.due), fields.completed === undefined ? null : ago(fields.completed),
+        fields.recurring ? "{}" : null, fields.says ?? 0, ago(fields.created ?? 1), ago(fields.created ?? 1),
+      );
+    const memory = (id: string, fields: { kind?: string; score?: number | null; label?: string; moods?: string; tags?: string[]; days?: number; area?: string; review?: number }) =>
+      db.prepare(`
+        INSERT INTO memories(id,user_id,title,content,kind,mood_label,mood_score,moods_json,life_area_id,review_worthy,tags_json,occurred_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        id, USER_ID, id, `Content ${id}`, fields.kind ?? "note", fields.label ?? null, fields.score ?? null, fields.moods ?? null,
+        fields.area ?? null, fields.review ?? 0, JSON.stringify(fields.tags ?? []), ago(fields.days ?? 1), ago(fields.days ?? 1), ago(fields.days ?? 1),
+      );
+    const thread = (id: string, channel: string, address: string) =>
+      db.prepare(`
+        INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?)
+      `).run(id, USER_ID, channel, address, `conversation_${id}`, ago(30), ago(30));
+    const message = (id: string, threadId: string, role: string, content: string, days: number, metadata: Record<string, unknown> = {}) =>
+      db.prepare(`
+        INSERT INTO channel_messages(id,thread_id,direction,role,content,metadata_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?)
+      `).run(id, threadId, role === "user" ? "inbound" : "outbound", role, content, JSON.stringify(metadata), ago(days), ago(days));
+    const group = () => {
+      thread("thread_group", "sms", "group:home");
+      db.prepare(`
+        INSERT INTO life_areas(id,user_id,slug,name,color,thread_id,created_at,updated_at) VALUES('area_home',?,'home','Home','#2f7d6d','thread_group',?,?)
+      `).run(USER_ID, ago(30), ago(30));
+    };
+    return { api, db, todo, memory, thread, message, group };
+  }
+
+  const data = async (api: ReturnType<typeof fixture>["api"], query = "") =>
+    (await api.get(`/api/insights${query}`).expect(200)).body.data;
+  const total = (values: number[]) => values.reduce((sum, value) => sum + value, 0);
+
+  it("counts what was finished, owed and late on the owner's own days", async () => {
+    const { api, db, todo } = insightsFixture();
+    todo("a", { status: "done", created: 5, completed: 2, priority: "high" });
+    todo("b", { status: "pending", created: 1, due: 3 });
+    todo("c", { status: "pending", created: 2, recurring: true });
+    todo("said", { status: "done", created: 2, completed: 1, says: 1 });
+    // A repeating task is finished by occurrence: its log, not its own row, says how often.
+    for (const [index, days] of [3, 1].entries()) {
+      db.prepare("INSERT INTO todo_completions(id,user_id,todo_id,occurrence_at,completed_at,created_at) VALUES(?,?,?,?,?,?)")
+        .run(`completion_${index}`, USER_ID, "c", ago(days + 0.5), ago(days), ago(days));
+    }
+    const { range, tasks } = await data(api);
+    assert.equal(range.days, 30);
+    assert.equal(range.granularity, "day");
+    assert.equal(range.buckets.length, 30);
+    assert.equal(tasks.kpis.created, 3, "a task the assistant says is not a task");
+    assert.equal(tasks.kpis.completed, 3, "one finished task and two occurrences");
+    assert.equal(tasks.kpis.open, 2);
+    assert.equal(tasks.kpis.overdue, 1);
+    assert.equal(tasks.kpis.completion_rate, 0.5, "of the two one-off tasks, one is done; the repeating one never finishes");
+    assert.equal(tasks.kpis.median_days_to_finish, 3);
+    assert.equal(total(tasks.created), 3);
+    assert.equal(total(tasks.completed), 3);
+    assert.equal(total(tasks.heatmap.flat()), 3);
+    assert.deepEqual(tasks.recurring, [{ label: "Task c", count: 2 }]);
+    assert.equal(tasks.by_status.find((item: { label: string }) => item.label === "done").count, 1);
+    assert.equal(tasks.by_priority.find((item: { label: string }) => item.label === "high").count, 1);
+    assert.equal(total(tasks.overdue_aging.map((item: { count: number }) => item.count)), 1);
+    assert.equal(tasks.kpis.streak, 3, "finishing something on each of the last three days, today still to come");
+    assert.equal(tasks.kpis.best_streak, 3);
+  });
+
+  it("summarises memories, tags and mood, and charts a year by the week", async () => {
+    const { api, memory } = insightsFixture();
+    memory("m1", { kind: "journal", score: 4, label: "Good", tags: ["Work", "gym"], days: 2, review: 1 });
+    memory("m2", { kind: "note", score: 2, label: "rough", tags: ["work"], days: 1 });
+    memory("m3", { kind: "fact", tags: [], days: 3 });
+    const { memories } = await data(api);
+    assert.equal(memories.kpis.saved, 3);
+    assert.equal(memories.kpis.average_mood, 3);
+    assert.equal(memories.kpis.mood_entries, 2);
+    assert.equal(memories.kpis.review_worthy, 1);
+    assert.deepEqual(memories.mood.distribution, [0, 1, 0, 1, 0]);
+    assert.deepEqual(memories.top_tags[0], { label: "work", count: 2 }, "tags are counted without regard to case");
+    assert.deepEqual(memories.by_kind.map((item: { count: number }) => item.count), [1, 1, 1]);
+    assert.equal(total(memories.volume.journal), 1);
+    assert.equal(memories.kpis.journal_streak, 0, "no entry yesterday or today");
+
+    const year = await data(api, "?days=365");
+    assert.equal(year.range.granularity, "week");
+    assert.ok(year.range.buckets.length >= 52 && year.range.buckets.length <= 54);
+    assert.equal(total(year.memories.volume.note), 1);
+    assert.equal(year.memories.volume.note.length, year.range.buckets.length, "every series lines up with the buckets");
+  });
+
+  it("keeps a group's records out of the owner's own view and shows them in its own", async () => {
+    const { api, todo, memory, message, thread, group } = insightsFixture();
+    group();
+    thread("thread_owner", "sms", "+17185551111");
+    thread("thread_digest", "sms", "digest:+17185551111");
+    todo("own", { status: "done", created: 3, completed: 2 });
+    todo("shared", { status: "done", created: 3, completed: 2, area: "area_home" });
+    memory("private", { score: 5, days: 2 });
+    memory("home", { score: 1, days: 2, area: "area_home" });
+    // An entry with other people's moods is the household's evening, whatever area it ended up under.
+    memory("orphan", { score: 3, days: 2, moods: JSON.stringify([{ name: "Sarah", label: "tired", score: 3 }]) });
+    message("u1", "thread_owner", "user", "add milk", 2);
+    message("u2", "thread_group", "user", "dinner?", 2);
+    message("u3", "thread_digest", "user", "compose the digest", 2);
+    message("u4", "thread_owner", "user", "compose a draft", 2, { internal: true });
+    for (const [index, ok] of [true, true, false].entries()) {
+      message(`t${index}`, index === 2 ? "thread_group" : "thread_owner", "tool", index === 2 ? "web_search" : "create_todo", 2, { output: { success: ok } });
+    }
+
+    const everything = await data(api);
+    assert.equal(everything.tasks.kpis.completed, 2);
+    assert.equal(everything.memories.kpis.saved, 3);
+    assert.equal(everything.assistant.kpis.messages, 2, "the owner's text and the group's, not the app's own turns");
+    assert.equal(everything.assistant.kpis.tool_calls, 3);
+
+    const mine = await data(api, "?scope=mine");
+    assert.equal(mine.tasks.kpis.completed, 1);
+    assert.equal(mine.memories.kpis.saved, 2, "the group's entry is left out");
+    assert.equal(mine.memories.kpis.mood_entries, 1, "the entry carrying Sarah's mood is not the owner's day");
+    assert.equal(mine.memories.kpis.average_mood, 5);
+    assert.equal(mine.assistant.kpis.messages, 1);
+    assert.equal(mine.assistant.kpis.tool_calls, 2);
+    assert.deepEqual(mine.assistant.did_for_you, [{ label: "Tasks added", count: 2 }]);
+    assert.deepEqual(mine.assistant.top_tools, [{ tool: "create_todo", calls: 2, success_rate: 1 }]);
+    assert.equal(total(mine.assistant.messages.group), 0);
+
+    const home = await data(api, "?life_area_id=area_home");
+    assert.equal(home.tasks.kpis.completed, 1);
+    assert.equal(home.memories.kpis.saved, 1);
+    assert.equal(home.assistant.kpis.messages, 1);
+    assert.equal(total(home.assistant.messages.group), 1);
+    assert.deepEqual(home.assistant.top_tools, [{ tool: "web_search", calls: 1, success_rate: 0 }]);
+  });
+
+  it("answers an empty install with zeros rather than failing, and refuses a range it does not chart", async () => {
+    const { api } = insightsFixture();
+    const empty = await data(api, "?days=90");
+    assert.equal(empty.range.buckets.length, 90);
+    assert.equal(empty.tasks.kpis.completion_rate, null);
+    assert.equal(empty.tasks.kpis.median_days_to_finish, null);
+    assert.equal(empty.memories.kpis.average_mood, null);
+    assert.equal(empty.assistant.kpis.tool_success_rate, null);
+    assert.equal(total(empty.tasks.heatmap.flat()), 0);
+    await api.get("/api/insights?days=7").expect(400);
+    await api.get("/api/insights?scope=everyone").expect(400);
+  });
+
+  it("sits behind the sign-in", async () => {
+    process.env.APP_ADMIN_PASSWORD = "correct-horse-battery-staple";
+    resetThrottling();
+    try {
+      const { api } = fixture();
+      await api.get("/api/insights").expect(401);
+      await api.get("/api/insights").auth("admin", "correct-horse-battery-staple").expect(200);
+    } finally {
+      delete process.env.APP_ADMIN_PASSWORD;
+      resetThrottling();
+    }
+  });
+});

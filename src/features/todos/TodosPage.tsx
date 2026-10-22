@@ -7,7 +7,7 @@ import type {
   LifeArea, Todo, TodoCompletion, TodoStatus,
 } from "../../types";
 import { PageHead } from "../../components/layout/PageHead";
-import { AttachButton, ErrorState, Loading } from "../../components/ui";
+import { AttachButton, EditButton, ErrorState, Loading } from "../../components/ui";
 import { LifeAreaFilter } from "../../components/ui/LifeAreaFilter";
 import { areaFilterParams, inAreaFilter, MY_ITEMS } from "../../lib/area-filter";
 import { useAreaFilter } from "../../lib/use-area-filter";
@@ -22,6 +22,11 @@ import { boardStatuses, statusMeta } from "../../lib/todo-meta";
 import { todoAttachment } from "../../lib/agent-attachments";
 import { useDeepLinkTarget } from "../../lib/use-deep-link-target";
 import { BOOLEAN, usePreference } from "../../lib/preference";
+import { useAgentPanel } from "../../lib/agent-panel";
+import { type OpenOptions, TaskOpenModeContext, openOptionsOf, useTaskOpenMode } from "../../lib/task-open-mode";
+import { dayOf, fullDayLabel, humanTimeOfDay, timeOf } from "../../lib/calendar";
+
+type OpenTodo = (todo: Todo, options?: OpenOptions) => void;
 
 type TodoView = "table" | "board" | "calendar";
 
@@ -42,6 +47,8 @@ export function TodosPage() {
   const [editor, setEditor] = useState<Todo | "new" | null>(null);
   // A task captured from the calendar opens on the slot that was clicked.
   const [capturedAt, setCapturedAt] = useState("");
+  const [openMode] = useTaskOpenMode();
+  const panel = useAgentPanel();
   const areaParams = areaFilterParams(lifeAreaId);
   // "My items" and "All areas" are not areas, so only a specific pick is carried into a new task.
   const filteredAreaId = lifeAreaId && lifeAreaId !== MY_ITEMS && lifeAreas.some(area => area.id === lifeAreaId)
@@ -103,6 +110,24 @@ export function TodosPage() {
     if (status === "done" && todo && openSubtasks(todo).length) setFinishing(todo);
     else mutation.mutate({ id, status });
   };
+  /*
+   * Every press on a task comes through here. In chat mode it hands the task to
+   * the agent so the next sentence is about it; Alt, or the pencil, is the way
+   * to the form. The editor mode is the form every time.
+   */
+  const openTodo: OpenTodo = (todo, options) => {
+    if (openMode === "chat" && !options?.manual) {
+      const parent = todo.parent_id ? fetched.find(candidate => candidate.id === todo.parent_id) : undefined;
+      panel.attach(todoAttachment(todo, allChildren.get(todo.id) || [], parent?.title));
+    } else setEditor(todo);
+  };
+  // An empty day or slot starts the sentence that would create a task there.
+  const createAt = (local: string) => {
+    if (openMode === "chat") {
+      const area = filteredAreaId ? lifeAreas.find(candidate => candidate.id === filteredAreaId)?.name : undefined;
+      panel.draft(`Add a task${area ? ` in ${area}` : ""} due ${fullDayLabel(dayOf(local))} (${dayOf(local)}) at ${humanTimeOfDay(timeOf(local))}: `);
+    } else { setCapturedAt(local); setEditor("new"); }
+  };
   const [recurringOpen, setRecurringOpen] = usePreference("todos:recurring-open", true, BOOLEAN);
   function onDragEnd(event: DragEndEvent) {
     const status = String(event.over?.id ?? "").split(":").pop() as TodoStatus;
@@ -110,7 +135,7 @@ export function TodosPage() {
   }
   if (isLoading) return <Loading />;
   if (error) return <ErrorState error={error} />;
-  return <div className="page">
+  return <TaskOpenModeContext.Provider value={openMode}><div className="page">
     <PageHead eyebrow="Plan · move · finish" title="The board." description="Work stays visible. Change a task's state from the row, drag a card on the board, or ask the agent to do it for you." />
     {/* The page's own controls sit on the toolbar: the top right corner
         belongs to the launcher now. Search narrows whatever view is open. */}
@@ -127,7 +152,7 @@ export function TodosPage() {
       </div>
     </div>
     <LifeAreaFilter areas={lifeAreas} value={lifeAreaId} onChange={setLifeAreaId}/>
-    {view === "table" && <TodoTable todos={top} children={children} onOpen={setEditor} onStatus={setStatus}/>}
+    {view === "table" && <TodoTable todos={top} children={children} onOpen={openTodo} onStatus={setStatus}/>}
     {/* Hiding done work hides the cards, never the column: finishing a task
         is a drag to Done, and the target has to be there to drag to. */}
     {view === "board" && <DndContext sensors={sensors} onDragEnd={onDragEnd}>
@@ -157,7 +182,7 @@ export function TodosPage() {
               history={lane === "recurring" && status === "done" && showDone ? history : undefined}
               children={children}
               hiddenNote={status === "done" && !showDone ? "Done tasks are hidden" : undefined}
-              onOpen={setEditor}
+              onOpen={openTodo}
               onStatus={setStatus}
             />)}
           </div>}
@@ -169,8 +194,8 @@ export function TodosPage() {
     {view === "calendar" && <CalendarView
       todos={todos}
       lifeAreas={lifeAreas}
-      onOpen={setEditor}
-      onCreate={local => { setCapturedAt(local); setEditor("new"); }}
+      onOpen={openTodo}
+      onCreate={createAt}
     />}
     {editing && <TodoModal
       todo={editing === "new" ? undefined : editing}
@@ -191,7 +216,7 @@ export function TodosPage() {
         finishAll.mutate(ids, { onSuccess: () => setFinishing(null) });
       }}
     />}
-  </div>;
+  </div></TaskOpenModeContext.Provider>;
 }
 
 type BoardLane = "one-off" | "recurring";
@@ -258,7 +283,7 @@ const statusRank = (status: TodoStatus) => {
 function TodoTable({ todos, children, onOpen, onStatus }: {
   todos: Todo[];
   children: Map<string, Todo[]>;
-  onOpen: (todo: Todo) => void;
+  onOpen: OpenTodo;
   onStatus: (id: string, status: TodoStatus) => void;
 }) {
   const timezone = useTimezone();
@@ -279,7 +304,6 @@ function TodoTable({ todos, children, onOpen, onStatus }: {
           <th scope="col">Due</th>
           <th scope="col" className="cell-optional">Priority</th>
           <th scope="col" className="cell-optional">Subtasks</th>
-          <th scope="col"><span className="visually-hidden">Actions</span></th>
         </tr>
       </thead>
       <tbody>
@@ -298,7 +322,11 @@ function TodoTable({ todos, children, onOpen, onStatus }: {
                   aria-label={`${isOpen ? "Hide" : "Show"} subtasks of ${todo.title}`}
                   onClick={() => toggle(todo.id)}
                 ><ChevronRight size={13}/></button>}
-                <button type="button" className="title-open" onClick={() => onOpen(todo)}>{todo.title}</button>
+                <button type="button" className="title-open" onClick={event => onOpen(todo, openOptionsOf(event))}>{todo.title}</button>
+                <span className="row-actions">
+                  <AttachButton item={todoAttachment(todo, subtasks)}/>
+                  <EditButton todo={todo} onOpen={onOpen}/>
+                </span>
               </div></td>
               <td className="cell-optional"><LifeAreaPill name={todo.life_area_name} slug={todo.life_area_slug}/></td>
               <td className="cell-quiet">
@@ -318,19 +346,21 @@ function TodoTable({ todos, children, onOpen, onStatus }: {
                   <SubtaskProgress done={done} going={subtasks.filter(t => t.status === "in_progress").length} total={subtasks.length} compact/>
                 </button>
                 : "—"}</td>
-              <td className="cell-actions"><AttachButton item={todoAttachment(todo, subtasks)}/></td>
             </tr>
             {isOpen && subtasks.map(subtask => <tr key={subtask.id} className="subtask-row">
               <td><StatusPicker todo={subtask} onStatus={onStatus}/></td>
               <td className="cell-title"><div className="title-cell">
                 <CornerDownRight size={13} className="subtask-glyph" aria-hidden="true"/>
-                <button type="button" className="title-open" onClick={() => onOpen(subtask)}>{subtask.title}</button>
+                <button type="button" className="title-open" onClick={event => onOpen(subtask, openOptionsOf(event))}>{subtask.title}</button>
+                <span className="row-actions">
+                  <AttachButton item={todoAttachment(subtask, [], todo.title)}/>
+                  <EditButton todo={subtask} onOpen={onOpen}/>
+                </span>
               </div></td>
               <td className="cell-optional"><LifeAreaPill name={subtask.life_area_name} slug={subtask.life_area_slug}/></td>
               <td className="cell-quiet">{subtask.due_at ? friendlyDueDate(subtask.due_at, timezone) : "—"}</td>
               <td className="cell-quiet cell-optional">{subtask.priority ? `! ${subtask.priority}` : "—"}</td>
               <td className="cell-quiet cell-optional">—</td>
-              <td className="cell-actions"><AttachButton item={todoAttachment(subtask, [], todo.title)}/></td>
             </tr>)}
           </Fragment>;
         })}
@@ -444,7 +474,7 @@ function TodoColumn({ lane, status, todos, history = [], children, hiddenNote, o
   children: Map<string, Todo[]>;
   /** Set when the column's cards are hidden by choice, so the empty column says why and still takes a drop. */
   hiddenNote?: string;
-  onOpen: (todo: Todo) => void;
+  onOpen: OpenTodo;
   onStatus: (id: string, status: TodoStatus) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `${lane}:${status}` });
@@ -457,7 +487,7 @@ function TodoColumn({ lane, status, todos, history = [], children, hiddenNote, o
     <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong>{hiddenNote && !count ? <span className="badge" title={hiddenNote}>hidden</span> : <span className="badge">{count}</span>}</div>
     <div className="column-body">{todos.map(todo => <DraggableTodo key={todo.id} todo={todo} subtasks={children.get(todo.id) || []} onOpen={onOpen} onStatus={onStatus} />)}
       {history.map(({ completion, todo }) => <article key={completion.id} className="todo-card history">
-        <h4><button type="button" className="card-open" onClick={() => onOpen(todo)}>{todo.title}</button></h4>
+        <h4><button type="button" className="card-open" onClick={event => onOpen(todo, openOptionsOf(event))}>{todo.title}</button></h4>
         <div className="todo-meta">
           <span title="Finished occurrence of a repeating task"><Repeat size={11}/>Done {friendlyDate(completion.completed_at, timezone)}</span>
         </div>
@@ -467,7 +497,7 @@ function TodoColumn({ lane, status, todos, history = [], children, hiddenNote, o
   </section>;
 }
 
-function DraggableTodo({ todo, subtasks, onOpen, onStatus }: { todo: Todo; subtasks: Todo[]; onOpen: (todo: Todo) => void; onStatus: (id: string, status: TodoStatus) => void }) {
+function DraggableTodo({ todo, subtasks, onOpen, onStatus }: { todo: Todo; subtasks: Todo[]; onOpen: OpenTodo; onStatus: (id: string, status: TodoStatus) => void }) {
   const timezone = useTimezone();
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: todo.id });
   // A card has the room the list row does not, so the steps are open by default
@@ -475,12 +505,12 @@ function DraggableTodo({ todo, subtasks, onOpen, onStatus }: { todo: Todo; subta
   const [isOpen, setIsOpen] = useState(true);
   const done = subtasks.filter(t => t.status === "done").length;
   const going = subtasks.filter(t => t.status === "in_progress").length;
-  return <article ref={setNodeRef} className={`todo-card ${isDragging ? "dragging" : ""}`} style={{ transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined }} onDoubleClick={() => onOpen(todo)}>
-    <div style={{ display: "flex", gap: 8 }}><button aria-label="Drag task" className="button icon ghost" {...listeners} {...attributes}><GripVertical size={13}/></button><div style={{ flex: 1 }}><h4><button type="button" className="card-open" onClick={() => onOpen(todo)}>{todo.title}</button></h4><div className="todo-meta">
+  return <article ref={setNodeRef} className={`todo-card ${isDragging ? "dragging" : ""}`} style={{ transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined }} onDoubleClick={event => onOpen(todo, openOptionsOf(event))}>
+    <div style={{ display: "flex", gap: 8 }}><button aria-label="Drag task" className="button icon ghost" {...listeners} {...attributes}><GripVertical size={13}/></button><div style={{ flex: 1 }}><h4><button type="button" className="card-open" onClick={event => onOpen(todo, openOptionsOf(event))}>{todo.title}</button></h4><div className="todo-meta">
       <LifeAreaPill name={todo.life_area_name} slug={todo.life_area_slug}/>{todo.category_name && <span>{todo.category_name}</span>} {todo.recurrence
         ? <span title="Repeats"><Repeat size={11}/>{todo.status === "done" ? "Done for today" : describeRecurrence(todo.recurrence)}</span>
         : <>{todo.due_at && <span>Due {friendlyDueDate(todo.due_at, timezone)}</span>} {todo.reminder_at && <span title="Reminder"><BellRing size={11}/>{friendlyDate(todo.reminder_at, timezone)}{todo.extra_reminders?.length ? ` +${todo.extra_reminders.length}` : ""}</span>}</>} {todo.priority && <span>! {todo.priority}</span>}
-    </div></div><AttachButton item={todoAttachment(todo, subtasks)} size={13}/></div>
+    </div></div><span className="card-actions"><AttachButton item={todoAttachment(todo, subtasks)} size={13}/><EditButton todo={todo} onOpen={onOpen} size={13}/></span></div>
     {subtasks.length > 0 && <div className="card-subtasks" onDoubleClick={event => event.stopPropagation()}>
       <SubtaskProgress done={done} going={going} total={subtasks.length}/>
       <button type="button" className="subtask-summary" aria-expanded={isOpen} onClick={() => setIsOpen(open => !open)}>
@@ -488,10 +518,11 @@ function DraggableTodo({ todo, subtasks, onOpen, onStatus }: { todo: Todo; subta
       </button>
       {isOpen && <ul className="subtask-list">{subtasks.map(subtask => <li key={subtask.id}>
         <SubtaskCheck todo={subtask} onToggle={() => onStatus(subtask.id, subtask.status === "done" ? "pending" : "done")}/>
-        <button type="button" className="subtask-title" onClick={() => onOpen(subtask)}>{subtask.title}</button>
+        <button type="button" className="subtask-title" onClick={event => onOpen(subtask, openOptionsOf(event))}>{subtask.title}</button>
         <SubtaskState todo={subtask}/>
         <SubtaskStart todo={subtask} onToggle={() => onStatus(subtask.id, subtask.status === "in_progress" ? "pending" : "in_progress")}/>
         <AttachButton item={todoAttachment(subtask, [], todo.title)} size={11}/>
+        <EditButton todo={subtask} onOpen={onOpen} size={11}/>
       </li>)}</ul>}
     </div>}
   </article>;

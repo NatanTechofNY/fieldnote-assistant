@@ -1,4 +1,5 @@
 export { AttachButton } from "./AttachButton";
+export { EditButton } from "./EditButton";
 export { AttachmentThumbs } from "./AttachmentThumbs";
 export { Field } from "./Field";
 export { HealthCard } from "./HealthCard";

@@ -65,6 +65,8 @@ The hosted Agent Studio search tool `personal_data_search` reads the first three
 
 **Not indexed, and not copied:** hosted pages (their saved pictures included: a block holds only attachment ids, and the bytes stay in the attachments directory). `shared_pages`, `page_votes`, and `page_events` hold what a page is made of and who answered it; a page's record-reading blocks read todos, memories, and moods from SQLite when it is opened, so nothing about a page is queued to Algolia and a page is never stale. See [Hosted pages](TOOL_ENDPOINT_MAPPING.md#hosted-pages). Anything a page *writes* to an indexed entity (a ticked checklist step is a todo status change; a shopping list or chore rotation creates todos) goes through the same functions as the REST API and so queues its index job as usual.
 
+**Derived on read, never stored:** the Insights page (`GET /api/insights`, `server/insights.ts`) is computed from `todos`, `todo_completions`, `memories`, and `channel_messages` on each request, in the owner's timezone. It writes nothing, so it enqueues no index job and has nothing to reindex.
+
 **Not indexed until you choose:** Granola meeting notes sit in a review queue and only become searchable if you save one as a memory.
 
 ## The agent, two transports, one executor

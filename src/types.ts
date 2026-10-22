@@ -263,6 +263,76 @@ export interface Overview {
   subtask_progress: Record<string, { done: number; total: number }>;
 }
 
+export interface InsightCount { label: string; count: number }
+
+/**
+ * The Insights page's one payload. Series are arrays aligned with
+ * `range.buckets`, one value per day (or per week once the range is long).
+ */
+export interface Insights {
+  range: {
+    days: number;
+    from: string;
+    to: string;
+    timezone: string;
+    granularity: "day" | "week";
+    buckets: string[];
+  };
+  tasks: {
+    kpis: {
+      created: number;
+      completed: number;
+      completion_rate: number | null;
+      open: number;
+      overdue: number;
+      median_days_to_finish: number | null;
+      streak: number;
+      best_streak: number;
+      subtask_completion_rate: number | null;
+    };
+    created: number[];
+    completed: number[];
+    by_status: InsightCount[];
+    by_priority: InsightCount[];
+    by_area: Array<{ id: string | null; name: string; color: string | null; created: number; completed: number }>;
+    time_to_finish: InsightCount[];
+    overdue_aging: InsightCount[];
+    /** Completions by weekday (Monday first) and hour of the day. */
+    heatmap: number[][];
+    recurring: InsightCount[];
+  };
+  memories: {
+    kpis: {
+      saved: number;
+      journal_streak: number;
+      review_worthy: number;
+      with_pictures: number;
+      average_mood: number | null;
+      mood_entries: number;
+    };
+    by_kind: InsightCount[];
+    volume: Record<"fact" | "note" | "journal", number[]>;
+    top_tags: InsightCount[];
+    mood: {
+      daily: Array<number | null>;
+      /** Entries scored 1 through 5. */
+      distribution: number[];
+      /** Average score by weekday, Monday first. */
+      by_weekday: Array<number | null>;
+      top_labels: InsightCount[];
+    };
+  };
+  assistant: {
+    kpis: { messages: number; active_days: number; tool_calls: number; tool_success_rate: number | null };
+    messages: { web: number[]; sms: number[]; group: number[] };
+    top_tools: Array<{ tool: string; calls: number; success_rate: number }>;
+    did_for_you: InsightCount[];
+    sweeps: { runs: number; sent: number; failed: number };
+  };
+}
+
+export type InsightsRange = 30 | 90 | 365;
+
 export interface Health {
   sqlite: { ok: boolean; records?: number };
   algolia: {

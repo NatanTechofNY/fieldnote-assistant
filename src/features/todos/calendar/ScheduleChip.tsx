@@ -4,6 +4,9 @@ import { BellRing, CornerDownRight, GitBranch, Repeat } from "lucide-react";
 import type { Todo } from "../../../types";
 import type { ScheduleChip as Chip } from "../../../lib/calendar";
 import { friendlyDate, friendlyDueDate } from "../../../lib/timezone";
+import type { AgentAttachment } from "../../../lib/agent-attachments";
+import { type OpenOptions, openOptionsOf } from "../../../lib/task-open-mode";
+import { AttachButton, EditButton } from "../../../components/ui";
 import { chipMetaLabel, chipTone } from "./chip-visuals";
 
 const kindWord: Record<Chip["kind"], string> = {
@@ -13,10 +16,12 @@ const kindWord: Record<Chip["kind"], string> = {
 };
 
 export function ScheduleChip({
-  chip, parentTitle, steps, timezone, chainId, chainColor, linked, dimmed, moving, compact, dense, describedBy,
+  chip, attachment, parentTitle, steps, timezone, chainId, chainColor, linked, dimmed, moving, compact, dense, describedBy,
   register, onOpen, onMoveStart, onChainHover,
 }: {
   chip: Chip;
+  /** The task as the agent is shown it, for the attach button. */
+  attachment: AgentAttachment;
   parentTitle?: string | null;
   steps: number;
   timezone: string;
@@ -29,7 +34,7 @@ export function ScheduleChip({
   dense?: boolean;
   describedBy?: string;
   register: (key: string, node: HTMLElement | null) => void;
-  onOpen: (todo: Todo) => void;
+  onOpen: (todo: Todo, options?: OpenOptions) => void;
   onMoveStart: (chip: Chip) => void;
   onChainHover: (chainId: string | null) => void;
 }) {
@@ -54,7 +59,14 @@ export function ScheduleChip({
     when,
     ...(repeats ? ["repeats"] : []),
   ].join(" · ");
-  return <button
+  /*
+   * The chip is one button that drags and opens, and a button cannot hold
+   * buttons, so the attach and edit controls are its siblings in a wrapper and
+   * float over its corner. The chip stays the node that is dragged, measured,
+   * and named, so none of that cares the wrapper is there.
+   */
+  return <div className={`cal-chip-wrap${isSubtask ? " subtask" : ""}`}>
+  <button
     type="button"
     ref={node => { setNodeRef(node); register(chip.key, node); }}
     {...attributes}
@@ -65,7 +77,7 @@ export function ScheduleChip({
       + `${isSubtask ? " subtask" : ""}${isDragging ? " dragging" : ""}${linked ? " linked" : ""}`
       + `${dimmed ? " dimmed" : ""}${moving ? " moving" : ""}`}
     style={{ "--chip-tone": chipTone(chip), "--chain-tone": chainColor } as CSSProperties}
-    onClick={() => onOpen(chip.todo)}
+    onClick={event => onOpen(chip.todo, openOptionsOf(event))}
     onPointerEnter={() => onChainHover(chainId)}
     onPointerLeave={() => onChainHover(null)}
     onFocus={() => onChainHover(chainId)}
@@ -96,5 +108,10 @@ export function ScheduleChip({
         <GitBranch size={10} />{steps}
       </span>}
     </span>}
-  </button>;
+  </button>
+  <span className="cal-chip-actions">
+    <AttachButton item={attachment} size={11}/>
+    {!dense && <EditButton todo={chip.todo} onOpen={onOpen} size={11}/>}
+  </span>
+  </div>;
 }

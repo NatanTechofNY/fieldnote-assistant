@@ -14,6 +14,8 @@ import {
 } from "../../../lib/calendar";
 import { useTimezone, zonedDateTimeLocalToIso } from "../../../lib/timezone";
 import { BOOLEAN, usePreference } from "../../../lib/preference";
+import { todoAttachment } from "../../../lib/agent-attachments";
+import type { OpenOptions } from "../../../lib/task-open-mode";
 import { FlowLinks, type FlowLink } from "./FlowLinks";
 import { MonthGrid } from "./MonthGrid";
 import { ScheduleChip } from "./ScheduleChip";
@@ -40,7 +42,7 @@ function inputFor(chip: Chip, iso: string | null): Partial<Todo> {
 export function CalendarView({ todos, lifeAreas, onOpen, onCreate }: {
   todos: Todo[];
   lifeAreas: LifeArea[];
-  onOpen: (todo: Todo) => void;
+  onOpen: (todo: Todo, options?: OpenOptions) => void;
   onCreate: (defaultDueAt: string) => void;
 }) {
   const timezone = useTimezone();
@@ -310,6 +312,7 @@ export function CalendarView({ todos, lifeAreas, onOpen, onCreate }: {
     return <ScheduleChip
       key={chip.key}
       chip={chip}
+      attachment={todoAttachment(chip.todo, children.get(chip.todo.id) || [], chip.todo.parent_id ? titles.get(chip.todo.parent_id) : undefined)}
       dense={dense}
       parentTitle={chip.todo.parent_id ? titles.get(chip.todo.parent_id) : null}
       steps={chip.kind === "due" ? (children.get(chip.todo.id) || []).length : 0}
