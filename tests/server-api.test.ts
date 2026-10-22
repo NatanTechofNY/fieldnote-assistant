@@ -14953,6 +14953,47 @@ describe("Insights", () => {
     assert.deepEqual(home.assistant.top_tools, [{ tool: "web_search", calls: 1, success_rate: 0 }]);
   });
 
+  it("has no conversation to count for an area that owns no group chat", async () => {
+    const { api, db, todo, message, thread } = insightsFixture();
+    thread("thread_owner", "sms", "+17185551111");
+    db.prepare("INSERT INTO life_areas(id,user_id,slug,name,color,created_at,updated_at) VALUES('area_insights_work',?,'insights-work','Insights Work','#445',?,?)")
+      .run(USER_ID, ago(30), ago(30));
+    todo("work", { status: "done", created: 3, completed: 2, area: "area_insights_work" });
+    message("u1", "thread_owner", "user", "add milk", 2);
+    message("t1", "thread_owner", "tool", "create_todo", 2, { output: { success: true } });
+    const work = await data(api, "?life_area_id=area_insights_work");
+    assert.equal(work.tasks.kpis.completed, 1, "the area's own tasks are still counted");
+    assert.equal(work.assistant.kpis.messages, 0, "the owner's other conversations are not the area's");
+    assert.equal(work.assistant.kpis.tool_calls, 0);
+    assert.deepEqual(work.assistant.did_for_you, []);
+  });
+
+  it("counts only the sweeps inside the window and keeps a group's out of the owner's own", async () => {
+    const { api, db, group } = insightsFixture();
+    group();
+    const sweep = (id: string, key: string, days: number, status: string) =>
+      db.prepare(`
+        INSERT INTO scheduled_dispatches(id,user_id,kind,idempotency_key,scheduled_for,status,attempts,created_at,updated_at)
+        VALUES(?,?,'memory_sweep',?,?,?,1,?,?)
+      `).run(id, USER_ID, key, ago(days), status, ago(days), ago(days));
+    sweep("s_in", "memory_sweep:thread_owner:1", 2, "sent");
+    sweep("s_fail", "memory_sweep:thread_owner:2", 3, "failed");
+    sweep("s_group", "memory_sweep:thread_group:1", 2, "sent");
+    sweep("s_old", "memory_sweep:thread_owner:3", 31, "sent");
+    const all = await data(api);
+    assert.deepEqual(all.assistant.sweeps, { runs: 3, sent: 2, failed: 1 }, "a sweep from before the window is not counted");
+    const mine = await data(api, "?scope=mine");
+    assert.deepEqual(mine.assistant.sweeps, { runs: 2, sent: 1, failed: 1 });
+  });
+
+  it("counts a memory saved today whose entry is dated long before the history it reads", async () => {
+    const { api, db, memory } = insightsFixture();
+    memory("backdated", { kind: "journal", days: 1 });
+    db.prepare("UPDATE memories SET occurred_at=? WHERE id='backdated'").run(ago(500));
+    const { memories } = await data(api);
+    assert.equal(memories.kpis.saved, 1);
+  });
+
   it("answers an empty install with zeros rather than failing, and refuses a range it does not chart", async () => {
     const { api } = insightsFixture();
     const empty = await data(api, "?days=90");

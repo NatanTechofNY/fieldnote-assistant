@@ -261,8 +261,8 @@ function memoriesSection(db: Db, scope: InsightsScope, frame: Frame, today: stri
   const rows = db.prepare(`
     SELECT m.id,m.kind,m.mood_label,m.mood_score,m.moods_json,m.tags_json,m.occurred_at,m.created_at,m.review_worthy,
       EXISTS(SELECT 1 FROM memory_attachments ma WHERE ma.memory_id=m.id) has_pictures
-    FROM memories m WHERE m.user_id=? AND COALESCE(m.occurred_at,m.created_at)>=?${where.sql}
-  `).all(USER_ID, horizon, ...where.args) as MemoryRecord[];
+    FROM memories m WHERE m.user_id=? AND (m.created_at>=? OR COALESCE(m.occurred_at,m.created_at)>=?)${where.sql}
+  `).all(USER_ID, horizon, horizon, ...where.args) as MemoryRecord[];
 
   const saved = rows.filter(row => frame.bucketOf(row.created_at) >= 0);
   const volume: Record<string, number[]> = Object.fromEntries(KINDS.map(kind => [kind, zeros(frame.buckets.length)]));
@@ -338,7 +338,8 @@ function assistantSection(db: Db, scope: InsightsScope, frame: Frame, from: stri
   const threadWanted = (threadId: string): boolean => {
     if (scope.kind === "all") return true;
     if (scope.kind === "mine") return !groupThreads.has(threadId);
-    return scopedArea?.thread_id ? scopedArea.thread_id === threadId : !groupThreads.has(threadId);
+    // An area with no group chat has no conversation of its own to count.
+    return scopedArea?.thread_id === threadId;
   };
   const internal = INTERNAL_THREAD_PREFIXES.map(() => "t.address NOT LIKE ?").join(" AND ");
   const prefixArgs = INTERNAL_THREAD_PREFIXES.map(prefix => `${prefix}%`);
@@ -385,9 +386,9 @@ function assistantSection(db: Db, scope: InsightsScope, frame: Frame, from: stri
 
   // A sweep is named for the thread it read, so a group's sweeps are fenced the same way its messages are.
   const sweeps = (db.prepare(`
-    SELECT status,idempotency_key FROM scheduled_dispatches WHERE user_id=? AND kind='memory_sweep' AND scheduled_for>=?
-  `).all(USER_ID, from) as Array<{ status: string; idempotency_key: string }>)
-    .filter(row => threadWanted(row.idempotency_key.split(":")[1] ?? ""));
+    SELECT status,idempotency_key,scheduled_for FROM scheduled_dispatches WHERE user_id=? AND kind='memory_sweep' AND scheduled_for>=?
+  `).all(USER_ID, from) as Array<{ status: string; idempotency_key: string; scheduled_for: string }>)
+    .filter(row => frame.bucketOf(row.scheduled_for) >= 0 && threadWanted(row.idempotency_key.split(":")[1] ?? ""));
 
   return {
     kpis: {
