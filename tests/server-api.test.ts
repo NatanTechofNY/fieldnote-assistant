@@ -81,6 +81,7 @@ import { closePollsNow, createPage, getPage, MAX_VOTERS, optionId, pageIsLive, r
 import { resetPageWriteThrottle, setPictureLoadLimit } from "../server/routes/public-pages.ts";
 import { resetWebState } from "../server/web-service.ts";
 import { pullGifLine, rememberImages } from "../server/image-output.ts";
+import { buildInsights } from "../server/insights.ts";
 import { combineMoods, mergeMoods } from "../server/moods.ts";
 import { isTransientFailure, TransientFailure } from "../server/transient.ts";
 import { dayWithWeekday, localParts, namesOtherWeekday, weekdayOf } from "../server/local-time.ts";
@@ -14921,18 +14922,26 @@ describe("Insights", () => {
     // An entry with other people's moods is the household's evening, whatever area it ended up under.
     memory("orphan", { score: 3, days: 2, moods: JSON.stringify([{ name: "Sarah", label: "tired", score: 3 }]) });
     message("u1", "thread_owner", "user", "add milk", 2);
-    message("u2", "thread_group", "user", "dinner?", 2);
+    message("u2", "thread_group", "user", "dinner?", 2, { speakerIsOwner: true });
+    // What the rest of the group says, and what is held until the assistant is named, is not the owner using it.
+    message("u5", "thread_group", "user", "I'll bring dessert", 2, { speakerIsOwner: false });
+    message("u6", "thread_group", "user", "anyone seen the keys", 2, { speakerIsOwner: true, heldUntilNamed: true });
     message("u3", "thread_digest", "user", "compose the digest", 2);
     message("u4", "thread_owner", "user", "compose a draft", 2, { internal: true });
     for (const [index, ok] of [true, true, false].entries()) {
       message(`t${index}`, index === 2 ? "thread_group" : "thread_owner", "tool", index === 2 ? "web_search" : "create_todo", 2, { output: { success: ok } });
     }
+    // A group's memory sweep keeps what it reads on a thread of its own; the work is still the group's.
+    thread("thread_sweep", "sms", "sweep:thread_group");
+    message("t3", "thread_sweep", "tool", "create_memory", 2, { output: { success: true } });
+    // The owner's own digest runs on a scratch thread too, and is the owner's.
+    message("t4", "thread_digest", "tool", "create_todo", 2, { output: { success: true } });
 
     const everything = await data(api);
     assert.equal(everything.tasks.kpis.completed, 2);
     assert.equal(everything.memories.kpis.saved, 3);
     assert.equal(everything.assistant.kpis.messages, 2, "the owner's text and the group's, not the app's own turns");
-    assert.equal(everything.assistant.kpis.tool_calls, 3);
+    assert.equal(everything.assistant.kpis.tool_calls, 5);
 
     const mine = await data(api, "?scope=mine");
     assert.equal(mine.tasks.kpis.completed, 1);
@@ -14940,9 +14949,9 @@ describe("Insights", () => {
     assert.equal(mine.memories.kpis.mood_entries, 1, "the entry carrying Sarah's mood is not the owner's day");
     assert.equal(mine.memories.kpis.average_mood, 5);
     assert.equal(mine.assistant.kpis.messages, 1);
-    assert.equal(mine.assistant.kpis.tool_calls, 2);
-    assert.deepEqual(mine.assistant.did_for_you, [{ label: "Tasks added", count: 2 }]);
-    assert.deepEqual(mine.assistant.top_tools, [{ tool: "create_todo", calls: 2, success_rate: 1 }]);
+    assert.equal(mine.assistant.kpis.tool_calls, 3, "the group's sweep is not the owner's, the owner's digest is");
+    assert.deepEqual(mine.assistant.did_for_you, [{ label: "Tasks added", count: 3 }]);
+    assert.deepEqual(mine.assistant.top_tools, [{ tool: "create_todo", calls: 3, success_rate: 1 }]);
     assert.equal(total(mine.assistant.messages.group), 0);
 
     const home = await data(api, "?life_area_id=area_home");
@@ -14950,7 +14959,59 @@ describe("Insights", () => {
     assert.equal(home.memories.kpis.saved, 1);
     assert.equal(home.assistant.kpis.messages, 1);
     assert.equal(total(home.assistant.messages.group), 1);
-    assert.deepEqual(home.assistant.top_tools, [{ tool: "web_search", calls: 1, success_rate: 0 }]);
+    assert.deepEqual(home.assistant.top_tools, [
+      { tool: "create_memory", calls: 1, success_rate: 1 },
+      { tool: "web_search", calls: 1, success_rate: 0 },
+    ], "the group's own view includes what its sweep did");
+    assert.deepEqual(home.assistant.did_for_you, [{ label: "Memories saved", count: 1 }]);
+  });
+
+  it("counts the app's own chat panel, and does not score a call that never said how it went as a failure", async () => {
+    const { api, thread, message } = insightsFixture();
+    thread("thread_web", "web", "browser-agent");
+    thread("thread_owner", "sms", "+17185551111");
+    // The browser runs its tools itself and syncs them as parts on the assistant's message.
+    message("w1", "thread_web", "assistant", "Tools: create_todo", 2, { parts: [
+      { type: "tool-create_todo", state: "output-available", output: { success: true } },
+      { type: "tool-update_todo", state: "output-error", output: { success: false } },
+      { type: "tool-algolia_search_index_todos", state: "output-available", output: { hits: [] } },
+      { type: "text", text: "done" },
+    ] });
+    message("w2", "thread_web", "assistant", "not json parts", 2, {});
+    // A call the log holds no outcome for is counted, but neither a success nor a failure.
+    message("t1", "thread_owner", "tool", "mystery_tool", 2, {});
+    const { assistant } = await data(api);
+    assert.equal(assistant.kpis.tool_calls, 4);
+    assert.equal(assistant.kpis.tool_success_rate, 0.667, "two worked and one failed; the silent call is left out");
+    assert.deepEqual(assistant.did_for_you, [{ label: "Tasks added", count: 1 }]);
+    assert.equal(assistant.top_tools.find((item: { tool: string }) => item.tool === "mystery_tool").success_rate, null);
+    assert.equal(assistant.top_tools.find((item: { tool: string }) => item.tool === "algolia_search_index_todos").success_rate, 1);
+  });
+
+  it("puts a day at the owner's midnight, across a clock change, and reads a year in whole weeks", async () => {
+    const { db } = insightsFixture();
+    db.prepare("UPDATE notification_preferences SET timezone='America/New_York' WHERE user_id=?").run(USER_ID);
+    const note = (id: string, at: string) =>
+      db.prepare(`
+        INSERT INTO memories(id,user_id,title,content,kind,tags_json,occurred_at,created_at,updated_at) VALUES(?,?,?,?,'note','[]',?,?,?)
+      `).run(id, USER_ID, id, id, at, at, at);
+    // New York's clocks went forward at 07:00 UTC on 8 March 2026, so that day was 23 hours long.
+    note("late_on_the_7th", "2026-03-08T04:30:00.000Z");
+    note("early_on_the_8th", "2026-03-08T05:30:00.000Z");
+    note("last_minute_of_the_8th", "2026-03-09T03:59:00.000Z");
+    note("first_minute_of_the_9th", "2026-03-09T04:00:00.000Z");
+    const now = new Date("2026-03-09T12:00:00.000Z");
+    const { memories, range } = buildInsights(db, { days: 30, scope: { kind: "all" }, now });
+    assert.equal(range.to, "2026-03-09");
+    const volume = (date: string) => memories.volume.note[range.buckets.indexOf(date)];
+    assert.equal(volume("2026-03-07"), 1, "04:30 UTC is 23:30 the evening before in New York");
+    assert.equal(volume("2026-03-08"), 2, "from 05:30 UTC until the next local midnight at 04:00 UTC");
+    assert.equal(volume("2026-03-09"), 1);
+
+    const year = buildInsights(db, { days: 365, scope: { kind: "all" }, now });
+    assert.equal(new Date(`${year.range.from}T00:00:00Z`).getUTCDay(), 1, "the first bar is a whole week, starting on a Monday");
+    assert.equal(year.range.buckets[0], year.range.from);
+    assert.equal(total(year.memories.volume.note), 4);
   });
 
   it("has no conversation to count for an area that owns no group chat", async () => {

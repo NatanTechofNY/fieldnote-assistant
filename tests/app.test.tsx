@@ -3038,6 +3038,22 @@ describe("opening a task in the chat", () => {
       .toHaveValue("Add a task due Friday, July 31 (2026-07-31) at 9:00 AM: ");
   });
 
+  it("names the area a task is for when the filter picks one of yours, but never a group's name", async () => {
+    window.localStorage.setItem("fieldnote:todos:area", "area_work");
+    await openCalendar();
+    await userEvent.click(screen.getByRole("button", { name: "Add a task on Friday, July 31" }));
+    expect(within(agentPanel() as HTMLElement).getByPlaceholderText(/Ask about your work/))
+      .toHaveValue("Add a task in Work due Friday, July 31 (2026-07-31) at 9:00 AM: ");
+
+    cleanup();
+    window.localStorage.setItem("fieldnote:todos:area", "area_group");
+    await openCalendar();
+    await userEvent.click(screen.getByRole("button", { name: "Add a task on Friday, July 31" }));
+    // A group's name is whatever its members called it, so it is not written into the owner's own sentence.
+    expect(within(agentPanel() as HTMLElement).getByPlaceholderText(/Ask about your work/))
+      .toHaveValue("Add a task due Friday, July 31 (2026-07-31) at 9:00 AM: ");
+  });
+
   it("attaches a chip, and offers the same button on the chip itself", async () => {
     await openCalendar();
     await userEvent.click(screen.getByRole("button", { name: "Due · Review RFC for Alex · Jul 29" }));
@@ -3579,6 +3595,13 @@ describe("the Insights page", () => {
     expect(screen.getByText("Water the plants")).toBeInTheDocument();
     expect(screen.getByText("create todo")).toBeInTheDocument();
     expect(insightsRequests[0]).toContain("days=30");
+  });
+
+  it("reads a chart's values out beside it, not only on hover", async () => {
+    renderAt("/insights");
+    await screen.findByRole("region", { name: "Highlights" });
+    const group = screen.getByRole("group", { name: "Average mood by weekday" });
+    expect(within(group).getByText("Mon: 4.0 of 5")).toBeInTheDocument();
   });
 
   it("asks again for a longer window and remembers the choice", async () => {

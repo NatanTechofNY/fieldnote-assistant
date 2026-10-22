@@ -37,6 +37,8 @@ export function InsightsPage() {
     queryKey: ["insights", days, areaParams.life_area_id ?? "", areaParams.scope ?? ""],
     queryFn: () => api.insights(days, areaParams),
     // Changing the window keeps the page up while the new numbers arrive.
+    // Slow-moving totals that the server also keeps briefly: flicking between ranges should not recompute them.
+    staleTime: 60_000,
     placeholderData: previous => previous,
   });
   return <div className="page">
@@ -78,7 +80,7 @@ function Dashboard({ data, areas }: { data: Insights; areas: LifeArea[] }) {
   const weekly = granularity === "week";
   return <>
     <p className="ins-period">
-      {shortDate(range.from)} – {shortDate(range.to)} · {plural(range.days, "day")}{weekly ? " · charted by week" : ""} · {range.timezone}
+      {shortDate(range.from)} – {shortDate(range.to)} · {plural(range.days, "day")}{weekly ? " · charted by week, the latest still in progress" : ""} · {range.timezone}
     </p>
     <section className="kpi-strip ins-kpis" aria-label="Highlights">
       {kpis.map(item => <div key={item.label} style={{ "--kpi": item.color } as CSSProperties}>
@@ -183,7 +185,7 @@ function Dashboard({ data, areas }: { data: Insights; areas: LifeArea[] }) {
           columnLabel={index => WEEKDAYS[index]}
           min={1}
           max={5}
-          cell={value => `${value.toFixed(1)} of 5`}
+          cell={(value, _row, column) => `${WEEKDAYS[column]}: ${value.toFixed(1)} of 5`}
           label="Average mood by weekday"
           color="var(--success)"
         />
@@ -208,7 +210,7 @@ function Dashboard({ data, areas }: { data: Insights; areas: LifeArea[] }) {
 
     <div className="ins-section"><h2>Assistant</h2><p>How much you talk to it, and what it does.</p></div>
     <div className="ins-grid">
-      <InsightCard title="Messages to the assistant" note={weekly ? "per week" : "per day"} wide>
+      <InsightCard title="Messages to the assistant" note={`${weekly ? "per week" : "per day"} · yours, not other people's in a group`} wide>
         <BarSeries
           buckets={buckets}
           granularity={granularity}
@@ -226,7 +228,7 @@ function Dashboard({ data, areas }: { data: Insights; areas: LifeArea[] }) {
       </InsightCard>
       <InsightCard title="Most used tools" note={assistant.kpis.tool_success_rate === null ? undefined : `${percent(assistant.kpis.tool_success_rate)} succeeded`}>
         <BarList
-          items={assistant.top_tools.map(item => ({ label: toolLabel(item.tool), count: item.calls, detail: `${percent(item.success_rate)} succeeded` }))}
+          items={assistant.top_tools.map(item => ({ label: toolLabel(item.tool), count: item.calls, detail: item.success_rate === null ? undefined : `${percent(item.success_rate)} succeeded` }))}
           empty="Tool calls will show up here."
         />
       </InsightCard>

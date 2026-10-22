@@ -30,7 +30,9 @@ const DAY_MS = 86_400_000;
  * Threads the app opens for its own work. What is said in them is the app
  * talking to the agent, not the owner talking to it.
  */
-export const INTERNAL_THREAD_PREFIXES = ["digest:", "sweep:", "profile:", "reflection:"] as const;
+export const INTERNAL_THREAD_PREFIXES = [
+  "digest:", "sweep:", "profile:", "reflection:", "performance-review:", "checkin-ask:",
+] as const;
 
 const DURATION_LABELS = ["Under a day", "1–3 days", "3–7 days", "1–2 weeks", "Over 2 weeks"] as const;
 const STATUSES = ["pending", "in_progress", "blocked", "done", "cancelled"] as const;
@@ -115,20 +117,44 @@ function scopeSql(scope: InsightsScope, alias: string): { sql: string; args: str
 
 /** The days the charts run along, as dated buckets: a day each, or a week each once the range is long. */
 function timeline(today: string, days: number, timezone: string) {
-  const first = addDays(today, -(days - 1));
   const granularity: "day" | "week" = days > 90 ? "week" : "day";
   const keyOf = (date: string) => granularity === "week" ? weekStart(date) : date;
+  // A long range is read in whole weeks, so its first bar is a week and not the tail of one.
+  const first = granularity === "week" ? weekStart(addDays(today, -(days - 1))) : addDays(today, -(days - 1));
   const buckets: string[] = [];
   for (let date = first; date <= today; date = addDays(date, 1)) {
     const key = keyOf(date);
     if (buckets[buckets.length - 1] !== key) buckets.push(key);
   }
   const index = new Map(buckets.map((key, position) => [key, position]));
+
+  /*
+   * Where each local day begins, as an instant, for every day the page reads. A
+   * row's own day is then a search through these few hundred numbers rather than
+   * a formatted date, which is what made a year of messages slow. Each start is
+   * worked out on its own, so a day a clock change makes 23 or 25 hours long is
+   * bounded correctly. Anything outside them falls back to the formatter.
+   */
+  const starts: Array<{ date: string; at: number }> = [];
+  for (let date = addDays(today, -(STREAK_HORIZON_DAYS + 2)); date <= addDays(today, 1); date = addDays(date, 1)) {
+    starts.push({ date, at: zonedToInstant(date, "00:00", timezone).getTime() });
+  }
+  const startOf = (date: string) => starts.find(entry => entry.date === date)?.at ?? 0;
+  const lastStart = starts[starts.length - 1].at;
+
   /** The owner's local date of an instant, or null when it is not a date. */
   const dateOf = (iso: string | null | undefined): string | null => {
     if (!iso) return null;
-    const at = new Date(iso);
-    return Number.isNaN(at.getTime()) ? null : localParts(at, timezone).date;
+    const at = Date.parse(iso);
+    if (Number.isNaN(at)) return null;
+    if (at < starts[0].at || at >= lastStart + 2 * DAY_MS) return localParts(new Date(at), timezone).date;
+    let low = 0;
+    let high = starts.length - 1;
+    while (low < high) {
+      const middle = (low + high + 1) >> 1;
+      if (starts[middle].at <= at) low = middle; else high = middle - 1;
+    }
+    return starts[low].date;
   };
   /** The bucket an instant falls in, or -1 outside the range. */
   const bucketOf = (iso: string | null | undefined): number => {
@@ -136,7 +162,12 @@ function timeline(today: string, days: number, timezone: string) {
     if (!date || date < first || date > today) return -1;
     return index.get(keyOf(date)) ?? -1;
   };
-  return { first, granularity, buckets, dateOf, bucketOf };
+  return {
+    first, granularity, buckets, dateOf, bucketOf,
+    /** The range as instants: the start of its first day, and the start of the day after today. */
+    startIso: new Date(startOf(first)).toISOString(),
+    endIso: new Date(lastStart).toISOString(),
+  };
 }
 
 type Frame = ReturnType<typeof timeline>;
@@ -152,12 +183,14 @@ type AreaRow = { id: string; name: string; color: string; thread_id: string | nu
 
 function tasksSection(db: Db, scope: InsightsScope, frame: Frame, today: string, timezone: string, now: Date, areas: AreaRow[]) {
   const where = scopeSql(scope, "t");
+  const horizon = new Date(now.getTime() - STREAK_HORIZON_DAYS * DAY_MS).toISOString();
+  // What is open, or was started or finished inside the history read: a task closed years ago says nothing here.
   const todos = db.prepare(`
     SELECT t.id,t.title,t.status,t.priority,t.parent_id,t.due_at,t.created_at,t.completed_at,
       t.recurrence_json IS NOT NULL recurring,t.life_area_id
-    FROM todos t WHERE t.user_id=? AND t.assistant_says=0${where.sql}
-  `).all(USER_ID, ...where.args) as TodoRecord[];
-  const horizon = new Date(now.getTime() - STREAK_HORIZON_DAYS * DAY_MS).toISOString();
+    FROM todos t WHERE t.user_id=? AND t.assistant_says=0
+      AND (t.status IN ('pending','in_progress','blocked') OR t.created_at>=? OR t.completed_at>=?)${where.sql}
+  `).all(USER_ID, horizon, horizon, ...where.args) as TodoRecord[];
   // Occurrences of repeating tasks live in their own log; a one-off task is finished once, on its own row.
   const occurrences = db.prepare(`
     SELECT c.todo_id,c.completed_at,t.title,t.life_area_id FROM todo_completions c
@@ -331,10 +364,44 @@ function memoriesSection(db: Db, scope: InsightsScope, frame: Frame, today: stri
   };
 }
 
-function assistantSection(db: Db, scope: InsightsScope, frame: Frame, from: string, areas: AreaRow[]) {
+type Outcome = "ok" | "failed" | "unknown";
+
+/**
+ * Whether a tool call worked. The app's own tools say so in `output.success`;
+ * a hosted tool such as the search carries only the state the call ended in, so
+ * that is read when the output is silent, and a call that says nothing either
+ * way is left out of the success rate rather than counted as a failure.
+ */
+function outcomeOf(success: unknown, state: unknown): Outcome {
+  if (success === 1 || success === true) return "ok";
+  if (success === 0 || success === false) return "failed";
+  if (state === "output-error") return "failed";
+  if (state === "output-available") return "ok";
+  return "unknown";
+}
+
+type ToolRow = { thread_id: string; address: string; tool: string; success: unknown; state: unknown; n: number };
+
+function assistantSection(db: Db, scope: InsightsScope, frame: Frame, areas: AreaRow[]) {
   // Which threads count, decided from the life areas: a group chat is the thread one of them owns.
   const groupThreads = new Set(areas.map(area => area.thread_id).filter((id): id is string => Boolean(id)));
-  const scopedArea = scope.kind === "area" ? areas.find(area => area.id === scope.id) : undefined;
+  const areaById = new Map(areas.map(area => [area.id, area]));
+  const scopedArea = scope.kind === "area" ? areaById.get(scope.id) : undefined;
+  /*
+   * The chat a piece of work belongs to. The app does some of its work on
+   * threads of its own, named for what they read: a group's memory sweep runs
+   * on `sweep:<thread>`, its profile rewrite on `profile:<area>`, a check-in's
+   * wording on `checkin-ask:<kind>:<area>`. What those threads do is the
+   * group's, and must not land in the owner's own view; everything else the app
+   * composes is the owner's, and is the empty string, which is no group.
+   */
+  const sourceOf = (address: string, threadId: string): string => {
+    const [prefix, ...rest] = address.split(":");
+    if (prefix === "sweep") return rest.join(":");
+    if (prefix === "profile") return areaById.get(rest.join(":"))?.thread_id ?? "";
+    if (prefix === "checkin-ask") return areaById.get(rest[1] ?? "")?.thread_id ?? "";
+    return INTERNAL_THREAD_PREFIXES.some(known => address.startsWith(known)) ? "" : threadId;
+  };
   const threadWanted = (threadId: string): boolean => {
     if (scope.kind === "all") return true;
     if (scope.kind === "mine") return !groupThreads.has(threadId);
@@ -344,13 +411,23 @@ function assistantSection(db: Db, scope: InsightsScope, frame: Frame, from: stri
   const internal = INTERNAL_THREAD_PREFIXES.map(() => "t.address NOT LIKE ?").join(" AND ");
   const prefixArgs = INTERNAL_THREAD_PREFIXES.map(prefix => `${prefix}%`);
 
+  /*
+   * Messages to the assistant: what the owner typed, in the app or by text, and
+   * in a group what the owner said there. What other members say in a group, or
+   * says before the assistant has been named, is the group talking, not the
+   * owner using the assistant.
+   */
   const messages = (db.prepare(`
-    SELECT m.created_at,m.thread_id,t.channel FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
-    WHERE t.user_id=? AND m.role='user' AND m.direction='inbound' AND m.created_at>=? AND ${internal}
+    SELECT m.created_at,m.thread_id,t.channel,
+      json_extract(m.metadata_json,'$.speakerIsOwner') owner,json_extract(m.metadata_json,'$.heldUntilNamed') held
+    FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
+    WHERE t.user_id=? AND m.role='user' AND m.direction='inbound' AND m.created_at>=? AND m.created_at<? AND ${internal}
       AND COALESCE(json_extract(m.metadata_json,'$.internal'),0)=0
       AND COALESCE(json_extract(m.metadata_json,'$.reactionText'),0)=0
-  `).all(USER_ID, from, ...prefixArgs) as Array<{ created_at: string; thread_id: string; channel: string }>)
-    .filter(row => threadWanted(row.thread_id));
+  `).all(USER_ID, frame.startIso, frame.endIso, ...prefixArgs) as Array<{
+    created_at: string; thread_id: string; channel: string; owner: number | null; held: number | null;
+  }>).filter(row => threadWanted(row.thread_id)
+    && (!groupThreads.has(row.thread_id) || (row.owner === 1 && row.held !== 1)));
   const series = { web: zeros(frame.buckets.length), sms: zeros(frame.buckets.length), group: zeros(frame.buckets.length) };
   const activeDays = new Set<string>();
   let counted = 0;
@@ -364,42 +441,69 @@ function assistantSection(db: Db, scope: InsightsScope, frame: Frame, from: stri
     if (date) activeDays.add(date);
   }
 
-  const tools = (db.prepare(`
-    SELECT m.created_at,m.thread_id,m.content tool,json_extract(m.metadata_json,'$.output.success') ok
+  /*
+   * Tool calls, grouped in SQL so a year of them is a few rows. Two places keep
+   * them: the server writes a `tool` row for every call it runs itself (texts,
+   * groups, its own work), and the app's chat panel runs its tools from the
+   * browser and syncs them as parts on its assistant messages.
+   */
+  const served = db.prepare(`
+    SELECT t.id thread_id,t.address,m.content tool,
+      json_extract(m.metadata_json,'$.output.success') success,json_extract(m.metadata_json,'$.state') state,COUNT(*) n
     FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id
-    WHERE t.user_id=? AND m.role='tool' AND m.created_at>=?
-  `).all(USER_ID, from) as Array<{ created_at: string; thread_id: string; tool: string; ok: number | null }>)
-    .filter(row => threadWanted(row.thread_id) && frame.bucketOf(row.created_at) >= 0);
-  const perTool = new Map<string, { calls: number; ok: number }>();
+    WHERE t.user_id=? AND m.role='tool' AND m.created_at>=? AND m.created_at<?
+    GROUP BY t.id,t.address,m.content,success,state
+  `).all(USER_ID, frame.startIso, frame.endIso) as ToolRow[];
+  const browsed = db.prepare(`
+    SELECT t.id thread_id,t.address,substr(json_extract(p.value,'$.type'),6) tool,
+      json_extract(p.value,'$.output.success') success,json_extract(p.value,'$.state') state,COUNT(*) n
+    FROM channel_messages m JOIN channel_threads t ON t.id=m.thread_id,
+      json_each(CASE WHEN json_valid(m.metadata_json) THEN m.metadata_json ELSE '{}' END,'$.parts') p
+    WHERE t.user_id=? AND t.channel='web' AND m.role='assistant' AND m.created_at>=? AND m.created_at<?
+      AND json_extract(p.value,'$.type') LIKE 'tool-%'
+    GROUP BY t.id,t.address,tool,success,state
+  `).all(USER_ID, frame.startIso, frame.endIso) as ToolRow[];
+  const tools = [...served, ...browsed].filter(row => threadWanted(sourceOf(row.address, row.thread_id)));
+
+  const perTool = new Map<string, { calls: number; ok: number; failed: number }>();
   const did = new Map<string, number>();
+  let calls = 0;
+  let succeeded = 0;
+  let failed = 0;
   for (const row of tools) {
-    const entry = perTool.get(row.tool) ?? { calls: 0, ok: 0 };
-    entry.calls += 1;
-    if (row.ok === 1) {
-      entry.ok += 1;
+    const outcome = outcomeOf(row.success, row.state);
+    const entry = perTool.get(row.tool) ?? { calls: 0, ok: 0, failed: 0 };
+    entry.calls += row.n;
+    calls += row.n;
+    if (outcome === "ok") {
+      entry.ok += row.n;
+      succeeded += row.n;
       const label = DID_FOR_YOU[row.tool];
-      if (label) did.set(label, (did.get(label) ?? 0) + 1);
+      if (label) did.set(label, (did.get(label) ?? 0) + row.n);
+    } else if (outcome === "failed") {
+      entry.failed += row.n;
+      failed += row.n;
     }
     perTool.set(row.tool, entry);
   }
-  const succeeded = tools.filter(row => row.ok === 1).length;
+  const rate = (ok: number, bad: number) => ok + bad ? round(ok / (ok + bad), 3) : null;
 
   // A sweep is named for the thread it read, so a group's sweeps are fenced the same way its messages are.
   const sweeps = (db.prepare(`
     SELECT status,idempotency_key,scheduled_for FROM scheduled_dispatches WHERE user_id=? AND kind='memory_sweep' AND scheduled_for>=?
-  `).all(USER_ID, from) as Array<{ status: string; idempotency_key: string; scheduled_for: string }>)
+  `).all(USER_ID, frame.startIso) as Array<{ status: string; idempotency_key: string; scheduled_for: string }>)
     .filter(row => frame.bucketOf(row.scheduled_for) >= 0 && threadWanted(row.idempotency_key.split(":")[1] ?? ""));
 
   return {
     kpis: {
       messages: counted,
       active_days: activeDays.size,
-      tool_calls: tools.length,
-      tool_success_rate: tools.length ? round(succeeded / tools.length, 3) : null,
+      tool_calls: calls,
+      tool_success_rate: rate(succeeded, failed),
     },
     messages: series,
     top_tools: [...perTool].sort((a, b) => b[1].calls - a[1].calls || a[0].localeCompare(b[0])).slice(0, 10)
-      .map(([tool, entry]) => ({ tool, calls: entry.calls, success_rate: round(entry.ok / entry.calls, 3) })),
+      .map(([tool, entry]) => ({ tool, calls: entry.calls, success_rate: rate(entry.ok, entry.failed) })),
     did_for_you: [...did].sort((a, b) => b[1] - a[1]).map(([label, count]) => ({ label, count })),
     sweeps: {
       runs: sweeps.length,
@@ -414,13 +518,11 @@ export function buildInsights(db: Db, options: InsightsOptions) {
   const timezone = getNotificationPreferences(db).timezone;
   const today = localParts(now, timezone).date;
   const frame = timeline(today, options.days, timezone);
-  // A day early, then dropped by the exact bucketing: a stored offset can put a row just either side of the instant.
-  const from = new Date(zonedToInstant(frame.first, "00:00", timezone).getTime() - DAY_MS).toISOString();
   const areas = db.prepare("SELECT id,name,color,thread_id FROM life_areas WHERE user_id=?").all(USER_ID) as AreaRow[];
   return {
     range: { days: options.days, from: frame.first, to: today, timezone, granularity: frame.granularity, buckets: frame.buckets },
     tasks: tasksSection(db, options.scope, frame, today, timezone, now, areas),
     memories: memoriesSection(db, options.scope, frame, today, now),
-    assistant: assistantSection(db, options.scope, frame, from, areas),
+    assistant: assistantSection(db, options.scope, frame, areas),
   };
 }

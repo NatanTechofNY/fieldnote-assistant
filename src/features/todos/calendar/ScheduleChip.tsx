@@ -111,7 +111,7 @@ export function ScheduleChip({
   </button>
   <span className="cal-chip-actions">
     <AttachButton item={attachment} size={11}/>
-    {!dense && <EditButton todo={chip.todo} onOpen={onOpen} size={11}/>}
+    <EditButton todo={chip.todo} onOpen={onOpen} size={11}/>
   </span>
   </div>;
 }

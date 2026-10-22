@@ -6,8 +6,9 @@ import { bucketLabel, shortDate } from "./format";
  * The charts are drawn from plain elements and SVG rather than a charting
  * library: they are small, they take their colours from the theme's variables
  * so dark mode costs nothing, and they lay out the same in a test as in a
- * browser. A bucket's value is always readable from its tooltip and from the
- * chart's own accessible label, so none of it is colour alone.
+ * browser. A value is readable from its hover tooltip for a pointer, and from the
+ * chart's accessible name or a hidden summary beside it for everything else, so
+ * none of it is colour or hovering alone.
  */
 
 export type Series = { label: string; color: string; values: number[] };
@@ -42,7 +43,8 @@ export function BarSeries({ buckets, granularity, series, stacked = false, label
     <div
       className={`ins-bars${stacked ? " stacked" : ""}`}
       role="img"
-      aria-label={`${label}: ${series.map(item => `${sum(item.values)} ${item.label.toLowerCase()}`).join(", ")}`}
+      aria-label={`${label}: ${series.map(item => `${sum(item.values)} ${item.label.toLowerCase()}`).join(", ")}; `
+        + `busiest ${bucketLabel(buckets[totals.indexOf(Math.max(...totals))], granularity)} with ${Math.max(...totals)}`}
     >
       {buckets.map((key, index) => <div
         key={key}
@@ -92,7 +94,8 @@ export function LineSeries({ buckets, granularity, values, min, max, color = "va
   });
   if (run.length > 1) segments.push(run.join(" "));
   return <figure className="ins-chart">
-    <div className="ins-line" role="img" aria-label={`${label}: ${present.length} points, averaging ${(sum(present) / present.length).toFixed(1)}`}>
+    <div className="ins-line" role="img" aria-label={`${label}: ${present.length} points, averaging ${(sum(present) / present.length).toFixed(1)}, `
+      + `from ${Math.min(...present).toFixed(1)} to ${Math.max(...present).toFixed(1)}`}>
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
         {[0, 25, 50, 75, 100].map(line => <line key={line} x1="0" x2="100" y1={line} y2={line} className="ins-gridline"/>)}
         {segments.map(points => <polyline key={points} points={points} fill="none" stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke"/>)}
@@ -141,7 +144,7 @@ export function BarList({ items, color = "var(--accent)", format = String, empty
   const peak = Math.max(1, ...items.map(item => item.count));
   if (!items.length || !sum(items.map(item => item.count))) return <Empty label={empty}/>;
   return <ul className="ins-barlist">
-    {items.map(item => <li key={item.label} title={`${item.label} · ${item.count}`}>
+    {items.map((item, index) => <li key={`${index}:${item.label}`} title={`${item.label} · ${item.count}`}>
       <span className="ins-barlist-name">{item.label}</span>
       <span className="ins-barlist-track"><i style={{ width: `${(item.count / peak) * 100}%`, background: item.color ?? color }}/></span>
       <strong>{format(item.count)}</strong>
@@ -185,20 +188,30 @@ export function Heatmap({ rows, rowLabels, columnLabel, min = 0, max, cell, labe
   const peak = max ?? Math.max(1, ...present);
   if (!present.length || (max === undefined && !present.some(value => value > 0))) return <Empty label="Nothing to chart in this period yet."/>;
   const columns = rows[0]?.length ?? 0;
-  return <div className="ins-heat" role="img" aria-label={label} style={{ "--cols": columns, "--heat-color": color } as CSSProperties}>
-    {columnLabel && <div className="ins-heat-head" aria-hidden="true">
-      <span/>
-      {Array.from({ length: columns }, (_, index) => <small key={index}>{columnLabel(index)}</small>)}
-    </div>}
-    {rows.map((row, rowIndex) => <div key={rowLabels[rowIndex]} className="ins-heat-row">
-      <span className="ins-heat-label" aria-hidden="true">{rowLabels[rowIndex]}</span>
-      {row.map((value, column) => <i
-        key={column}
-        className={value === null ? "empty" : undefined}
-        style={value === null ? undefined : { "--heat": Math.max(0, Math.min(1, (value - min) / (peak - min || 1))) } as CSSProperties}
-        title={value === null ? `${rowLabels[rowIndex]} · none` : `${rowLabels[rowIndex]} · ${cell(value, rowIndex, column)}`}
-      />)}
-    </div>)}
+  // The grid is a picture; what it says is listed beside it. A single row is read out cell by cell, a tall one by the strongest cell in each row.
+  const spoken = rows.flatMap((row, rowIndex) => {
+    if (rows.length === 1) return row.flatMap((value, column) => value === null ? [] : [cell(value, rowIndex, column)]);
+    const top = Math.max(0, ...row.map(value => value ?? 0));
+    const column = row.findIndex(value => value === top);
+    return top > 0 && column >= 0 ? [cell(top, rowIndex, column)] : [];
+  });
+  return <div role="group" aria-label={label}>
+    <ul className="visually-hidden">{spoken.map((text, index) => <li key={index}>{text}</li>)}</ul>
+    <div className="ins-heat" aria-hidden="true" style={{ "--cols": columns, "--heat-color": color } as CSSProperties}>
+      {columnLabel && <div className="ins-heat-head">
+        <span/>
+        {Array.from({ length: columns }, (_, index) => <small key={index}>{columnLabel(index)}</small>)}
+      </div>}
+      {rows.map((row, rowIndex) => <div key={rowLabels[rowIndex]} className="ins-heat-row">
+        <span className="ins-heat-label">{rowLabels[rowIndex]}</span>
+        {row.map((value, column) => <i
+          key={column}
+          className={value === null ? "empty" : undefined}
+          style={value === null ? undefined : { "--heat": Math.max(0, Math.min(1, (value - min) / (peak - min || 1))) } as CSSProperties}
+          title={value === null ? `${rowLabels[rowIndex]} · none` : `${rowLabels[rowIndex]} · ${cell(value, rowIndex, column)}`}
+        />)}
+      </div>)}
+    </div>
   </div>;
 }
 

@@ -325,7 +325,7 @@ export interface Insights {
   assistant: {
     kpis: { messages: number; active_days: number; tool_calls: number; tool_success_rate: number | null };
     messages: { web: number[]; sms: number[]; group: number[] };
-    top_tools: Array<{ tool: string; calls: number; success_rate: number }>;
+    top_tools: Array<{ tool: string; calls: number; success_rate: number | null }>;
     did_for_you: InsightCount[];
     sweeps: { runs: number; sent: number; failed: number };
   };

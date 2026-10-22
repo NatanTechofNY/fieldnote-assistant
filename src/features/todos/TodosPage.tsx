@@ -124,7 +124,9 @@ export function TodosPage() {
   // An empty day or slot starts the sentence that would create a task there.
   const createAt = (local: string) => {
     if (openMode === "chat") {
-      const area = filteredAreaId ? lifeAreas.find(candidate => candidate.id === filteredAreaId)?.name : undefined;
+      // A group's name is whatever its members called it, so it stays out of a sentence the owner is about to send as their own.
+      const picked = filteredAreaId ? lifeAreas.find(candidate => candidate.id === filteredAreaId) : undefined;
+      const area = picked && !picked.is_group ? picked.name : undefined;
       panel.draft(`Add a task${area ? ` in ${area}` : ""} due ${fullDayLabel(dayOf(local))} (${dayOf(local)}) at ${humanTimeOfDay(timeOf(local))}: `);
     } else { setCapturedAt(local); setEditor("new"); }
   };
@@ -487,7 +489,10 @@ function TodoColumn({ lane, status, todos, history = [], children, hiddenNote, o
     <div className="column-head"><strong style={{ color: meta.color }}>{meta.label}</strong>{hiddenNote && !count ? <span className="badge" title={hiddenNote}>hidden</span> : <span className="badge">{count}</span>}</div>
     <div className="column-body">{todos.map(todo => <DraggableTodo key={todo.id} todo={todo} subtasks={children.get(todo.id) || []} onOpen={onOpen} onStatus={onStatus} />)}
       {history.map(({ completion, todo }) => <article key={completion.id} className="todo-card history">
-        <h4><button type="button" className="card-open" onClick={event => onOpen(todo, openOptionsOf(event))}>{todo.title}</button></h4>
+        <div style={{ display: "flex", gap: 6, alignItems: "flex-start", justifyContent: "space-between" }}>
+          <h4><button type="button" className="card-open" onClick={event => onOpen(todo, openOptionsOf(event))}>{todo.title}</button></h4>
+          <span className="card-actions"><EditButton todo={todo} onOpen={onOpen} size={12}/></span>
+        </div>
         <div className="todo-meta">
           <span title="Finished occurrence of a repeating task"><Repeat size={11}/>Done {friendlyDate(completion.completed_at, timezone)}</span>
         </div>
