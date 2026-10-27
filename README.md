@@ -93,6 +93,24 @@ The entire app deploys as one container plus one persistent volume for SQLite. A
 
 SQLite forces three rules: exactly one replica, a real persistent volume, and no scale-to-zero. That makes serverless platforms unsuitable — notably Cloudflare Containers, whose disk is ephemeral and would silently discard your database on every restart. [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) covers Railway, any Docker host, Cloudflare Tunnel for a stable public URL, and why the other options fail.
 
+## macOS app
+
+Fieldnote can run as a native Mac app. The app is a thin shell: a [Tauri](https://tauri.app) window around a Fieldnote server you already run, so the database, reminders, and SMS webhooks stay exactly where they are. It does not bundle the server and needs that server to be reachable.
+
+The quickest option needs no build: open your deployment in Safari (macOS Sonoma or later) and choose File > Add to Dock.
+
+For a standalone app, install the [Rust toolchain](https://rustup.rs) and the Xcode Command Line Tools, then:
+
+```bash
+cd desktop
+npm install
+npm run build
+```
+
+The build writes `Fieldnote.app` and a DMG under `desktop/src-tauri/target/release/bundle/`. Builds are unsigned, so on first launch right-click the app and choose Open (or run `xattr -dr com.apple.quarantine Fieldnote.app`).
+
+The server address is chosen at run time, not build time, so one build works for any host. On first launch the app asks for an address such as `https://your-app.up.railway.app`, or `http://localhost:4174` for a local `npm start`. Change it later with Fieldnote > Server Settings… (Cmd+,). Setting `FIELDNOTE_URL` in the environment overrides the saved address at launch. Plain `http://` is accepted only for localhost and local-network addresses. Links to other sites open in your default browser rather than inside the app.
+
 ## Commands
 
 | Command | Description |

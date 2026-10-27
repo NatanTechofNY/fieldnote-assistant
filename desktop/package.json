@@ -1,0 +1,14 @@
+{
+  "name": "fieldnote-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native macOS shell around the hosted Fieldnote deployment (Tauri v2).",
+  "scripts": {
+    "tauri": "tauri",
+    "build": "tauri build",
+    "dev": "tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

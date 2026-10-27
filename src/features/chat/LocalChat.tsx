@@ -112,6 +112,12 @@ export function LocalChat() {
     <form className="composer" onSubmit={submit}>
       <AttachmentChips />
       <input ref={composerRef} className="input" aria-label="Message the agent" value={input} onChange={event => setInput(event.target.value)} placeholder="Tell your assistant anything…" />
+      {input && <button
+        type="button"
+        className="button icon ghost"
+        aria-label="Clear input"
+        onClick={() => { setInput(""); composerRef.current?.focus(); }}
+      ><X size={15}/></button>}
       <button className="button primary" aria-label="Send" disabled={send.isPending}><Send size={16}/></button>
     </form>
   </>;
