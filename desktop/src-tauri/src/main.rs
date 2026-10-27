@@ -73,8 +73,16 @@ fn parse_server_url(raw: &str) -> Result<Url, String> {
     }
 }
 
+/// True only for the app's own bundled pages. This gates both navigation and the
+/// setup commands, so it must not match look-alikes: on macOS that is exactly
+/// `tauri://localhost`, and on Windows `http://tauri.localhost`. A bare
+/// `http://tauri.localhost` is a real hostname on macOS and must not pass.
 fn is_local_page(url: &Url) -> bool {
-    url.scheme() == "tauri" || url.host_str() == Some("tauri.localhost")
+    if cfg!(windows) {
+        url.scheme() == "http" && url.host_str() == Some("tauri.localhost")
+    } else {
+        url.scheme() == "tauri" && url.host_str() == Some("localhost")
+    }
 }
 
 fn setup_page_url() -> Url {
@@ -215,7 +223,21 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_server_url;
+    use super::{is_local_page, parse_server_url, setup_page_url};
+
+    #[test]
+    #[cfg(not(windows))]
+    fn only_the_bundled_origin_counts_as_a_local_page() {
+        assert!(is_local_page(&setup_page_url()));
+        for other in [
+            "https://example.com/",
+            "tauri://evil/",
+            "http://tauri.localhost/",
+            "http://tauri.localhost:4174/",
+        ] {
+            assert!(!is_local_page(&other.parse().unwrap()), "{other}");
+        }
+    }
 
     #[test]
     fn accepts_hosted_and_local_addresses() {
