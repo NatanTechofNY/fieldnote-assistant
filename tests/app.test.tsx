@@ -1643,6 +1643,27 @@ describe("fallback agent panel", () => {
     }
   });
 
+  it("clears what is typed in the composer without sending it", async () => {
+    vi.stubEnv("VITE_ALGOLIA_AGENT_ID", "");
+    try {
+      renderAt("/");
+      await userEvent.click(await screen.findByRole("button", { name: "Remember something" }));
+      const panel = await screen.findByRole("complementary", { name: "Fieldnote agent" });
+      const composer = within(panel).getByLabelText("Message the agent");
+      expect(composer).toHaveValue("Remember that ");
+      const before = requestedUrls.length;
+
+      await userEvent.click(within(panel).getByRole("button", { name: "Clear input" }));
+      expect(composer).toHaveValue("");
+      expect(composer).toHaveFocus();
+      // Nothing to clear, so the button goes away, and nothing was sent.
+      expect(within(panel).queryByRole("button", { name: "Clear input" })).toBeNull();
+      expect(requestedUrls.slice(before).some(url => url.endsWith("/api/chat"))).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   /**
    * `/api/chat` takes a sentence and nothing else, so here the attachment has to
    * go in as text. The chip is the same either way.

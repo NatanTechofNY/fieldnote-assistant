@@ -1511,6 +1511,12 @@ body:has(.ais-Chat-container--maximized.ais-Chat-container--open) .ask-launcher 
 }
 .agent-capabilities svg { color:var(--text-tertiary); }
 .agent-prompt-note { display:flex; align-items:center; justify-content:center; gap:6px; color:var(--text-tertiary); font-size:11px; }
+/* Empties the composer without touching the conversation, which the header's Clear does. */
+.agent-prompt-clear {
+  border:0; background:transparent; padding:0 0 0 6px; margin-left:2px; font-size:11px; cursor:pointer;
+  color:var(--text-tertiary); text-decoration:underline; text-underline-offset:2px;
+}
+.agent-prompt-clear:hover { color:var(--text); }
 
 /* Records attached from a page, sitting above the composer until the message
    they belong to is sent. They travel as turn context rather than as text, so

@@ -1,4 +1,4 @@
-import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type RefObject, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   type ChatHandle, type Tools, Chat, ChatOverlayLayout, InstantSearch, useInstantSearch,
@@ -75,8 +75,35 @@ function AgentChatEmpty() {
   </div>;
 }
 
+/** Lets the composer's footer reach the widget's handle, which the footer is not given. */
+const ChatHandleContext = createContext<RefObject<ChatHandle | null> | null>(null);
+
+/**
+ * The widget owns the composer's text and does not report it, so the footer
+ * reads the textarea itself. A programmatic change (a draft handed over from a
+ * page, or the widget emptying the box after a send) fires no input event, so
+ * the value is sampled rather than listened for.
+ */
 function AgentPromptFooter() {
-  return <div className="agent-prompt-note"><span className="dot ok"/>Grounded in your Algolia indices and local SQLite data.</div>;
+  const handle = useContext(ChatHandleContext);
+  const noteRef = useRef<HTMLDivElement>(null);
+  const [hasDraft, setHasDraft] = useState(false);
+  const textarea = () => noteRef.current?.closest(".agent-studio-panel")?.querySelector("textarea") ?? null;
+  useEffect(() => {
+    const read = () => setHasDraft(Boolean(textarea()?.value));
+    read();
+    const timer = setInterval(read, 400);
+    return () => clearInterval(timer);
+  }, []);
+  const clearInput = () => {
+    handle?.current?.setInput("");
+    setHasDraft(false);
+    textarea()?.focus();
+  };
+  return <div ref={noteRef} className="agent-prompt-note">
+    <span className="dot ok"/>Grounded in your Algolia indices and local SQLite data.
+    {hasDraft && <button type="button" className="agent-prompt-clear" onClick={clearInput}>Clear input</button>}
+  </div>;
 }
 
 /**
@@ -413,6 +440,7 @@ export function AgentStudioChat() {
     inert={!isOpen}
   >
     <InstantSearch searchClient={searchClient} indexName={indexName}>
+      <ChatHandleContext.Provider value={chat}>
       <Chat
         ref={chat}
         agentId={agentId}
@@ -434,6 +462,7 @@ export function AgentStudioChat() {
           },
         }}
       />
+      </ChatHandleContext.Provider>
       <ChatSync handle={chat} />
       <ToolResultChannel settleRef={settleToolCallRef} />
       <StalledTurnGuard toolsInFlight={toolsInFlightRef} />
