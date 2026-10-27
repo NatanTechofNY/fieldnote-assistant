@@ -17,3 +17,4 @@ internal
 .env.*
 !.env.example
 .DS_Store
+desktop

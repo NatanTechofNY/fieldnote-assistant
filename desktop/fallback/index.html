@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fieldnote — Server</title>
+    <style>
+      :root { color-scheme: light dark; --accent: #5e6ad2; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; height: 100vh; display: grid; place-items: center;
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+        background: Canvas; color: CanvasText;
+      }
+      main { width: min(440px, 90vw); }
+      .mark {
+        width: 36px; height: 36px; border-radius: 9px; background: var(--accent);
+        display: grid; place-items: center; color: #fff; font-size: 18px; margin-bottom: 16px;
+      }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      p { margin: 0 0 16px; opacity: 0.7; }
+      input {
+        width: 100%; padding: 9px 11px; font: inherit; border-radius: 8px;
+        border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+        background: Canvas; color: CanvasText;
+      }
+      input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+      button {
+        margin-top: 12px; padding: 9px 16px; font: inherit; font-weight: 600; border: 0;
+        border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .hint { font-size: 12px; margin: 10px 0 0; }
+      .error { color: #d14343; margin: 10px 0 0; min-height: 1.5em; }
+      code { font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark">✦</div>
+      <h1>Connect to Fieldnote</h1>
+      <p>Enter the address of the server that runs your Fieldnote, either hosted or on this Mac.</p>
+      <form id="form">
+        <input id="url" type="text" inputmode="url" autocomplete="off" autocapitalize="off"
+               spellcheck="false" placeholder="https://your-app.up.railway.app" autofocus />
+        <button id="save" type="submit">Connect</button>
+        <div class="error" id="error" role="alert"></div>
+      </form>
+      <p class="hint">
+        Hosted: <code>https://your-app.up.railway.app</code><br />
+        Local: <code>http://localhost:4174</code> (run <code>npm start</code> first).<br />
+        Change it later with Fieldnote &gt; Server Settings… (⌘,).
+      </p>
+    </main>
+    <script>
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      const form = document.getElementById("form");
+      const input = document.getElementById("url");
+      const save = document.getElementById("save");
+      const error = document.getElementById("error");
+
+      if (!invoke) {
+        error.textContent = "This page only works inside the Fieldnote app.";
+        save.disabled = true;
+      } else {
+        invoke("get_server_url").then((saved) => { if (saved) input.value = saved; }).catch(() => {});
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        error.textContent = "";
+        save.disabled = true;
+        try {
+          await invoke("save_server_url", { url: input.value });
+        } catch (e) {
+          error.textContent = typeof e === "string" ? e : "Could not save that address.";
+          save.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

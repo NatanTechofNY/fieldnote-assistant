@@ -22,3 +22,7 @@ server/data/
 *.db-*
 *.sqlite
 *.sqlite3
+
+# macOS shell (desktop/): Rust build output and its own node_modules
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
