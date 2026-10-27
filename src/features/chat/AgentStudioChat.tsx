@@ -182,6 +182,51 @@ function ToolResultChannel({ settleRef }: { settleRef: RefObject<SettleToolCall 
   return null;
 }
 
+const STALL_MS = 45_000;
+
+/**
+ * Unsticks a turn whose request has gone quiet.
+ *
+ * Once the last tool call settles, the widget asks Agent Studio for the reply
+ * in a fresh request, and it waits on that request with no timeout. When the
+ * reply never comes, every tool card shows done while the loader spins
+ * forever. So a busy turn that has neither streamed a part nor had a tool
+ * running for `STALL_MS` is abandoned and asked for again once, from the
+ * messages it already holds; a retry that stalls too is stopped, leaving the
+ * composer free.
+ */
+function StalledTurnGuard({ toolsInFlight }: { toolsInFlight: RefObject<number> }) {
+  const { indexRenderState } = useInstantSearch();
+  const chat = indexRenderState.chat;
+  const status = chat?.status;
+  const messages = chat?.messages;
+  const stop = chat?.stop;
+  const sendMessage = chat?.sendMessage;
+  // The messages as they were when the retry went out; any change since means
+  // the retry is answering, and a later stall earns its own retry.
+  const retriedAt = useRef<unknown>(null);
+  useEffect(() => {
+    if (retriedAt.current && messages !== retriedAt.current) retriedAt.current = null;
+    if ((status !== "submitted" && status !== "streaming") || !stop || !sendMessage) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const check = () => {
+      if (toolsInFlight.current > 0) {
+        timer = setTimeout(check, STALL_MS);
+        return;
+      }
+      if (retriedAt.current) {
+        void stop();
+        return;
+      }
+      retriedAt.current = messages;
+      void stop().then(() => sendMessage());
+    };
+    timer = setTimeout(check, STALL_MS);
+    return () => clearTimeout(timer);
+  }, [status, messages, stop, sendMessage, toolsInFlight]);
+  return null;
+}
+
 // Reads can be replayed safely; a write may have committed before the response
 // was lost, so retrying it would duplicate the record.
 const READ_ONLY_TOOLS = new Set(["search_store_products", "web_search", "read_web_page", "find_gif"]);
@@ -219,6 +264,7 @@ export function AgentStudioChat() {
   const { isOpen, isExpanded, attachments, clearAttachments } = useAgentPanel();
   const chat = useRef<ChatHandle>(null);
   const settleToolCallRef = useRef<SettleToolCall | null>(null);
+  const toolsInFlightRef = useRef(0);
   const appId = import.meta.env.VITE_ALGOLIA_APPLICATION_ID as string;
   const apiKey = import.meta.env.VITE_ALGOLIA_SEARCH_API_KEY as string;
   const agentId = import.meta.env.VITE_ALGOLIA_AGENT_ID as string;
@@ -301,10 +347,13 @@ export function AgentStudioChat() {
   // patching, so there is nothing tool-specific to do here.
   const callTool = useCallback(async (name: string, call: ToolCall) => {
     let output: unknown;
+    toolsInFlightRef.current += 1;
     try {
       output = { success: true, data: await runTool(name, call.input) };
     } catch (error) {
       output = { success: false, ...toolFailure(name, error) };
+    } finally {
+      toolsInFlightRef.current -= 1;
     }
     // The agent can create or edit a life area as easily as a todo, so the
     // taxonomy is resynced alongside the content it labels — and a write that
@@ -387,6 +436,7 @@ export function AgentStudioChat() {
       />
       <ChatSync handle={chat} />
       <ToolResultChannel settleRef={settleToolCallRef} />
+      <StalledTurnGuard toolsInFlight={toolsInFlightRef} />
     </InstantSearch>
   </div>;
 }
