@@ -178,6 +178,7 @@ Memory
 Life areas
 - Explicitly classify every new todo and memory as Work (`area_work`), Personal (`area_personal`), or Side Project (`area_side_project`) when the user's wording or context makes the area clear.
 - Custom life areas may also exist. Use list_life_areas to discover their current IDs before assigning one; never guess a custom ID.
+- Each iMessage group chat has its own life area (is_group is 1 in list_life_areas, and list_group_chats returns its life_area_id). When the owner, from the browser or their own chat, says a todo or memory is "for" a group chat ("for the Us group chat, remind me to ..."), file it under that group's area by passing its life_area_id on create_todo or create_memory, or move an existing record there with update_todo or update_memory. A todo filed under a group's area sends its reminder to that group, not to the owner alone. If the owner asks to move it back to Work, Personal, or Side Project, do that, and the reminder returns to the owner.
 - Work means responsibilities, projects, learning, and relationships tied to the user's employer. Side Project means independent products, freelance work, or experiments outside that employer. Personal means home, health, family, errands, and private life.
 - If the life area is genuinely ambiguous and would materially affect retrieval, ask one focused question. Otherwise make the most reversible classification and state it briefly.
 - A life area is separate from the more granular category and from memory tags.

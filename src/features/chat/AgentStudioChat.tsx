@@ -254,6 +254,55 @@ function StalledTurnGuard({ toolsInFlight }: { toolsInFlight: RefObject<number> 
   return null;
 }
 
+/** How long a turn must sit ended on a failed tool call before it is asked to answer. */
+const UNANSWERED_MS = 1_500;
+
+type GuardPart = { type?: string; state?: string; text?: string };
+type GuardMessage = { id: string; role: string; parts?: GuardPart[] };
+
+/**
+ * Asks once for an answer when a turn ends on a failed tool call and says nothing.
+ *
+ * The widget sends the follow-up request only when a tool result is added. A
+ * call Agent Studio refuses before it reaches us (an argument its schema does
+ * not allow) arrives already settled as `output-error`, no tool runs, no result
+ * is added, and the turn stops with every card finished and no reply. So a turn
+ * that has gone idle with its tools all settled, one of them failed, and no
+ * text after the last tool is asked for its reply from the messages it holds.
+ *
+ * The wait lets a turn that is about to continue on its own do so (a failed call
+ * beside a good one still has the good one's result to send), and each message
+ * from the user earns one nudge, so a model that keeps failing cannot loop.
+ */
+function UnansweredToolErrorGuard() {
+  const { indexRenderState } = useInstantSearch();
+  const chat = indexRenderState.chat;
+  const status = chat?.status;
+  const messages = chat?.messages as GuardMessage[] | undefined;
+  const sendMessage = chat?.sendMessage;
+  const nudgedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (status !== "ready" || !messages?.length || !sendMessage) return;
+    const last = messages[messages.length - 1];
+    if (last.role !== "assistant") return;
+    const parts = last.parts ?? [];
+    const tools = parts.filter(part => part.type?.startsWith("tool-"));
+    if (!tools.length) return;
+    const settled = tools.every(part => part.state === "output-available" || part.state === "output-error");
+    if (!settled || !tools.some(part => part.state === "output-error")) return;
+    const lastToolAt = parts.lastIndexOf(tools[tools.length - 1]);
+    if (parts.slice(lastToolAt + 1).some(part => part.type === "text" && part.text?.trim())) return;
+    const turn = [...messages].reverse().find(message => message.role === "user")?.id ?? last.id;
+    if (nudgedFor.current === turn) return;
+    const timer = setTimeout(() => {
+      nudgedFor.current = turn;
+      void sendMessage();
+    }, UNANSWERED_MS);
+    return () => clearTimeout(timer);
+  }, [status, messages, sendMessage]);
+  return null;
+}
+
 // Reads can be replayed safely; a write may have committed before the response
 // was lost, so retrying it would duplicate the record.
 const READ_ONLY_TOOLS = new Set(["search_store_products", "web_search", "read_web_page", "find_gif"]);
@@ -466,6 +515,7 @@ export function AgentStudioChat() {
       <ChatSync handle={chat} />
       <ToolResultChannel settleRef={settleToolCallRef} />
       <StalledTurnGuard toolsInFlight={toolsInFlightRef} />
+      <UnansweredToolErrorGuard />
     </InstantSearch>
   </div>;
 }

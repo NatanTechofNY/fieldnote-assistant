@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   OWN_AREA_CLAUSE, USER_ID, deleteTodoComment, getRecentCompletions, getReminders, countTodoComments, getTodo, getTodoComments, id, insertTodoComment, now,
-  queueIndexJob, syncTodoReminders, userTimezone,
+  queueIndexJob, replyThreadForArea, syncTodoReminders, userTimezone,
 } from "../db.ts";
 import { failure, success } from "../http.ts";
 import {
@@ -132,14 +132,16 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
       db.prepare(`
         INSERT INTO todos(
           id,user_id,title,notes,category_id,life_area_id,life_area_source,parent_id,due_at,reminder_at,extra_reminders_json,
-          priority,status,started_at,completed_at,recurrence_json,assistant_says,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          priority,status,started_at,completed_at,recurrence_json,assistant_says,reply_thread_id,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(todoId, USER_ID, body.title, body.notes ?? null, body.category_id ?? null,
         body.life_area_id ?? null, body.life_area_source ?? null, body.parent_id ?? null,
         schedule.due_at, schedule.reminder_at, schedule.extra_reminders_json,
         body.priority ?? null, body.status,
         times.startedAt, times.completedAt, repeat.recurrence_json,
-        body.assistant_says === true && !body.parent_id ? 1 : 0, timestamp, timestamp);
+        body.assistant_says === true && !body.parent_id ? 1 : 0,
+        // Filed under a group's area, its reminder goes to that group.
+        replyThreadForArea(db, body.life_area_id), timestamp, timestamp);
       const todo = getTodo(db, todoId);
       if (todo) {
         syncTodoReminders(db, todo);
@@ -208,6 +210,14 @@ export function registerTodoRoutes({ app, db, search }: RouteContext): void {
         parentId, schedule.due_at, schedule.reminder_at, schedule.extra_reminders_json,
         body.priority === undefined ? current.priority : body.priority, nextStatus,
         times.startedAt, times.completedAt, repeat.recurrence_json, assistantSays, now(), current.id, USER_ID);
+      // Moved into a group's area, the reminder goes to that group. Moved out, the
+      // pointer stays and the worker ignores it while the areas differ, so moving
+      // the todo back restores the group's routing.
+      const groupThread = body.life_area_id !== undefined && body.life_area_id !== current.life_area_id
+        ? replyThreadForArea(db, body.life_area_id) : null;
+      if (groupThread) {
+        db.prepare("UPDATE todos SET reply_thread_id=? WHERE id=? AND user_id=?").run(groupThread, current.id, USER_ID);
+      }
       const todo = getTodo(db, current.id);
       if (todo) {
         if (repeat.recurrence_json && !current.recurrence_json) clearStepSchedules(db, todo);

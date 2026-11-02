@@ -1287,6 +1287,19 @@ export const GROUP_NAME_SQL = "COALESCE(la.name,t.display_name)";
 export const OWN_AREA_CLAUSE = (alias: string): string =>
   `(${alias}.life_area_id IS NULL OR ${alias}.life_area_id NOT IN (SELECT id FROM life_areas WHERE thread_id IS NOT NULL))`;
 
+/**
+ * The group thread a life area belongs to, or null for any other area. A todo
+ * filed under a group's area from outside the group (the browser, the owner's
+ * own text chat) carries this as `reply_thread_id`, so its reminder goes to the
+ * group, the same as one made inside it.
+ */
+export function replyThreadForArea(db: Db, areaId: string | null | undefined): string | null {
+  if (!areaId) return null;
+  const row = db.prepare("SELECT thread_id FROM life_areas WHERE id=? AND user_id=?").get(areaId, USER_ID) as
+    | { thread_id: string | null } | undefined;
+  return row?.thread_id ?? null;
+}
+
 /** Every group chat's life area and thread, for fencing what is not in SQL, such as a search filter. */
 export function groupAreas(db: Db): Array<{ id: string; thread_id: string }> {
   return db.prepare("SELECT id,thread_id FROM life_areas WHERE user_id=? AND thread_id IS NOT NULL ORDER BY id")

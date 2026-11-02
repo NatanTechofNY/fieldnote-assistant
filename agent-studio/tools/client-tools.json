@@ -126,8 +126,7 @@
           },
           "life_area_id": {
             "type": ["string", "null"],
-            "enum": ["area_work", "area_personal", "area_side_project", null],
-            "description": "Life area filter or null"
+            "description": "Life area ID from list_life_areas to filter by, or null"
           },
           "parent_id": {
             "type": ["string", "null"],
@@ -188,8 +187,7 @@
           },
           "life_area_id": {
             "type": ["string", "null"],
-            "enum": ["area_work", "area_personal", "area_side_project", null],
-            "description": "Work, Personal, Side Project, or null only when genuinely ambiguous"
+            "description": "Life area ID from list_life_areas (area_work, area_personal, area_side_project, or a custom or group area), or null only when genuinely ambiguous"
           },
           "parent_id": {
             "type": ["string", "null"],
@@ -330,8 +328,7 @@
               },
               "life_area_id": {
                 "type": ["string", "null"],
-                "enum": ["area_work", "area_personal", "area_side_project", null],
-                "description": "New life area ID or null for unchanged"
+                "description": "New life area ID from list_life_areas, or null for unchanged"
               },
               "parent_id": {
                 "type": ["string", "null"],
@@ -586,8 +583,7 @@
           },
           "life_area_id": {
             "type": ["string", "null"],
-            "enum": ["area_work", "area_personal", "area_side_project", null],
-            "description": "Work, Personal, Side Project, or null only when genuinely ambiguous"
+            "description": "Life area ID from list_life_areas (area_work, area_personal, area_side_project, or a custom or group area), or null only when genuinely ambiguous"
           },
           "occurred_at": {
             "type": ["string", "null"],
@@ -691,8 +687,7 @@
               },
               "life_area_id": {
                 "type": ["string", "null"],
-                "enum": ["area_work", "area_personal", "area_side_project", null],
-                "description": "New life area ID or null for unchanged"
+                "description": "New life area ID from list_life_areas, or null for unchanged"
               },
               "occurred_at": {
                 "type": ["string", "null"],

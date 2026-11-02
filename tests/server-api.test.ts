@@ -10570,6 +10570,63 @@ describe("Sendblue provider", () => {
     await assert.rejects(executeAgentTool(db, search, "get_conversation_context", { thread_id: "thread_scratch" }, owner), /Conversation not found/);
   });
 
+  it("files a todo under a group's area from outside the group and reminds the group", async () => {
+    const { db, api } = connectedFixture();
+    const search = fakeSearch(db);
+    const timestamp = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO channel_threads(id,user_id,channel,address,agent_conversation_id,created_at,updated_at)
+      VALUES('thread_us',?,'sms','group:us','cnv_us',?,?)
+    `).run(USER_ID, timestamp, timestamp);
+    const area = ensureGroupLifeArea(db, "thread_us", "Us");
+    const replyThread = (todoId: string) =>
+      (db.prepare("SELECT reply_thread_id FROM todos WHERE id=?").get(todoId) as { reply_thread_id: string | null }).reply_thread_id;
+
+    // The browser chat: any area id the agent read from list_life_areas is accepted.
+    const softener = await executeAgentTool(db, search, "create_todo", {
+      title: "Fill the water softener", life_area_id: area.id, due_at: "2030-01-01T20:00:00.000Z", reminder_at: "2030-01-01T20:00:00.000Z",
+    }) as { id: string; life_area_id: string };
+    assert.equal(softener.life_area_id, area.id);
+    assert.equal(replyThread(softener.id), "thread_us", "its reminder goes to the group");
+
+    // An id that is no area is a miss the agent can read, not a foreign-key failure.
+    await assert.rejects(
+      executeAgentTool(db, search, "create_todo", { title: "Nowhere", life_area_id: "area_nowhere" }),
+      /Life area not found\. Pass an id from list_life_areas/,
+    );
+    await assert.rejects(
+      executeAgentTool(db, search, "update_todo", { id: softener.id, patch: { life_area_id: "area_nowhere" } }),
+      /Life area not found/,
+    );
+
+    // Moving an existing todo in sets the thread; moving it out keeps the pointer for a move back.
+    const crawler = await executeAgentTool(db, search, "create_todo", { title: "Pull crawler stats", life_area_id: "area_work" }) as { id: string };
+    assert.equal(replyThread(crawler.id), null);
+    await executeAgentTool(db, search, "update_todo", { id: crawler.id, patch: { life_area_id: area.id }, override_user_classification: true });
+    assert.equal(replyThread(crawler.id), "thread_us");
+    await executeAgentTool(db, search, "update_todo", { id: crawler.id, patch: { life_area_id: "area_personal" }, override_user_classification: true });
+    assert.equal(replyThread(crawler.id), "thread_us");
+
+    // The REST route does the same for the app.
+    const restTodo = (await api.post("/api/todos").send({ title: "Take out the recycling", life_area_id: area.id }).expect(201)).body.data as { id: string };
+    assert.equal(replyThread(restTodo.id), "thread_us");
+    const plain = (await api.post("/api/todos").send({ title: "Plain" }).expect(201)).body.data as { id: string };
+    assert.equal(replyThread(plain.id), null);
+    await api.patch(`/api/todos/${plain.id}`).send({ life_area_id: area.id }).expect(200);
+    assert.equal(replyThread(plain.id), "thread_us");
+
+    // A turn fenced to the owner's own records cannot file or move a todo into a group.
+    const sweep: ToolTurnContext = { channel: "sms", address: `digest:${RECIPIENT}`, threadId: "thread_digest", appTurn: "daily_digest" };
+    await assert.rejects(
+      executeAgentTool(db, search, "create_todo", { title: "Sneaky", life_area_id: area.id }, sweep),
+      /owner's own records/,
+    );
+    await assert.rejects(
+      executeAgentTool(db, search, "update_todo", { id: crawler.id, patch: { life_area_id: area.id } }, sweep),
+      /owner's own records/,
+    );
+  });
+
   it("tells a group turn when the assistant is in the middle of the exchange", async () => {
     const { db } = connectedFixture();
     agentStudioEnv();

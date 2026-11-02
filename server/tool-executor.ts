@@ -10,7 +10,8 @@ import {
 import { productCaption, productJson, searchStoreProductsLocally, STORE_NAME } from "./catalog.ts";
 import {
   getMemory, getReminders, getStoreProduct, countTodoComments, getTodo, getTodoComments, GROUP_NAME_SQL, id, insertOutboundChannelMessage,
-  insertTodoComment, instant, now, OWN_AREA_CLAUSE, queueIndexJob, recordMessageReaction, renameLifeArea, syncTodoReminders, USER_ID, userTimezone,
+  insertTodoComment, instant, now, OWN_AREA_CLAUSE, queueIndexJob, recordMessageReaction, renameLifeArea, replyThreadForArea,
+  syncTodoReminders, USER_ID, userTimezone,
 } from "./db.ts";
 import {
   DERIVED_REMINDER, DERIVED_SCHEDULE, REPEATING_SUBTASK, STEP_SCHEDULE,
@@ -636,6 +637,17 @@ function isGroupArea(db: Db, areaId: string | null | undefined): boolean {
   return Boolean(areaId && db.prepare("SELECT 1 found FROM life_areas WHERE id=? AND thread_id IS NOT NULL").get(areaId));
 }
 
+/**
+ * An area id the agent passed has to be one that exists. The schema no longer
+ * lists the areas, so a guessed or stale id would otherwise reach the foreign
+ * key and come back as a 500 the agent could not read.
+ */
+function assertKnownArea(db: Db, areaId: string | null | undefined): void {
+  if (areaId && !db.prepare("SELECT 1 found FROM life_areas WHERE id=? AND user_id=?").get(areaId, USER_ID)) {
+    throw new Error("Life area not found. Pass an id from list_life_areas");
+  }
+}
+
 /** A turn fenced to the owner's own records cannot file anything under a group chat. */
 function assertOwnArea(db: Db, ownOnly: boolean, areaId: string | null | undefined): void {
   if (ownOnly && isGroupArea(db, areaId)) throw new Error("This turn keeps only the owner's own records; a group chat's area is not one of them");
@@ -998,7 +1010,7 @@ export async function executeAgentTool(
     if (context?.channel === "sms") assertOwnerLine(db, context);
     // The same rows read_conversation would show: nothing failed, no app instruction, no written-out tapback.
     const threads = db.prepare(`
-      SELECT t.id,${GROUP_NAME_SQL} group_name,
+      SELECT t.id,${GROUP_NAME_SQL} group_name,la.id life_area_id,
         (SELECT created_at FROM channel_messages m
           WHERE m.thread_id=t.id AND m.role IN ('user','assistant') AND m.status<>'failed'
             AND NOT (m.role='user' AND COALESCE(json_extract(m.metadata_json,'$.internal'),0)=1)
@@ -1007,7 +1019,7 @@ export async function executeAgentTool(
       FROM channel_threads t LEFT JOIN life_areas la ON la.thread_id=t.id
       WHERE t.user_id=? AND t.channel='sms' AND t.address LIKE ? AND ${OWNER_STILL_IN_GROUP}
       ORDER BY last_message_at IS NULL,last_message_at DESC
-    `).all(USER_ID, `${GROUP_ADDRESS_PREFIX}%`) as Array<{ id: string; group_name: string | null; last_message_at: string | null }>;
+    `).all(USER_ID, `${GROUP_ADDRESS_PREFIX}%`) as Array<{ id: string; group_name: string | null; life_area_id: string | null; last_message_at: string | null }>;
     const members = db.prepare(`
       SELECT phone,name,is_owner FROM group_members WHERE thread_id=? AND left_at IS NULL ORDER BY is_owner DESC,name IS NULL,name
     `);
@@ -1022,6 +1034,8 @@ export async function executeAgentTool(
       groups: threads.map(thread => ({
         thread_id: thread.id,
         group_name: thread.group_name,
+        // The group's own life area: file a todo or memory under it to keep it with the group.
+        life_area_id: thread.life_area_id,
         // By name, or the shortened number a group turn would show; never the number itself.
         members: (members.all(thread.id) as Array<{ phone: string; name: string | null; is_owner: number }>)
           .map(member => member.is_owner ? OWNER_SPEAKER_NAME : member.name || redactedNumber(member.phone)),
@@ -1654,6 +1668,8 @@ export async function executeAgentTool(
       if (parent.recurrence_json && (input.due_at || input.reminder_at || extras.length)) throw new Error(STEP_SCHEDULE);
     }
     const area = classificationForWrite(scope, input);
+    assertKnownArea(db, area.life_area_id);
+    assertOwnArea(db, ownOnly, area.life_area_id);
     const existing = openTodoTitled(db, input.title as string, area.life_area_id, (input.parent_id as string | null | undefined) ?? null);
     if (existing) {
       throw new Error(
@@ -1677,9 +1693,11 @@ export async function executeAgentTool(
         area.life_area_source, input.parent_id ?? null, schedule.due_at,
         schedule.reminder_at, schedule.extra_reminders_json,
         input.priority ?? null, "pending", null, null, repeat.recurrence_json,
-        // Only a group chat is remembered: a 1:1 or web todo reminds the
-        // recipient's own number, which needs no thread to find.
-        context?.groupId ? context.threadId : null,
+        // A group turn remembers its own thread. A todo filed under a group's
+        // area from anywhere else (the browser, the owner's own chat) reminds
+        // that group; any other 1:1 or web todo reminds the recipient's own
+        // number, which needs no thread to find.
+        context?.groupId ? context.threadId : replyThreadForArea(db, area.life_area_id),
         // A step is something someone does; only a top-level todo is said.
         input.assistant_says === true && !input.parent_id ? 1 : 0,
         timestamp, timestamp,
@@ -1727,6 +1745,10 @@ export async function executeAgentTool(
     }
     // In a group the area is the group's and stays so; nothing can be moved out.
     const lifeAreaId = scope ? scope.lifeAreaId : value("life_area_id", current.life_area_id);
+    if (lifeAreaId !== current.life_area_id) {
+      assertKnownArea(db, lifeAreaId as string | null);
+      assertOwnArea(db, ownOnly, lifeAreaId as string | null);
+    }
     const lifeAreaSource = lifeAreaId === current.life_area_id
       ? current.life_area_source
       : lifeAreaId ? "agent" : null;
@@ -1772,6 +1794,14 @@ export async function executeAgentTool(
         repeat.occurrenceMoved ? null : current.completed_at,
         now(), current.id, USER_ID,
       );
+      // Moved into a group's area, the reminders go to that group. Moved out, the
+      // pointer stays and the worker ignores it while the areas differ, so moving
+      // the todo back restores the group's routing.
+      const groupThread = lifeAreaId !== current.life_area_id
+        ? replyThreadForArea(db, lifeAreaId as string | null) : null;
+      if (groupThread) {
+        db.prepare("UPDATE todos SET reply_thread_id=? WHERE id=? AND user_id=?").run(groupThread, current.id, USER_ID);
+      }
       const row = getTodo(db, todoId) as TodoRow;
       if (repeat.recurrence_json && !current.recurrence_json) clearStepSchedules(db, row);
       if (repeat.occurrenceMoved) reopenStepsForNextOccurrence(db, row);
@@ -1852,6 +1882,7 @@ export async function executeAgentTool(
     const timestamp = now();
     const memoryId = id("memory");
     const area = classificationForWrite(scope, input);
+    assertKnownArea(db, area.life_area_id);
     assertOwnArea(db, ownOnly, area.life_area_id);
     // An answer to the group's evening question starts that evening's entry,
     // dated that evening, and there is only ever one.
@@ -1923,6 +1954,7 @@ export async function executeAgentTool(
       throw new Error("Life area is user-classified; explicit override confirmation is required");
     }
     const lifeAreaId = scope ? scope.lifeAreaId : value("life_area_id", current.life_area_id);
+    if (lifeAreaId !== current.life_area_id) assertKnownArea(db, lifeAreaId as string | null);
     const lifeAreaSource = lifeAreaId === current.life_area_id
       ? current.life_area_source
       : lifeAreaId ? "agent" : null;
