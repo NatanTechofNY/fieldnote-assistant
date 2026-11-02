@@ -5,6 +5,8 @@ import { describe, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import App from "../src/App";
 import { api } from "../src/api";
+import clientTools from "../agent-studio/tools/client-tools.json";
+import { toolActivityMeta } from "../src/features/chat/tool-activity";
 import { memoryAttachment, serializeAttachments, todoAttachment } from "../src/lib/agent-attachments";
 import { toZonedDateTimeLocal, zonedDateTimeLocalToIso } from "../src/lib/timezone";
 import type { Memory, Todo } from "../src/types";
@@ -337,6 +339,10 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
       success: true,
       data: todo({ id, title: "Review RFC for Alex", status }),
     }));
+  }
+  // The server refuses the group-chat tools on the web channel; the refusal is still an answer.
+  if (url.includes("/api/agent/tools/react_to_message")) {
+    return new Response(JSON.stringify({ success: false, error: "There is no message to react to here" }), { status: 400 });
   }
   if (url.endsWith("/api/admin/memories/tag-preferences")) {
     return new Response(JSON.stringify({ success: true, data: { applied: true, count: 2, memories: [] } }));
@@ -1320,6 +1326,58 @@ describe("agent side panel", () => {
 
     expect(within(panel).getAllByText("Task status updated")).toHaveLength(2);
     expect(within(panel).queryByText("One moment…")).toBeNull();
+  });
+
+  /**
+   * A tool the browser has no handler for is left to the widget's fallback,
+   * which queues its result behind the stream that is waiting on it. The turn
+   * never ends, Stop cannot free the queue, and nothing typed afterwards is
+   * sent. Every published tool therefore has to be handled here, even those the
+   * server only refuses on the web channel.
+   */
+  it("answers a group-chat tool the web channel refuses, and keeps the composer working", async () => {
+    agentStream = [
+      [
+        { type: "start", messageId: "asst_react" },
+        { type: "tool-input-available", toolCallId: "call_react", toolName: "react_to_message", input: { reaction: "like" } },
+        { type: "finish" },
+      ],
+      [
+        { type: "start", messageId: "asst_after_react" },
+        { type: "text-start", id: "after_react" },
+        { type: "text-delta", id: "after_react", delta: "Nice, that is all done." },
+        { type: "text-end", id: "after_react" },
+        { type: "finish" },
+      ],
+      [
+        { type: "start", messageId: "asst_follow_up" },
+        { type: "text-start", id: "follow_up" },
+        { type: "text-delta", id: "follow_up", delta: "Nothing went wrong." },
+        { type: "text-end", id: "follow_up" },
+        { type: "finish" },
+      ],
+    ];
+
+    renderAt("/");
+    await userEvent.keyboard("{Meta>}i{/Meta}");
+    await expectPanel(true);
+    const panel = agentPanel() as HTMLElement;
+    const composer = within(panel).getByPlaceholderText(/Ask about your work/);
+
+    await userEvent.type(composer, "This is done now");
+    await userEvent.click(within(panel).getByRole("button", { name: "Send message" }));
+    expect(await within(panel).findByText("Nice, that is all done.")).toBeInTheDocument();
+    expect(requestedUrls.some(url => url.includes("/api/agent/tools/react_to_message"))).toBe(true);
+
+    await userEvent.type(composer, "I think something went wrong");
+    await userEvent.click(within(panel).getByRole("button", { name: "Send message" }));
+    expect(await within(panel).findByText("Nothing went wrong.")).toBeInTheDocument();
+  });
+
+  /** A tool Agent Studio publishes without a browser handler jams the chat, so the two lists must match. */
+  it("has a browser handler for every tool Agent Studio publishes", () => {
+    const published = (clientTools as Array<{ function: { name: string } }>).map(tool => tool.function.name).sort();
+    expect(Object.keys(toolActivityMeta).sort()).toEqual(published);
   });
 });
 

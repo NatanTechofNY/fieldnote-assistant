@@ -69,6 +69,14 @@ export const toolActivityMeta: Record<string, { active: string; done: string; so
   name_group_chat: { active: "Naming the group chat", done: "Group chat named", source: "SQLite" },
   update_group_settings: { active: "Changing group settings", done: "Group settings changed", source: "SQLite" },
   update_soul: { active: "Updating how I talk", done: "Soul updated", source: "SQLite" },
+  // Group-chat tools. The server refuses them on the web channel, but a tool
+  // with no handler here is left to the widget's own fallback, which queues its
+  // result behind the very stream waiting on it and jams the chat for good.
+  react_to_message: { active: "Reacting to a message", done: "Reacted", source: "Messages" },
+  reply_in_thread: { active: "Replying in the thread", done: "Replied in the thread", source: "Messages" },
+  remember_group_member: { active: "Noting who's who", done: "Group member remembered", source: "SQLite" },
+  read_conversation: { active: "Reading a conversation", done: "Conversation read", source: "Messages" },
+  stay_quiet: { active: "Staying quiet", done: "Stayed quiet", source: "Messages" },
 };
 
 function toolResultDetail(output: unknown): string | null {

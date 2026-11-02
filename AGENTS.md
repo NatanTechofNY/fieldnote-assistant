@@ -62,7 +62,10 @@ and `server/routes/shared-pages.ts` together, and read pages through `scopedPage
 **Tool schemas are contract-tested.** `tests/server-api.test.ts` asserts that the tools published
 in `agent-studio/tools/client-tools.json` are exactly the keys of `toolInput` in
 `server/schemas.ts`, that each is `additionalProperties: false`, and that the tool count matches.
-Adding or renaming a tool means updating all three plus the count assertion in the test.
+Adding or renaming a tool means updating all three plus the count assertion in the test. The browser
+chat also needs an entry in `toolActivityMeta` (`src/features/chat/tool-activity.tsx`), asserted equal to
+the published tools in `tests/app.test.tsx`: the widget leaves a tool with no handler to a fallback that
+queues behind its own stream, which jams the web chat so that Stop and every later message do nothing.
 
 ## Boundaries
 
