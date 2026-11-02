@@ -9,6 +9,7 @@ import type { DigestBrief, DigestBriefResource, IntegrationState } from "../../t
 import { Field } from "../../components/ui";
 import { useRedact } from "../../lib/demo-mode";
 import { humanTime, withinQuietHours } from "../../lib/timezone";
+import { useConfirm } from "../../lib/confirm";
 
 export function AtlassianSettings({
   config,
@@ -21,6 +22,7 @@ export function AtlassianSettings({
   notify: (message: string) => void;
   refresh: () => void;
 }) {
+  const confirm = useConfirm();
   const redact = useRedact();
   const [siteUrl, setSiteUrl] = useState(config.siteUrl || "");
   const [email, setEmail] = useState(config.email || "");
@@ -77,7 +79,7 @@ export function AtlassianSettings({
         {connect.isPending ? <LoaderCircle className="spin" size={14}/> : <Zap size={14}/>}
         Connect Atlassian
       </button>
-      {config.configured && <button className="button danger" onClick={() => confirm("Disconnect Atlassian?") && api.disconnectAtlassian().then(refresh)}>Disconnect</button>}
+      {config.configured && <button className="button danger" onClick={() => void confirm({ message: "Disconnect Atlassian?", confirmLabel: "Disconnect" }).then(ok => ok ? api.disconnectAtlassian().then(refresh) : undefined)}>Disconnect</button>}
     </div>
   </div>;
 }
@@ -273,6 +275,7 @@ function BriefEditor({
   notify: (message: string) => void;
   onChanged: () => void;
 }) {
+  const confirm = useConfirm();
   const [name, setName] = useState(brief.name);
   const [prompt, setPrompt] = useState(brief.prompt);
   const [sendTime, setSendTime] = useState(brief.sendTime);
@@ -349,7 +352,7 @@ function BriefEditor({
         <button className="button ghost" disabled={test.isPending} onClick={() => test.mutate()}>
           {test.isPending ? <LoaderCircle className="spin" size={14}/> : <Play size={13}/>}Test now
         </button>
-        <button className="button danger" disabled={remove.isPending} onClick={() => confirm(`Remove “${brief.name}”?`) && remove.mutate()}>
+        <button className="button danger" disabled={remove.isPending} onClick={() => void confirm({ message: `Remove “${brief.name}”?`, confirmLabel: "Remove" }).then(ok => { if (ok) remove.mutate(); })}>
           <Trash2 size={13}/>Remove
         </button>
       </div>

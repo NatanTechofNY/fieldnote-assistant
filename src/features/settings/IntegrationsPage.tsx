@@ -23,6 +23,7 @@ import { WebhookUrlField } from "./WebhookUrlField";
 import { TASK_OPEN_MODES, useTaskOpenMode } from "../../lib/task-open-mode";
 import { currentPublicOrigin } from "../../lib/public-origin";
 import { humanTime, timezoneLabel, timezoneNames } from "../../lib/timezone";
+import { useConfirm } from "../../lib/confirm";
 
 const themeStatus: Record<ThemePreference, string> = {
   system: "Following system",
@@ -50,6 +51,7 @@ export function IntegrationsPage() {
 }
 
 function IntegrationsContent({ initialData }: { initialData: IntegrationState }) {
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const demoMode = useDemoMode();
   const redact = useRedact();
@@ -519,7 +521,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               </button>
               {data.twilio.configured && <button className="button ghost" onClick={() => api.testTwilio().then(() => notify("Test SMS sent")).catch(e => notify(e.message))}>Send test</button>}
               {data.twilio.configured && activeProvider !== "twilio" && <button className="button ghost" disabled={providerSwitch.isPending} onClick={() => providerSwitch.mutate("twilio")}>Send through Twilio</button>}
-              {data.twilio.configured && <button className="button danger" onClick={() => confirm("Disconnect Twilio?") && api.disconnectTwilio().then(refresh)}>Disconnect</button>}
+              {data.twilio.configured && <button className="button danger" onClick={() => void confirm({ message: "Disconnect Twilio?", confirmLabel: "Disconnect" }).then(ok => ok ? api.disconnectTwilio().then(refresh) : undefined)}>Disconnect</button>}
             </div>
           </div> : <div className="provider-panel">
             <div className="card-title"><h3>Sendblue iMessage</h3><MessageSquare size={18}/></div>
@@ -563,7 +565,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               </button>
               {data.sendblue.configured && <button className="button ghost" onClick={() => api.testSendblue().then(() => notify("Test message sent")).catch(e => notify(e.message))}>Send test</button>}
               {data.sendblue.configured && activeProvider !== "sendblue" && <button className="button ghost" disabled={providerSwitch.isPending} onClick={() => providerSwitch.mutate("sendblue")}>Send through Sendblue</button>}
-              {data.sendblue.configured && <button className="button danger" onClick={() => confirm("Disconnect Sendblue?") && api.disconnectSendblue().then(refresh)}>Disconnect</button>}
+              {data.sendblue.configured && <button className="button danger" onClick={() => void confirm({ message: "Disconnect Sendblue?", confirmLabel: "Disconnect" }).then(ok => ok ? api.disconnectSendblue().then(refresh) : undefined)}>Disconnect</button>}
             </div>
           </div>}
         </SettingsSection>
@@ -822,7 +824,7 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
               <div className="actions">
                 <button className="button primary" disabled={granolaConnect.isPending || !granolaKey} onClick={() => granolaConnect.mutate()}>Connect Granola</button>
                 {data.granola.configured && <button className="button ghost" onClick={() => api.pollGranola().then(result => { refresh(); notify(`${result.queued} new meeting events`); })}><RefreshCw size={14}/>Poll now</button>}
-                {data.granola.configured && <button className="button danger" onClick={() => confirm("Disconnect Granola?") && api.disconnectGranola().then(refresh)}>Disconnect</button>}
+                {data.granola.configured && <button className="button danger" onClick={() => void confirm({ message: "Disconnect Granola?", confirmLabel: "Disconnect" }).then(ok => ok ? api.disconnectGranola().then(refresh) : undefined)}>Disconnect</button>}
               </div>
             </div>
             <div className="settings-review">

@@ -4,7 +4,8 @@
 //   1. the FIELDNOTE_URL environment variable (handy from a terminal),
 //   2. the URL saved from the in-app setup page,
 //   3. otherwise the bundled setup page, which asks for one.
-// "Server Settings…" (Cmd+,) in the app menu returns to the setup page.
+// "Server Settings…" (Cmd+,) in the app menu returns to the setup page, and
+// "Reload" (Cmd+R) in the View menu reloads the window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::fs;
@@ -18,6 +19,7 @@ use tauri_plugin_opener::OpenerExt;
 
 const CONFIG_FILE: &str = "server-url.txt";
 const SETTINGS_MENU_ID: &str = "server-settings";
+const RELOAD_MENU_ID: &str = "reload";
 
 /// Origin (scheme://host:port) of the server the window may navigate to.
 struct ServerOrigin(Arc<Mutex<Option<String>>>);
@@ -142,9 +144,15 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![get_server_url, save_server_url])
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == SETTINGS_MENU_ID {
+            let id = event.id().as_ref();
+            if id == SETTINGS_MENU_ID {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.navigate(setup_page_url());
+                }
+            } else if id == RELOAD_MENU_ID {
+                // Reloads whatever the window shows: the hosted app, or the setup page.
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval("window.location.reload()");
                 }
             }
         })
@@ -173,6 +181,16 @@ fn main() {
             if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
                 app_menu.insert(&item, 2)?;
                 app_menu.insert(&PredefinedMenuItem::separator(&handle)?, 3)?;
+            }
+            // "Reload" (Cmd+R) sits at the top of the View menu.
+            let reload = MenuItem::with_id(&handle, RELOAD_MENU_ID, "Reload", true, Some("CmdOrCtrl+R"))?;
+            for kind in menu.items()? {
+                if let MenuItemKind::Submenu(sub) = kind {
+                    if sub.text()? == "View" {
+                        sub.insert(&reload, 0)?;
+                        sub.insert(&PredefinedMenuItem::separator(&handle)?, 1)?;
+                    }
+                }
             }
             app.set_menu(menu)?;
 

@@ -7,6 +7,7 @@ import { PageHead } from "../../components/layout/PageHead";
 import { Empty, ErrorState, Loading, Toast } from "../../components/ui";
 import { useRedact } from "../../lib/demo-mode";
 import type { HostedPage, PageBlockResult } from "../../types";
+import { useConfirm } from "../../lib/confirm";
 
 type Filter = "active" | "all";
 
@@ -31,6 +32,7 @@ function expiry(page: HostedPage): string {
  * only for you when you are signed in; a shared one opens for anyone with the link.
  */
 export function PagesPage() {
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const redact = useRedact();
   const [filter, setFilter] = useState<Filter>("active");
@@ -119,9 +121,10 @@ export function PagesPage() {
             type="button"
             className="button ghost danger"
             disabled={revoke.isPending}
-            onClick={() => {
-              if (confirm(`Turn off the link to "${page.title}"? Anyone opening it will see that it is gone.`)) revoke.mutate(page.id);
-            }}
+            onClick={() => void confirm({
+              message: `Turn off the link to "${page.title}"? Anyone opening it will see that it is gone.`,
+              confirmLabel: "Revoke",
+            }).then(ok => { if (ok) revoke.mutate(page.id); })}
           ><Ban size={12}/>Revoke</button>}
         </div>
         {openResults === page.id && <PollResults pageId={page.id}/>}

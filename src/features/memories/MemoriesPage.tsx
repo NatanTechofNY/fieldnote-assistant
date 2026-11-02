@@ -17,8 +17,10 @@ import { areaFilterParams, inAreaFilter } from "../../lib/area-filter";
 import { useAreaFilter } from "../../lib/use-area-filter";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import { MemoryModal } from "./MemoryModal";
+import { useConfirm } from "../../lib/confirm";
 
 export function MemoriesPage() {
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const [kind, setKind] = useState<"all" | MemoryKind>("all");
   const [query, setQuery] = useState("");
@@ -94,7 +96,7 @@ export function MemoriesPage() {
               <td className="cell-quiet">{format(new Date(memory.occurred_at || memory.created_at), "MMM d, yyyy")}</td>
               <td className="cell-actions">
                 <AttachButton item={memoryAttachment(memory)}/>
-                <button className="button icon ghost" aria-label="Delete memory" onClick={() => { if (confirm("Delete this memory?")) remove.mutate(memory.id); }}><Trash2 size={12}/></button>
+                <button className="button icon ghost" aria-label="Delete memory" onClick={() => void confirm({ message: "Delete this memory?", confirmLabel: "Delete" }).then(ok => { if (ok) remove.mutate(memory.id); })}><Trash2 size={12}/></button>
               </td>
             </tr>)}
           </tbody>

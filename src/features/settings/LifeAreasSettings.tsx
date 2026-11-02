@@ -4,6 +4,7 @@ import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../../api";
 import { invalidateTaxonomy } from "../../lib/invalidate";
 import type { LifeArea } from "../../types";
+import { useConfirm } from "../../lib/confirm";
 
 /**
  * A colour input cannot take a `var()`, and the chosen colour is stored as area
@@ -13,6 +14,7 @@ import type { LifeArea } from "../../types";
 const defaultAreaColor = "#5e6ad2";
 
 export function LifeAreasSettings({ notify }: { notify: (message: string) => void }) {
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const { data: areas = [] } = useQuery({ queryKey: ["life-areas"], queryFn: api.lifeAreas });
   const [name, setName] = useState("");
@@ -82,7 +84,7 @@ export function LifeAreasSettings({ notify }: { notify: (message: string) => voi
           </form>
           : <div><strong>{area.name}</strong><small>{subtitle(area)}</small></div>}
         {!area.is_builtin && editing?.id !== area.id && <button className="button icon ghost" aria-label={`Rename ${area.name}`} onClick={() => setEditing({ id: area.id, name: area.name })}><Pencil size={13}/></button>}
-        {!area.is_builtin && <button className="button icon ghost" aria-label={`Remove ${area.name}`} disabled={remove.isPending} onClick={() => confirm(removePrompt(area)) && remove.mutate(area.id)}><Trash2 size={13}/></button>}
+        {!area.is_builtin && <button className="button icon ghost" aria-label={`Remove ${area.name}`} disabled={remove.isPending} onClick={() => void confirm({ message: removePrompt(area), confirmLabel: "Remove" }).then(ok => { if (ok) remove.mutate(area.id); })}><Trash2 size={13}/></button>}
       </div>)}
     </div>
     <form className="life-area-add" onSubmit={event => { event.preventDefault(); create.mutate(); }}>

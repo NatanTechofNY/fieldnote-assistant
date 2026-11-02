@@ -13,6 +13,7 @@ import { invalidateContent } from "../../lib/invalidate";
 import { CompleteParentDialog } from "./CompleteParentDialog";
 import { SubtaskCheck, SubtaskProgress, SubtaskStart, SubtaskState } from "./SubtaskCheck";
 import { TodoNotes } from "./TodoNotes";
+import { useConfirm } from "../../lib/confirm";
 
 type RepeatMode = "never" | "daily" | "interval" | "weekly";
 
@@ -23,6 +24,7 @@ function repeatModeOf(rule: Recurrence | null | undefined): RepeatMode {
 }
 
 export function TodoModal({ todo, defaultDueAt, defaultLifeAreaId, subtasks, allTodos, lifeAreas, onClose }: { todo?: Todo; defaultDueAt?: string; defaultLifeAreaId?: string; subtasks: Todo[]; allTodos: Todo[]; lifeAreas: LifeArea[]; onClose: () => void }) {
+  const confirm = useConfirm();
   const timezone = useTimezone();
   const queryClient = useQueryClient();
   const [title, setTitle] = useState(todo?.title || "");
@@ -343,7 +345,7 @@ export function TodoModal({ todo, defaultDueAt, defaultLifeAreaId, subtasks, all
       {scheduleError && <div className="inline-error"><TriangleAlert size={14}/><span>{scheduleError}</span></div>}
       {save.error && <div className="inline-error"><TriangleAlert size={14}/><span>{save.error.message}</span></div>}
       <div className="modal-actions">
-        {todo && <button type="button" className="button danger" onClick={() => confirm("Delete this task?") && remove.mutate()}><Trash2 size={14}/>Delete</button>}
+        {todo && <button type="button" className="button danger" onClick={() => void confirm({ message: "Delete this task?", confirmLabel: "Delete" }).then(ok => { if (ok) remove.mutate(); })}><Trash2 size={14}/>Delete</button>}
         <span style={{ flex: 1 }} /><button type="button" className="button ghost" onClick={onClose}>Cancel</button>
         <button className="button primary" disabled={save.isPending}>{save.isPending ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}Save</button>
       </div>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronUp, Ellipsis, LogOut, PanelLeftClose, PanelLeftOpen, Sparkles } from "lucide-react";
+import { ChevronUp, Ellipsis, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Sparkles } from "lucide-react";
 import { api } from "../../api";
 import { AskLauncher } from "../search/AskLauncher";
 import { CommandPalette } from "../search/CommandPalette";
@@ -76,6 +76,9 @@ function ShellBody() {
         <div className="sidebar-foot">
           <ThemeToggle compact />
           <SidebarMenu />
+          <button type="button" className="signout" title="Reload the app (Cmd+R in the Mac app)" onClick={() => window.location.reload()}>
+            <RefreshCw size={13} /><span>Refresh</span>
+          </button>
           {health?.auth?.enabled && (
             <form method="post" action="/logout">
               <button type="submit" className="signout" title="Sign out"><LogOut size={13} /><span>Sign out</span></button>

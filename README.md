@@ -109,7 +109,7 @@ npm run build
 
 The build writes `Fieldnote.app` and a DMG under `desktop/src-tauri/target/release/bundle/`. Builds are unsigned, so on first launch right-click the app and choose Open (or run `xattr -dr com.apple.quarantine Fieldnote.app`).
 
-The server address is chosen at run time, not build time, so one build works for any host. On first launch the app asks for an address such as `https://your-app.up.railway.app`, or `http://localhost:4174` for a local `npm start`. Change it later with Fieldnote > Server Settings… (Cmd+,). Setting `FIELDNOTE_URL` in the environment overrides the saved address at launch. Plain `http://` is accepted only for localhost and local-network addresses. Links to other sites open in your default browser rather than inside the app.
+The server address is chosen at run time, not build time, so one build works for any host. On first launch the app asks for an address such as `https://your-app.up.railway.app`, or `http://localhost:4174` for a local `npm start`. Change it later with Fieldnote > Server Settings… (Cmd+,). View > Reload (Cmd+R) or the Refresh button in the sidebar reloads the window. Confirmations (Sync Agent config, deleting, disconnecting) are drawn in the page, because the app's webview shows no `window.confirm` dialogs. Setting `FIELDNOTE_URL` in the environment overrides the saved address at launch. Plain `http://` is accepted only for localhost and local-network addresses. Links to other sites open in your default browser rather than inside the app.
 
 ## Commands
 

@@ -10,6 +10,7 @@ import { AttachmentViewer } from "../../components/ui/AttachmentThumbs";
 import { pictureLabel } from "../../components/ui/pictureLabel";
 import { LifeAreaPill } from "../../components/ui/LifeAreaPill";
 import type { Attachment } from "../../types";
+import { useConfirm } from "../../lib/confirm";
 
 type Filter = "all" | "photo" | "document";
 
@@ -17,6 +18,7 @@ const FILTERS: Array<[Filter, string]> = [["all", "Everything"], ["photo", "Phot
 
 /** Every picture texted to the assistant and kept on the server, newest first. */
 export function AttachmentsPage() {
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<Filter>("all");
   const [viewing, setViewing] = useState<Attachment | null>(null);
@@ -62,11 +64,10 @@ export function AttachmentsPage() {
                 type="button"
                 className="button icon ghost"
                 aria-label={`Delete ${pictureLabel(attachment).toLowerCase()}`}
-                onClick={() => {
-                  if (confirm("Delete this picture from the server? What the assistant read off it is also blanked in the conversation. A memory's own text stays; edit or delete the memory too if it quotes the picture.")) {
-                    remove.mutate(attachment.id);
-                  }
-                }}
+                onClick={() => void confirm({
+                  message: "Delete this picture from the server? What the assistant read off it is also blanked in the conversation. A memory's own text stays; edit or delete the memory too if it quotes the picture.",
+                  confirmLabel: "Delete",
+                }).then(ok => { if (ok) remove.mutate(attachment.id); })}
               ><Trash2 size={12}/></button>
             </div>
           </div>

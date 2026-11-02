@@ -5,8 +5,10 @@ import { api } from "../../api";
 import { ErrorState, Field, HealthCard, Loading, Modal } from "../../components/ui";
 import { useRedact } from "../../lib/demo-mode";
 import { SettingsSection } from "./SettingsSection";
+import { useConfirm } from "../../lib/confirm";
 
 export function UnderHoodSettings({ notify }: { notify: (message: string) => void }) {
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const redact = useRedact();
   const { data: health, isLoading, error } = useQuery({ queryKey: ["health"], queryFn: api.health });
@@ -55,7 +57,7 @@ export function UnderHoodSettings({ notify }: { notify: (message: string) => voi
             <button className="button ghost" aria-busy={running === "reindex"} disabled={action.isPending} onClick={() => action.mutate({ name: "reindex" })}>
               {running === "reindex" ? <LoaderCircle className="spin" size={14}/> : <RefreshCw size={14}/>}Reindex
             </button>
-            <button className="button ghost" aria-busy={running === "tools"} disabled={action.isPending || !health.agentStudio.configured} onClick={() => confirm("Sync the checked-in instructions and client tools to Agent Studio? Existing Search tools will be preserved.") && action.mutate({ name: "tools" })}>
+            <button className="button ghost" aria-busy={running === "tools"} disabled={action.isPending || !health.agentStudio.configured} onClick={() => void confirm({ title: "Sync Agent config", message: "Sync the checked-in instructions and client tools to Agent Studio? Existing Search tools will be preserved.", confirmLabel: "Sync", danger: false }).then(ok => { if (ok) action.mutate({ name: "tools" }); })}>
               {running === "tools" ? <LoaderCircle className="spin" size={14}/> : <Zap size={14}/>}Sync Agent config
             </button>
             <button

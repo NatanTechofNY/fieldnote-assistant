@@ -1005,6 +1005,14 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
   return new Response(JSON.stringify({ success: true, data: [] }));
 }));
 
+
+/** The in-page question that replaced `window.confirm`, which the macOS app's webview never draws. */
+async function answerConfirm(answer: string) {
+  const question = await screen.findByRole("dialog", { name: "Are you sure?" });
+  await userEvent.click(within(question).getByRole("button", { name: answer }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Are you sure?" })).not.toBeInTheDocument());
+}
+
 it("renders the standalone assistant shell and overview", async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><MemoryRouter><App /></MemoryRouter></QueryClientProvider>);
@@ -2819,14 +2827,10 @@ it("keeps a log of timestamped notes on a task, written by you or the assistant"
   await userEvent.type(within(dialog).getByLabelText("New note"), "Sent the agenda{Control>}{Enter}{/Control}");
   await waitFor(() => expect(noteWrites.at(-1)).toMatchObject({ method: "POST", body: { body: "Sent the agenda" } }));
 
-  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-  try {
-    await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getAllByRole("button", { name: /^Delete note from Assistant, Today, / })[0]);
-    await waitFor(() => expect(noteWrites.at(-1)).toMatchObject({ method: "DELETE", url: "/api/todos/todo_1/comments/comment_seed" }));
-    await waitFor(() => expect(within(dialog).queryByText("Venue confirmed Thursday")).not.toBeInTheDocument());
-  } finally {
-    confirmSpy.mockRestore();
-  }
+  await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getAllByRole("button", { name: /^Delete note from Assistant, Today, / })[0]);
+  await answerConfirm("Delete");
+  await waitFor(() => expect(noteWrites.at(-1)).toMatchObject({ method: "DELETE", url: "/api/todos/todo_1/comments/comment_seed" }));
+  await waitFor(() => expect(within(dialog).queryByText("Venue confirmed Thursday")).not.toBeInTheDocument());
 });
 
 it("keeps a note you wrote when saving fails, and leaves a note when you decline to delete it", async () => {
@@ -2847,16 +2851,18 @@ it("keeps a note you wrote when saving fails, and leaves a note when you decline
   await userEvent.type(note, "!");
   await waitFor(() => expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument());
 
-  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-  try {
-    const writes = noteWrites.length;
-    await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getByRole("button", { name: /^Delete note/ }));
-    expect(confirmSpy).toHaveBeenCalled();
-    expect(noteWrites.length).toBe(writes);
-    expect(within(dialog).getByText("Venue confirmed Thursday")).toBeInTheDocument();
-  } finally {
-    confirmSpy.mockRestore();
-  }
+  const writes = noteWrites.length;
+  await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getByRole("button", { name: /^Delete note/ }));
+  await answerConfirm("Cancel");
+  expect(noteWrites.length).toBe(writes);
+  expect(within(dialog).getByText("Venue confirmed Thursday")).toBeInTheDocument();
+  // Escape cancels the question and leaves the task open behind it.
+  await userEvent.click(within(await within(dialog).findByRole("list", { name: "Task notes" })).getByRole("button", { name: /^Delete note/ }));
+  await screen.findByRole("dialog", { name: "Are you sure?" });
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Are you sure?" })).not.toBeInTheDocument());
+  expect(screen.getByRole("dialog", { name: /./ })).toBeInTheDocument();
+  expect(noteWrites.length).toBe(writes);
 });
 
 it("offers no notes while a task is still being captured", async () => {
@@ -3365,10 +3371,9 @@ it("lists hosted pages with who can open them, shows poll results, and revokes a
   expect(await screen.findByText("Where to eat?")).toBeInTheDocument();
   expect(screen.getByText("Sarah, Dev")).toBeInTheDocument();
 
-  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
   await userEvent.click(screen.getAllByRole("button", { name: /Revoke/ })[0]);
+  await answerConfirm("Revoke");
   await waitFor(() => expect(revokedPages).toEqual(["page_poll"]));
-  confirmSpy.mockRestore();
 });
 
 it("lists the pictures the assistant kept, filters them, and deletes one", async () => {
@@ -3393,29 +3398,21 @@ it("lists the pictures the assistant kept, filters them, and deletes one", async
 
   const listRequests = () => requestedUrls.filter(url => url.includes("/api/attachments?")).length;
   const before = listRequests();
-  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-  try {
-    await userEvent.click(screen.getByRole("button", { name: /^Delete saved document/ }));
-    await waitFor(() => expect(deletedAttachments).toEqual(["attachment_receipt"]));
-    expect(confirmSpy.mock.calls[0][0]).toMatch(/conversation/i);
-    await waitFor(() => expect(listRequests()).toBeGreaterThan(before));
-  } finally {
-    confirmSpy.mockRestore();
-  }
+  await userEvent.click(screen.getByRole("button", { name: /^Delete saved document/ }));
+  expect(await screen.findByRole("dialog", { name: "Are you sure?" })).toHaveTextContent(/conversation/i);
+  await answerConfirm("Delete");
+  await waitFor(() => expect(deletedAttachments).toEqual(["attachment_receipt"]));
+  await waitFor(() => expect(listRequests()).toBeGreaterThan(before));
 });
 
 it("says so when a picture could not be deleted", async () => {
   attachmentDeleteFails = true;
   renderAt("/attachments");
   expect(await screen.findByText("A dog on a beach.")).toBeInTheDocument();
-  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-  try {
-    await userEvent.click(screen.getByRole("button", { name: /^Delete saved document/ }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("could not be deleted");
-    expect(deletedAttachments).toEqual([]);
-  } finally {
-    confirmSpy.mockRestore();
-  }
+  await userEvent.click(screen.getByRole("button", { name: /^Delete saved document/ }));
+  await answerConfirm("Delete");
+  expect(await screen.findByRole("alert")).toHaveTextContent("could not be deleted");
+  expect(deletedAttachments).toEqual([]);
 });
 
 it("looks at a memory's picture without opening the memory behind it", async () => {
@@ -3529,19 +3526,14 @@ it("asks before deleting a memory", async () => {
   expect(await screen.findByText("Talk framing")).toBeInTheDocument();
   const before = requestedUrls.length;
 
-  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-  try {
-    await userEvent.click(screen.getAllByRole("button", { name: "Delete memory" })[0]);
-    expect(confirmSpy).toHaveBeenCalled();
-    expect(requestedUrls.slice(before).some(url => url.includes("/api/memories/memory_1"))).toBe(false);
+  await userEvent.click(screen.getAllByRole("button", { name: "Delete memory" })[0]);
+  await answerConfirm("Cancel");
+  expect(requestedUrls.slice(before).some(url => url.includes("/api/memories/memory_1"))).toBe(false);
 
-    confirmSpy.mockReturnValue(true);
-    await userEvent.click(screen.getAllByRole("button", { name: "Delete memory" })[0]);
-    await waitFor(() =>
-      expect(requestedUrls.some(url => url.includes("/api/memories/memory_1"))).toBe(true));
-  } finally {
-    confirmSpy.mockRestore();
-  }
+  await userEvent.click(screen.getAllByRole("button", { name: "Delete memory" })[0]);
+  await answerConfirm("Delete");
+  await waitFor(() =>
+    expect(requestedUrls.some(url => url.includes("/api/memories/memory_1"))).toBe(true));
 });
 
 describe("session expiry", () => {

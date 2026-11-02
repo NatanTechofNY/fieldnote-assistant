@@ -5,6 +5,7 @@ import { api } from "../../api";
 import type { TodoComment } from "../../types";
 import { invalidateContent } from "../../lib/invalidate";
 import { friendlyDate, useTimezone } from "../../lib/timezone";
+import { useConfirm } from "../../lib/confirm";
 
 const fullTime = (value: string, timezone: string) => new Intl.DateTimeFormat("en-US", {
   timeZone: timezone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
@@ -17,6 +18,7 @@ const fullTime = (value: string, timezone: string) => new Intl.DateTimeFormat("e
  * composer is a button, and Cmd/Ctrl+Enter is the shortcut for it.
  */
 export function TodoNotes({ todoId }: { todoId: string }) {
+  const confirm = useConfirm();
   const timezone = useTimezone();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState("");
@@ -58,7 +60,7 @@ export function TodoNotes({ todoId }: { todoId: string }) {
           className="button icon ghost"
           aria-label={`Delete note from ${comment.author === "agent" ? "Assistant" : "You"}, ${friendlyDate(comment.created_at, timezone)}`}
           disabled={remove.isPending}
-          onClick={() => confirm("Delete this note?") && remove.mutate(comment.id)}
+          onClick={() => void confirm({ message: "Delete this note?", confirmLabel: "Delete" }).then(ok => { if (ok) remove.mutate(comment.id); })}
         ><Trash2 size={13}/></button>
       </div>
       <p className="note-body">{comment.body}</p>
