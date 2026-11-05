@@ -49,6 +49,7 @@ function fail(error: unknown): CallToolResult {
 }
 
 const pick = (row: Record<string, unknown>, keys: string[]) => Object.fromEntries(keys.map(key => [key, row[key] ?? null]));
+const OPEN_STATUSES = ["pending", "in_progress", "blocked"];
 const TODO_KEYS = ["id", "title", "status", "priority", "due_at", "reminder_at", "parent_id"];
 
 export function buildHouseholdServer(db: Db, search: SearchWriter): McpServer {
@@ -99,9 +100,15 @@ export function buildHouseholdServer(db: Db, search: SearchWriter): McpServer {
     inputSchema: { include_done: z.boolean().optional(), limit: z.number().int().min(1).max(30).optional() },
     annotations: { readOnlyHint: true },
   }, args => guarded(async () => {
-    const rows = await run("list_todos", { limit: 200 }) as Array<Record<string, unknown>>;
-    const shown = rows.filter(row => args.include_done || (row.status !== "done" && row.status !== "cancelled"));
-    return { timezone, todos: shown.slice(0, args.limit ?? 15).map(row => pick(row, TODO_KEYS)) };
+    const limit = args.limit ?? 15;
+    // The status is filtered by the executor before it applies the limit, so a long run of finished tasks cannot push an older open one out of the list.
+    const rows = args.include_done
+      ? await run("list_todos", { limit }) as Array<Record<string, unknown>>
+      : (await Promise.all(OPEN_STATUSES.map(status => run("list_todos", { status, limit })) as Array<Promise<Array<Record<string, unknown>>>>))
+        .flat()
+        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+        .slice(0, limit);
+    return { timezone, todos: rows.map(row => pick(row, TODO_KEYS)) };
   })());
 
   server.registerTool("get_todo", {

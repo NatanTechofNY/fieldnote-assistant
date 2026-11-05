@@ -134,6 +134,7 @@ Set these as host secrets. Never commit them.
 | `PUBLIC_BASE_URL` | unset | The public https address (`https://<your-app>.up.railway.app`). Alexa linking needs it: the OAuth `resource` must be exactly `<PUBLIC_BASE_URL>/mcp` |
 | `ALEXA_OAUTH_CLIENT_ID`, `ALEXA_OAUTH_CLIENT_SECRET`, `ALEXA_OAUTH_REDIRECT_URIS` | unset | Turn on Alexa+ linking (`/mcp`, `/oauth/*`); nothing links until a client id is set. The redirect list is optional. See [`ALEXA.md`](ALEXA.md) |
 | `ALEXA_REFRESH_TOKEN`, `ALEXA_DOMAIN` | unset, `amazon.com` | Let the assistant operate your Echo devices through the optional `alexa-mcp` dependency. The refresh token can act on your home: keep it a secret, not a build argument |
+| `ALEXA_ALLOWED_ROUTINES` | unset | Exact names of the Alexa routines the assistant may run, comma-separated. Unset, it runs none: a routine's steps cannot be inspected first |
 | `ALEXA_DAILY_LIMIT`, `ALEXA_BLOCKED_DEVICES` | `100`, a built-in pattern for locks, doors, garages, cameras and alarms | Home-tool calls per local day (`0` turns them off), and the pattern of devices never operated. Setting the second replaces the built-in pattern, so keep those words in it |
 | `ALGOLIA_NEURAL_SEARCH` | `false` | Initial NeuralSearch value for a **fresh** database only. After that the Settings toggle owns it |
 | `VITE_ALGOLIA_*` | unset | Build-time browser values, see above |

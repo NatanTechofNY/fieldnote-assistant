@@ -2069,7 +2069,7 @@
     "type": "function",
     "function": {
       "name": "run_alexa_routine",
-      "description": "Starts one of the owner's Alexa routines by name. Only when the owner asks for it.",
+      "description": "Starts one of the owner's approved Alexa routines by name. Only when the owner asks for it.",
       "strict": true,
       "parameters": {
         "type": "object",

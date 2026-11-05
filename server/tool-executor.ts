@@ -36,7 +36,7 @@ import {
   assertNoOwnerPageLinks, getPage, listPages, NO_BASE_URL, pageJson, pollResults, revokePage,
   type PageRow,
 } from "./pages.ts";
-import { localIsoWithOffset, namesOtherWeekday, todayWeekday, zonedToInstant } from "./local-time.ts";
+import { localIsoWithOffset, localParts, namesOtherWeekday, todayWeekday, zonedToInstant } from "./local-time.ts";
 import { plainText, sendSms, type SmsSender } from "./messaging.ts";
 import { type IncomingMood, parseMoods, resolveMoodFields } from "./moods.ts";
 import { reflectionPeriod, reflectionScopeKey, type ReflectionPeriod, type ReflectionPreset } from "./reflection-period.ts";
@@ -2077,16 +2077,22 @@ export async function executeAgentTool(
   if (name === "get_agenda") {
     const start = input.start_date as string;
     const end = input.end_date as string;
+    // Reminders are stored in UTC, so a late-evening one belongs to the next day's date unless it is read on the caller's clock.
+    const zone = typeof input.timezone === "string" ? input.timezone : null;
+    const dayOf = (value: string): string => {
+      const instant = new Date(value);
+      return zone && !Number.isNaN(instant.getTime()) ? localParts(instant, zone).date : value.slice(0, 10);
+    };
     const todos = (db.prepare(`
       SELECT t.*,c.name category_name FROM todos t LEFT JOIN categories c ON c.id=t.category_id
       WHERE t.user_id=? AND t.due_at IS NOT NULL ${scope ? "AND t.life_area_id=?" : ""}
         ${ownOnly ? `AND ${OWN_AREA_CLAUSE("t")}` : ""} ORDER BY t.due_at
     `).all(...(scope ? [USER_ID, scope.lifeAreaId] : [USER_ID])) as TodoRow[]).filter(todo => {
-      const date = todo.due_at?.slice(0, 10) || "";
+      const date = todo.due_at ? dayOf(todo.due_at) : "";
       return date >= start && date <= end;
     });
     const reminders = getReminders(db, undefined, { lifeAreaId: scope?.lifeAreaId, ownAreasOnly: ownOnly }).filter(reminder => {
-      const date = reminder.scheduled_for.slice(0, 10);
+      const date = dayOf(reminder.scheduled_for);
       return date >= start && date <= end;
     });
     return { todos: todos.map(todoJson), reminders };

@@ -81,8 +81,22 @@ export function alexaConfig(): { refreshToken: string | null; domain: string } {
   return { refreshToken, domain: process.env.ALEXA_DOMAIN?.trim() || "amazon.com" };
 }
 
+/** Rejects when the deadline fires even if the work never settles; the work's own late outcome is ignored. */
+function beforeDeadline<T>(work: Promise<T>, deadline: AbortSignal): Promise<T> {
+  return new Promise<T>((resolvePromise, reject) => {
+    if (deadline.aborted) {
+      reject(deadline.reason);
+      return;
+    }
+    deadline.addEventListener("abort", () => reject(deadline.reason), { once: true });
+    work.then(resolvePromise, reject);
+  });
+}
+
 class StdioAlexaClient implements AlexaToolClient {
   private connected: Promise<Client> | undefined;
+  // Kept apart from the client so a child that never finishes starting can still be killed.
+  private transport: StdioClientTransport | undefined;
 
   private connect(): Promise<Client> {
     if (this.connected) return this.connected;
@@ -97,9 +111,13 @@ class StdioAlexaClient implements AlexaToolClient {
     });
     transport.onclose = () => {
       // The next call starts a fresh child rather than writing to a dead one.
-      this.connected = undefined;
+      if (this.transport === transport) {
+        this.transport = undefined;
+        this.connected = undefined;
+      }
     };
     const pending = client.connect(transport).then(() => client);
+    this.transport = transport;
     this.connected = pending;
     pending.catch(() => {
       if (this.connected === pending) this.connected = undefined;
@@ -110,7 +128,8 @@ class StdioAlexaClient implements AlexaToolClient {
   async call(tool: string, args: Record<string, unknown>, timeoutMs: number): Promise<{ text: string; isError: boolean }> {
     const deadline = AbortSignal.timeout(timeoutMs);
     try {
-      const client = await this.connect();
+      // The deadline covers starting the child as well as the call: a child that stalls while starting is as stuck as one that hangs mid-call.
+      const client = await beforeDeadline(this.connect(), deadline);
       const result = await client.callTool({ name: tool, arguments: args }, undefined, { signal: deadline, timeout: timeoutMs });
       let text = "";
       for (const part of Array.isArray(result.content) ? result.content : []) {
@@ -128,9 +147,11 @@ class StdioAlexaClient implements AlexaToolClient {
   }
 
   async close(): Promise<void> {
-    const pending = this.connected;
+    const transport = this.transport;
+    this.transport = undefined;
     this.connected = undefined;
-    if (pending) await (await pending.catch(() => undefined))?.close().catch(() => undefined);
+    // Closing the transport ends the child whether or not the handshake ever completed.
+    await transport?.close().catch(() => undefined);
   }
 }
 
@@ -325,14 +346,32 @@ export async function controlHomeDevice(input: {
   return { done: result.success || result.partial, group: rooms[0].name, state: action, controlled: result.controlled, errors: result.errors };
 }
 
+/**
+ * The routines the owner has said are safe to run. A routine's steps cannot be
+ * read through the server (it lists a name and an id, and fetches the steps
+ * only to run them), so nothing here can check that "Good night" does not also
+ * unlock a door. Rather than trust a name, only a routine the owner lists is run.
+ */
+function allowedRoutines(): string[] {
+  return (process.env.ALEXA_ALLOWED_ROUTINES ?? "").split(",").map(entry => entry.trim().toLowerCase()).filter(Boolean);
+}
+
 export async function runAlexaRoutine(name: string): Promise<Record<string, unknown>> {
+  const allowed = allowedRoutines();
+  if (!allowed.length) {
+    throw new AlexaRefusal("Fieldnote cannot see what a routine does, so it runs none until you list the safe ones in ALEXA_ALLOWED_ROUTINES");
+  }
   const routines = await ask<Routine[]>("alexa_list_routines");
   const query = name.trim().toLowerCase();
   const exact = routines.filter(routine => routine.name.toLowerCase() === query);
   const found = exact.length ? exact : routines.filter(routine => routine.name.toLowerCase().includes(query));
   if (!found.length) throw new Error(`No routine is called "${name}"`);
   if (found.length > 1) throw new Error(`More than one routine matches "${name}" (${found.slice(0, 6).map(routine => routine.name).join(", ")}); ask which one`);
-  // A routine is whatever the owner built, and it can do anything a voice command can: named like a lock, it is not run.
+  // Checked on the routine that was found, not the words that were said, so a partial name cannot reach an unlisted routine.
+  if (!allowed.includes(found[0].name.trim().toLowerCase())) {
+    throw new AlexaRefusal(`"${found[0].name}" is not one of the routines Fieldnote may run; the owner lists those in ALEXA_ALLOWED_ROUTINES`);
+  }
+  // Belt and braces: even a listed routine whose name says it locks or unlocks something is not run.
   assertOperable(found[0].name);
   await act("alexa_run_routine", { automationId: found[0].automationId });
   return { done: true, routine: found[0].name };

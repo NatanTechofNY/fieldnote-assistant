@@ -56,7 +56,7 @@ export function AlexaSettings({ notify }: { notify: (message: string) => void })
     <div>
       <div className="card-title"><h3>Fieldnote → Alexa</h3></div>
       <p className="integration-copy">
-        Lets the assistant switch lights and plugs, run your routines, and speak on an Echo, when you ask it to. It never
+        Lets the assistant switch lights and plugs, run the routines you approve, and speak on an Echo, when you ask it to. It never
         operates locks, doors, garages, cameras or alarms, and it only does so on your own line.
       </p>
       <div className="integration-status">

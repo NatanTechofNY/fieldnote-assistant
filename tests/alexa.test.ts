@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import request from "supertest";
 import type { AlgoliaSync } from "../server/algolia.ts";
 import {
-  resetAlexaState, setAlexaClient, type AlexaToolClient,
+  closeAlexaControl, resetAlexaState, setAlexaClient, type AlexaToolClient,
 } from "../server/alexa-control.ts";
 import { createApp } from "../server/app.ts";
 import { resetThrottling } from "../server/auth.ts";
@@ -79,7 +82,7 @@ function configure(): void {
 
 const ENV_KEYS = [
   "PUBLIC_BASE_URL", "APP_ADMIN_PASSWORD", "ALEXA_OAUTH_CLIENT_ID", "ALEXA_OAUTH_CLIENT_SECRET", "ALEXA_OAUTH_REDIRECT_URIS",
-  "ALEXA_REFRESH_TOKEN", "ALEXA_MCP_PATH", "ALEXA_DAILY_LIMIT", "ALEXA_BLOCKED_DEVICES",
+  "ALEXA_REFRESH_TOKEN", "ALEXA_MCP_PATH", "ALEXA_DAILY_LIMIT", "ALEXA_BLOCKED_DEVICES", "ALEXA_ALLOWED_ROUTINES", "ALEXA_TIMEOUT_MS",
 ];
 
 beforeEach(() => {
@@ -281,11 +284,14 @@ describe("Alexa account linking", () => {
 
   it("throttles refused token requests, and never a good one", async () => {
     configure();
-    const { api } = fixture();
+    const { app } = fixture();
     let last = 0;
-    for (let attempt = 0; attempt < 61; attempt += 1) {
-      last = (await tokenRequest(api, { grant_type: "refresh_token", refresh_token: "nope" })).status;
-    }
+    // One listener for all of them: sixty-one servers opened back to back reset a connection now and then.
+    await withServer(app, async live => {
+      for (let attempt = 0; attempt < 61; attempt += 1) {
+        last = (await tokenRequest(live, { grant_type: "refresh_token", refresh_token: "nope" })).status;
+      }
+    });
     assert.equal(last, 429);
   });
 
@@ -430,6 +436,39 @@ describe("what an Echo can reach", () => {
 
     const duplicate = await tool("create_todo", { title: "Buy milk" });
     assert.equal(duplicate.error, true, "the same open task is refused, not added twice");
+  });
+
+  it("puts a reminder on the day it falls on in the owner's timezone, not on its UTC date", async () => {
+    const { tool } = await voice();
+    const made = await tool("create_todo", { title: "Call the plumber" });
+    const id = (made.data as { todo: { id: string } }).todo.id;
+    // 11pm in New York on the 6th is 04:00 UTC on the 7th.
+    const reminder = await tool("create_reminder", { todo_id: id, remind_at: "2026-11-06T23:00" });
+    assert.equal(reminder.error, false, reminder.text);
+    assert.match((reminder.data as { reminder: { scheduled_for: string } }).reminder.scheduled_for, /^2026-11-07T04:00/);
+
+    const days = async (date: string) => ((await tool("get_agenda", { start_date: date, end_date: date })).data as { reminders: unknown[] }).reminders.length;
+    assert.equal(await days("2026-11-06"), 1, "it is on the 6th for the household");
+    assert.equal(await days("2026-11-07"), 0, "and not on the 7th");
+  });
+
+  it("lists the older open tasks even when a long run of finished ones is newer", async () => {
+    const { db, tool } = await voice();
+    await tool("create_todo", { title: "Renew the car registration" });
+    const done = await tool("create_todo", { title: "Done chore" });
+    const finished = (done.data as { todo: { id: string } }).todo.id;
+    assert.equal((await tool("set_todo_status", { id: finished, status: "done" })).error, false);
+    const row = db.prepare("SELECT * FROM todos WHERE id=?").get(finished) as Record<string, unknown>;
+    const columns = Object.keys(row);
+    const insert = db.prepare(`INSERT INTO todos(${columns.join(",")}) VALUES(${columns.map(column => `@${column}`).join(",")})`);
+    const later = Date.now() + 60_000;
+    for (let index = 0; index < 205; index += 1) {
+      insert.run({ ...row, id: `todo_filler_${index}`, created_at: new Date(later + index).toISOString() });
+    }
+    const listed = (await tool("list_todos")).data as { todos: Array<{ title: string }> };
+    assert.deepEqual(listed.todos.map(todo => todo.title), ["Renew the car registration"], "205 newer finished tasks do not push it out");
+    const all = (await tool("list_todos", { include_done: true, limit: 3 })).data as { todos: unknown[] };
+    assert.equal(all.todos.length, 3);
   });
 
   it("cannot read or change the owner's own records", async () => {
@@ -681,10 +720,30 @@ describe("Fieldnote operating the owner's Alexa devices", () => {
     await tool(api, "home_device_status", { name: "Front Door Lock" }, 403);
     // One lock in a room keeps the whole room from being switched.
     await tool(api, "control_home_device", { target: "Entry", target_kind: "group", action: "off", brightness: null }, 403);
+    // Even a routine the owner listed is refused when its name says it locks or unlocks something.
+    process.env.ALEXA_ALLOWED_ROUTINES = "Good night, Unlock the doors";
     await tool(api, "run_alexa_routine", { name: "Unlock the doors" }, 403);
     assert.ok(!alexa.calls.some(call => OPERATING.includes(call.tool)), `nothing was operated, got ${JSON.stringify(alexa.calls.map(call => call.tool))}`);
+  });
+
+  it("runs only the routines the owner has listed, because a routine's steps cannot be read first", async () => {
+    const { api, alexa } = home();
+    // A harmless name proves nothing: "Good night" could unlock a door, and the server shows only its name.
+    const none = await tool(api, "run_alexa_routine", { name: "Good night" }, 403);
+    assert.match(none.error, /^Alexa refused: .*ALEXA_ALLOWED_ROUTINES/);
+    assert.ok(!alexa.calls.some(call => call.tool === "alexa_list_routines" || OPERATING.includes(call.tool)), "refused before Alexa was asked anything");
+
+    process.env.ALEXA_ALLOWED_ROUTINES = " movie time , Good Night ";
     await tool(api, "run_alexa_routine", { name: "good night" });
     assert.deepEqual(alexa.calls.at(-1), { tool: "alexa_run_routine", args: { automationId: "A1" } });
+
+    // Matched on the routine that was found, not on the words spoken: a partial name cannot reach an unlisted routine.
+    process.env.ALEXA_ALLOWED_ROUTINES = "Good night";
+    const before = alexa.calls.filter(call => call.tool === "alexa_run_routine").length;
+    const partial = await tool(api, "run_alexa_routine", { name: "doors" }, 403);
+    assert.match(partial.error, /"Unlock the doors" is not one of the routines/);
+    assert.equal(alexa.calls.filter(call => call.tool === "alexa_run_routine").length, before);
+    await tool(api, "run_alexa_routine", { name: "toast" }, 400);
   });
 
   it("takes the owner's own pattern for what is blocked, and blocks everything when it is invalid", async () => {
@@ -782,6 +841,20 @@ describe("Fieldnote operating the owner's Alexa devices", () => {
 
     process.env.ALEXA_DAILY_LIMIT = "0";
     assert.match((await tool(api, "list_home_devices", {}, 503)).error, /turned off/);
+  });
+
+  it("holds the deadline while the child is still starting, and lets go of it", async () => {
+    const stalled = join(mkdtempSync(join(tmpdir(), "alexa-stall-")), "never-answers.mjs");
+    writeFileSync(stalled, "setInterval(() => {}, 1000);\n");
+    const { api } = home();
+    setAlexaClient();
+    process.env.ALEXA_MCP_PATH = stalled;
+    process.env.ALEXA_TIMEOUT_MS = "400";
+    const started = Date.now();
+    const failed = await tool(api, "list_home_devices", {}, 502);
+    assert.match(failed.error, /did not respond within 0\.4s/);
+    assert.ok(Date.now() - started < 5000, "bounded by the configured deadline, not by the protocol's own 60s");
+    await closeAlexaControl();
   });
 
   it("reports an Alexa failure as an upstream fault with its own wording", async () => {

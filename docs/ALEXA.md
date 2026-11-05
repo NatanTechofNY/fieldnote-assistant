@@ -113,7 +113,7 @@ Five tools, owner's own line only (the browser chat and your own text thread):
 | `list_home_devices` | Echo devices, smart-home devices (with whether Fieldnote will operate each) and rooms |
 | `home_device_status` | One device's state |
 | `control_home_device` | On or off for a device or every light in a room (`target_kind` `device` or `group`), or one device's brightness |
-| `run_alexa_routine` | Starts a routine by name |
+| `run_alexa_routine` | Starts a routine by name, only if the owner has listed it in `ALEXA_ALLOWED_ROUTINES` |
 | `speak_on_echo` | Announces a short message, on every Echo or one by name |
 
 They are in `OWNER_ONLY_TOOLS`, so a group turn is refused (`… is not available in a group chat`), and so is an Echo
@@ -130,8 +130,12 @@ Operating a home is not like reading a todo list, so the executor is stricter:
   the assistant into turning a light off.
 - **Locks, doors, garages, cameras and alarms are never operated.** The check is on the name (`ALEXA_BLOCKED_DEVICES`, a
   case-insensitive pattern; the default is `\b(?:un)?lock|padlock|deadbolt|garage|door|alarm|security|camera`) **and** on Alexa's own
-  device type, so a lock the owner called "Hallway" is still refused. A room is refused when any member is blocked. A routine whose name
-  matches is not run. An invalid pattern blocks every device rather than none. The reply is `Alexa refused: …` (403).
+  device type, so a lock the owner called "Hallway" is still refused. A room is refused when any member is blocked. An invalid pattern blocks every device rather than none. The reply is `Alexa refused: …` (403).
+- **Routines run only when you list them.** A routine can do anything a voice command can, and `alexa-mcp` shows only its name:
+  there is no way to read its steps first, so a routine called "Good night" that also unlocks the door cannot be told from one that
+  does not. `ALEXA_ALLOWED_ROUTINES` is a comma-separated list of exact routine names (`Good night, Movie time`), empty by default, and
+  while it is empty no routine runs (`Alexa refused: …`, 403). A routine is matched on the name Alexa reports, not the words spoken, and
+  one whose name matches the blocked pattern is still refused. Listing a routine is you vouching for what it does.
 - **Names are resolved by Fieldnote, not by Alexa.** The model passes a name; Fieldnote lists the devices, picks one (exact, then
   prefix, then contains) and asks if it is ambiguous, and the device it checked is the device it operates.
 - **No free-form commands.** `alexa_command`, the server's "say this to Alexa" tool, is never called: a spoken command can buy things
