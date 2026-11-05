@@ -53,7 +53,18 @@ function fixture() {
     smsEnabled: true, recipientPhone: OWNER, timezone: "America/New_York", dailyDigestEnabled: false, dailyDigestTime: "09:00",
     quietHoursStart: null, quietHoursEnd: null,
   });
-  return { db, search, api: request(createApp({ db, search }).app) };
+  const { app } = createApp({ db, search });
+  return { db, search, app, api: request(app) };
+}
+
+/** One listening server for a test that sends hundreds of requests, instead of a new one for each. */
+async function withServer(app: Parameters<typeof request>[0], run: (api: Api) => Promise<void>): Promise<void> {
+  const server = (app as { listen: (port: number) => import("node:http").Server }).listen(0);
+  try {
+    await run(request(server));
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 }
 
 function configure(): void {
@@ -268,7 +279,7 @@ describe("Alexa account linking", () => {
     assert.equal((await tokenRequest(api, { grant_type: "refresh_token", refresh_token: refreshed.refresh_token, resource: `${BASE}/other` }).expect(400)).body.error, "invalid_target");
   });
 
-  it("throttles the token endpoint per caller", async () => {
+  it("throttles refused token requests, and never a good one", async () => {
     configure();
     const { api } = fixture();
     let last = 0;
@@ -276,6 +287,16 @@ describe("Alexa account linking", () => {
       last = (await tokenRequest(api, { grant_type: "refresh_token", refresh_token: "nope" })).status;
     }
     assert.equal(last, 429);
+  });
+
+  it("is not shut out of the token endpoint by a flood of bad requests from the same address", async () => {
+    configure();
+    const { api, app } = fixture();
+    const { tokens } = await link(api);
+    await withServer(app, async live => {
+      for (let attempt = 0; attempt < 70; attempt += 1) await tokenRequest(live, { grant_type: "refresh_token", refresh_token: "nope" }, "wrong-secret");
+      await tokenRequest(live, { grant_type: "refresh_token", refresh_token: tokens.refresh_token, resource: RESOURCE }).expect(200);
+    });
   });
 
   it("shows the link in Settings and revokes it on request", async () => {
@@ -336,6 +357,17 @@ describe("the /mcp gate", () => {
     let last = 0;
     for (let attempt = 0; attempt < 32; attempt += 1) last = (await rpc(api, "Bearer guess")).status;
     assert.equal(last, 429);
+  });
+
+  it("keeps serving a valid token while bad ones from the same address are being refused", async () => {
+    configure();
+    const { api, app } = fixture();
+    const { tokens } = await link(api);
+    await withServer(app, async live => {
+      // More than the 600-request cap, all refused: none of them may use up what a good token is allowed.
+      for (let attempt = 0; attempt < 650; attempt += 1) await rpc(live, "Bearer guess");
+      await rpc(live, `Bearer ${tokens.access_token}`).expect(200);
+    });
   });
 
   it("opens only discovery, the token endpoint and /mcp, and a token opens nothing else", async () => {

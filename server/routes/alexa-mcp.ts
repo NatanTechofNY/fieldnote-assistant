@@ -38,13 +38,15 @@ export function registerAlexaMcpRoutes({ app, db, search }: RouteContext): void 
   const unauthorized = (res: Response) => res.status(401).json({ error: "unauthorized", error_description: "A valid access token is required" });
 
   app.post("/mcp", async (req, res) => {
-    if (requests.exceeded(req, "mcp")) return res.status(429).json({ error: "temporarily_unavailable" });
     const granted = verifyAccessToken(db, bearerToken(req));
     if (!granted || !granted.scope.split(" ").includes(HOUSEHOLD_OAUTH_SCOPE)) {
       // Every refusal counts, but only a caller already over the limit is told so.
       if (failures.exceeded(req, "mcp-failure")) return res.status(429).json({ error: "temporarily_unavailable" });
       return unauthorized(res);
     }
+    // Only a request with a live token counts toward the cap. Behind a proxy every caller shares one peer, so counting
+    // the refused ones too would let anyone on the internet spend the cap and shut a linked Echo out.
+    if (requests.exceeded(req, "mcp")) return res.status(429).json({ error: "temporarily_unavailable" });
     // Stateless: a request is answered on its own, so nothing is kept between calls and nothing needs an expiry.
     const server = buildHouseholdServer(db, search);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

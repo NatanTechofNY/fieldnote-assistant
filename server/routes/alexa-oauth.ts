@@ -17,9 +17,14 @@ import type { RouteContext } from "./context.ts";
  * no session is sent to the login page and back.
  */
 
-const TOKEN_REQUESTS_PER_WINDOW = 60;
+/*
+ * Only refused token requests are counted. The caller is the socket peer, which behind a proxy is the proxy for
+ * everyone, so a cap on all requests would let an anonymous caller spend it and stop Alexa from refreshing. A request
+ * that succeeds is never throttled; a caller already over the limit just stops being told why the others failed.
+ */
+const TOKEN_FAILURES_PER_WINDOW = 60;
 const WINDOW_MS = 10 * 60_000;
-const tokenThrottle = slidingWindow(TOKEN_REQUESTS_PER_WINDOW, WINDOW_MS);
+const tokenThrottle = slidingWindow(TOKEN_FAILURES_PER_WINDOW, WINDOW_MS);
 
 /** For tests: forget every caller's recent token requests. */
 export function resetOAuthThrottle(): void {
@@ -168,14 +173,14 @@ export function registerAlexaOAuthRoutes({ app, db }: RouteContext): void {
 
   app.post("/oauth/token", (req, res) => {
     noStore(res);
-    if (tokenThrottle.exceeded(req, "token")) {
-      return res.status(429).json({ error: "temporarily_unavailable", error_description: "Too many requests" });
-    }
+    const refuse = (error: OAuthError): Response => tokenThrottle.exceeded(req, "token-failure")
+      ? res.status(429).json({ error: "temporarily_unavailable", error_description: "Too many requests" })
+      : oauthFailure(res, error);
     const client = oauthClient();
-    if (!client) return oauthFailure(res, new OAuthError("unauthorized_client", "Alexa linking is not configured on this server", 401));
+    if (!client) return refuse(new OAuthError("unauthorized_client", "Alexa linking is not configured on this server", 401));
     const presented = presentedClient(req);
     if (presented.clientId !== client.clientId || !clientSecretOk(client, presented.secret)) {
-      return oauthFailure(res, new OAuthError("invalid_client", "Client authentication failed", 401));
+      return refuse(new OAuthError("invalid_client", "Client authentication failed", 401));
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
     try {
@@ -190,7 +195,7 @@ export function registerAlexaOAuthRoutes({ app, db }: RouteContext): void {
       }
       throw new OAuthError("unsupported_grant_type", "Only authorization_code and refresh_token are supported");
     } catch (error) {
-      if (error instanceof OAuthError) return oauthFailure(res, error);
+      if (error instanceof OAuthError) return refuse(error);
       throw error;
     }
   });

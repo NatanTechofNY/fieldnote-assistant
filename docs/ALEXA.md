@@ -89,8 +89,11 @@ token with a plain 401 and no `WWW-Authenticate` header, since Alexa+ does not s
 The sign-in gate in [`server/routes/auth.ts`](../server/routes/auth.ts) exempts exactly these paths, through `isAlexaPublicPath()`:
 `/mcp`, `/oauth/token`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource` and
 `/.well-known/oauth-protected-resource/mcp`. **`/oauth/authorize` is deliberately not exempt**: approving a link takes your own
-session. Each public path is its own gate: `/mcp` needs a live Household token (failures are counted per caller, 30 per ten minutes,
-and requests capped at 600), and `/oauth/token` needs the client's credentials and is limited to 60 requests per ten minutes. A
+session. Each public path is its own gate: `/mcp` needs a live Household token, and `/oauth/token` needs the client's credentials. Refused
+requests are counted per caller (30 per ten minutes on `/mcp`, 60 on `/oauth/token`) and a caller over the limit is answered 429
+instead of being told why. Only refused requests count against those limits, and requests with a live token are capped separately
+(600 per ten minutes on `/mcp`): behind a proxy such as Railway every caller shares the proxy's address, so counting everything
+would let anyone on the internet use up the allowance and shut a linked Echo out. A
 Household token opens nothing else; Bearer is not accepted by the rest of the API.
 
 ### Revoking
@@ -143,8 +146,10 @@ Operating a home is not like reading a todo list, so the executor is stricter:
 `alexa-mcp` is an optional dependency (`"alexa-mcp": "0.4.4"`, pinned exactly), so `npm install` works without it, and the tools say
 they are not configured until it is present. If you installed with `--omit=optional`, run `npm install alexa-mcp@0.4.4`.
 
-1. Sign in to Amazon once: `npx alexa-mcp auth`. It leaves a login in `~/.alexa-mcp/config.json`; alternatively put the refresh
-   token in `ALEXA_REFRESH_TOKEN` (and your site in `ALEXA_DOMAIN` if it is not `amazon.com`).
+1. Sign in to Amazon once, on your own machine: `npx alexa-mcp auth --domain amazon.com` (the tool's own default is
+   `amazon.co.uk`, so name your site: `amazon.com`, `amazon.ca`, and so on). It writes `~/.alexa-mcp/config.json`. Locally that file
+   is enough. On a host with a throwaway disk, such as Railway, copy its `refreshToken` into `ALEXA_REFRESH_TOKEN` and set
+   `ALEXA_DOMAIN` to the same site, because the file will not survive a deploy.
 2. Restart the server. **Settings → Connections → Alexa** shows `Connected · N devices` when Amazon accepts it.
 3. Run **Sync Agent config** under Settings → Under the hood. The five tools and the prompt's Home section reach Agent Studio only
    through that sync; until you run it the deployed agent does not know the tools exist.
