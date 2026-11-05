@@ -29,7 +29,7 @@ GIPHY_API_KEY=...              # optional: GIFs the agent can send
 
 `SETTINGS_ENCRYPTION_KEY` encrypts the Twilio, Sendblue, Granola, and Atlassian credentials with AES-256-GCM before they go into SQLite. Back it up separately from the database — losing it makes every saved credential unreadable, and rotating it means reconnecting each integration.
 
-`APP_ADMIN_PASSWORD` protects every app and API route except `/api/health` and `/api/webhooks/*`. Normal browser use signs in at `/login` and gets an `HttpOnly` session cookie; HTTP Basic Auth with username `admin` also works and is there for scripts and curl. Put a real access-control layer in front of the service for anything beyond a personal demo.
+`APP_ADMIN_PASSWORD` protects every app and API route except `/api/health`, `/api/webhooks/*`, the hosted pages under `/p/*`, and, when Alexa is set up, the MCP and OAuth paths listed in [`ALEXA.md`](ALEXA.md#whats-public). Normal browser use signs in at `/login` and gets an `HttpOnly` session cookie; HTTP Basic Auth with username `admin` also works and is there for scripts and curl. Put a real access-control layer in front of the service for anything beyond a personal demo.
 
 ## Choosing a provider
 

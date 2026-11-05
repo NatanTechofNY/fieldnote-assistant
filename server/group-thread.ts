@@ -19,6 +19,23 @@ export function groupAddress(groupId: string): string {
   return `${GROUP_ADDRESS_PREFIX}${groupId}`;
 }
 
+/**
+ * The address of the thread behind the owner's Echo. It is a stand-in for the
+ * room, not a conversation anyone can be texted on: it exists so the Household
+ * life area has a thread to be scoped by, the way a group chat's area does.
+ * Because it carries no `group:` prefix, `groupIdOfAddress()` is undefined for
+ * it, which is what keeps every sender (reminders, check-ins, week reviews,
+ * resends) from trying to text it. A reminder on a Household todo goes to the
+ * owner's own number instead.
+ */
+export const VOICE_ADDRESS_PREFIX = "alexa:";
+export const HOUSEHOLD_ADDRESS = `${VOICE_ADDRESS_PREFIX}household`;
+
+/** Whether a thread address is a voice surface rather than something that can be texted. */
+export function isVoiceAddress(address: string): boolean {
+  return address.startsWith(VOICE_ADDRESS_PREFIX);
+}
+
 /** The Sendblue group id behind a thread address, or undefined for a 1:1 thread. */
 export function groupIdOfAddress(address: string): string | undefined {
   return address.startsWith(GROUP_ADDRESS_PREFIX) ? address.slice(GROUP_ADDRESS_PREFIX.length) || undefined : undefined;

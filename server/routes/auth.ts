@@ -1,5 +1,6 @@
 import type { Request } from "express";
 import { SESSION_COOKIE, authEnabled, clearFailures, clearedSessionCookie, createSession, destroySession, lockoutMsRemaining, loginPage, pruneExpiredSessions, readCookie, recordFailure, safeNextPath, sessionCookie, throttleKey, validateSession, verifyBasicAuth, verifyPassword } from "../auth.ts";
+import { isAlexaPublicPath } from "../alexa-oauth.ts";
 import type { RouteContext } from "./context.ts";
 
 export function registerAuthRoutes({ app, db }: RouteContext): void {
@@ -47,6 +48,15 @@ export function registerAuthRoutes({ app, db }: RouteContext): void {
   app.use((req, res, next) => {
     if (!authEnabled()) {
       res.locals.authenticated = true;
+      return next();
+    }
+
+    // Alexa+ reaches `/mcp` with a Bearer token and the OAuth endpoints with its client credentials, neither
+    // of which is this gate's to judge: a Bearer header would otherwise be read as failed Basic Auth below.
+    // This must stay ahead of the Authorization branch. `/mcp` checks its own token (`routes/alexa-mcp.ts`),
+    // and `/oauth/authorize`, where the owner approves a link, is deliberately not on this list.
+    if (isAlexaPublicPath(req.path)) {
+      res.locals.authenticated = false;
       return next();
     }
 

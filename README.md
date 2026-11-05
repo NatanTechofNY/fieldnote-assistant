@@ -24,6 +24,7 @@ Because Algolia holds only derived projections, reindexing is always safe to rep
 - An agent that calls typed action tools, executed server-side
 - Two-way messaging through Twilio SMS or Sendblue iMessage, switchable from Settings, with quiet hours, daily digests, an optional evening check-in that turns your answer into the day's journal entry, and retry with backoff
 - Hosted pages: the assistant publishes a link to today's or this week's todos, a poll or find-a-time that friends answer by typing their name, a shared shopping list, a trip or a project view, and so on, built from typed blocks so it never writes HTML. Your own pages need your sign-in and can show the tickets and receipts you texted in, such as a ticket under its stop of an itinerary; group and contact pages are public to the link and show only that group's pictures. Manage and revoke them from the **Pages** screen
+- Alexa, both ways: an Echo can read and add to a **Household** list (Alexa+ calls Fieldnote over MCP, scoped like a group chat, nothing else reachable), and the assistant can switch your lights, run routines and speak on an Echo, never touching locks, doors, cameras or alarms. The second half uses an unofficial server and Amazon's private API; see [`docs/ALEXA.md`](docs/ALEXA.md)
 - Granola meeting-note polling with a manual review queue
 - Read-only Jira and Confluence lookups, plus digest briefs: an instruction of your own that the agent runs on its own schedule and texts you, previewable from Settings before it ever sends
 - Runs without Algolia credentials in local mode: all CRUD works and conversation search falls back to SQLite, though the agent and NeuralSearch need credentials
@@ -85,6 +86,8 @@ Over iMessage the assistant can also send pictures: a demo-only shopping pair, `
 
 With a Bright Data token (`BRIGHTDATA_API_TOKEN`), the assistant can also search the web and read the pages a search returned, for public facts such as opening hours or news, on every channel including group chats. It runs server-side with a daily lookup cap, and the assistant can only read pages its own search returned or links someone in the conversation sent; see [Web](docs/TOOL_ENDPOINT_MAPPING.md#web).
 
+With Alexa set up (**Settings → Connections → Alexa**), Alexa+ can read and add to a `Household` life area from an Echo, and the assistant can operate your Echo devices and smart home on your own line. See [`docs/ALEXA.md`](docs/ALEXA.md) for both, including what Amazon's private API means for the second.
+
 See [`docs/SMS_AND_EVENTS.md`](docs/SMS_AND_EVENTS.md) for tunnels, provider consent requirements, and recovery.
 
 ## Deployment
@@ -132,6 +135,7 @@ The server address is chosen at run time, not build time, so one build works for
 - [Agent Studio setup](docs/AGENT_STUDIO_SETUP.md)
 - [Tool endpoint mapping](docs/TOOL_ENDPOINT_MAPPING.md)
 - [SMS, reminders, and event integrations](docs/SMS_AND_EVENTS.md)
+- [Alexa: Echo access to a Household list, and controlling your devices](docs/ALEXA.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Troubleshooting and security](docs/TROUBLESHOOTING_SECURITY.md)
 

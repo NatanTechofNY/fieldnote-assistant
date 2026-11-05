@@ -512,6 +512,13 @@ vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     },
   }));
   if (url.includes("/api/integrations/events")) return new Response(JSON.stringify({ success: true, data: [] }));
+  if (url.endsWith("/api/integrations/alexa")) return new Response(JSON.stringify({
+    success: true,
+    data: {
+      linking: { configured: false, resource: "https://fieldnote.example.com/mcp", linkedSince: null, area: "Household" },
+      control: { configured: false },
+    },
+  }));
   if (url.includes("/api/integrations/atlassian/connect")) {
     const body = JSON.parse(String(init?.body ?? "{}")) as { siteUrl: string; email: string };
     atlassian = {

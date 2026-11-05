@@ -48,7 +48,7 @@ SQLite is the source of truth and Algolia holds derived projections, so a change
 
 The reminder worker assumes exactly one writer. Anything that introduces a second concurrent writer to the database is a correctness bug, not just a performance concern.
 
-Authentication is registered first, in `server/routes/auth.ts`, so every route added afterwards is gated by default. Only `/api/health` and `/api/webhooks/*` are exempt. If you add a route that should be public, add it to that allowlist deliberately and think about what it exposes to an unauthenticated caller.
+Authentication is registered first, in `server/routes/auth.ts`, so every route added afterwards is gated by default. Only `/api/health`, `/api/webhooks/*`, the hosted pages under `/p/*`, and the Alexa paths in `isAlexaPublicPath()` (`/mcp`, `/oauth/token`, and the `/.well-known/oauth-*` documents) are exempt. If you add a route that should be public, add it to that allowlist deliberately and think about what it exposes to an unauthenticated caller.
 
 Agent tools do not go through the REST API. They run in `server/tool-executor.ts`, which the browser reaches via `POST /api/agent/tools/:name` and the SMS worker calls in-process. A behavior change usually has to be made in both the tool executor and the equivalent REST route, and `npm test` checks that the published tool schemas still match `server/schemas.ts`.
 

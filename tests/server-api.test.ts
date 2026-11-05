@@ -1541,7 +1541,7 @@ describe("Agent Studio configuration sync", () => {
       agentId: "agent",
       fetcher,
     });
-    assert.equal(result.clientTools, 53);
+    assert.equal(result.clientTools, 58);
     assert.equal(result.preservedTools, 1, "unrelated tools survive, the search tool is rebuilt not preserved");
     assert.equal(result.searchIndices, 3);
     assert.deepEqual(calls.map(call => call.method), ["GET", "PATCH", "POST"]);
@@ -1600,7 +1600,7 @@ describe("Agent Studio configuration sync", () => {
       assert.deepEqual(controls.facets.default, expected, `${index.index} exposes only safe facets`);
       assert.deepEqual(parameters.facets, expected, `${index.index} requests the same set it allows`);
     }
-    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 53);
+    assert.equal(patch.tools.filter(tool => tool.type === "client_side").length, 58);
     assert.ok(!patch.tools.some(tool => tool.name === "list_memories"));
     assert.ok(patch.tools.some(tool => tool.name === "list_jira_issues" && "inputSchema" in tool));
     assert.ok(patch.tools.some(tool => tool.name === "create_memory" && "inputSchema" in tool));
@@ -2769,7 +2769,7 @@ describe("agent tools over /api/agent/tools/:name", () => {
       (await api.post(`/api/agent/tools/${name}`).send(input).expect(expected)).body;
 
     const declared = Object.keys(toolInput);
-    assert.equal(declared.length, 53, "the tool contract changed; extend this test with it");
+    assert.equal(declared.length, 58, "the tool contract changed; extend this test with it");
     // The Atlassian tools read a remote system rather than SQLite, so they are
     // exercised against a stubbed site in their own block instead of here, as
     // are the shopping tools, which read the store catalog, and the web tools.
@@ -2968,6 +2968,8 @@ describe("agent tools over /api/agent/tools/:name", () => {
       "update_soul", "update_group_settings",
       // Exercised in the hosted pages block.
       "create_page", "update_page", "list_pages", "revoke_page", "get_poll_results", "send_to_contact",
+      // Exercised against a fake alexa-mcp client in tests/alexa.test.ts.
+      "list_home_devices", "home_device_status", "control_home_device", "run_alexa_routine", "speak_on_echo",
     ]);
     assert.deepEqual(declared.filter(name => !exercised.has(name)), [], "every declared tool must be covered");
   });

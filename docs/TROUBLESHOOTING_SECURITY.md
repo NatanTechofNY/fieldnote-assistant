@@ -112,9 +112,17 @@ Confirm built-in Agent Studio automatic memory is disabled. Then verify that the
 - Replace the fixed identity with authenticated record-level restrictions before multi-user deployment.
 - Do not trust Agent Studio instructions as an access-control mechanism.
 
+### Alexa
+
+- `/mcp`, `/oauth/token`, `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource[/mcp]` are exempt from the sign-in gate, through `isAlexaPublicPath()` at the top of `server/routes/auth.ts`, and are 404 until `ALEXA_OAUTH_CLIENT_ID` is set. `/oauth/authorize` is **not** exempt: a link needs the owner's session, and it refuses outright (503) with no `APP_ADMIN_PASSWORD`.
+- `/mcp` answers only a live Household bearer token, with a plain 401 and no `WWW-Authenticate` header otherwise, and counts failures per caller (30 per ten minutes). The Basic credential and a session cookie do not open it, and a Household token opens nothing else.
+- An Echo is scoped to the `Household` life area like a group chat, and refused everything outside the eight `VOICE_TOOLS`, including every owner-only tool. Revoke from Settings → Connections → Alexa.
+- The five home tools are owner-only, refused after outside text, never operate locks, doors, garages, cameras or alarms, and are capped per day. They use Amazon's private API through the optional `alexa-mcp` dependency, whose refresh token can act on your home: treat `ALEXA_REFRESH_TOKEN` like a password.
+- Full detail in [`ALEXA.md`](ALEXA.md).
+
 ### Hosted pages
 
-- `/p/*` is exempt from the sign-in gate on purpose, and nothing else is except `/api/health` and `/api/webhooks/*`. The REST routes that manage pages (`/api/pages`) stay behind the gate.
+- `/p/*` is exempt from the sign-in gate on purpose, and nothing else is except `/api/health`, `/api/webhooks/*`, and the Alexa paths below. The REST routes that manage pages (`/api/pages`) stay behind the gate.
 - Slugs are 128 random bits; a slug that does not match the format is rejected before the database is touched, and a missing, revoked, or expired page answers the same 404.
 - An `owner` page redirects an anonymous visitor to sign in; a `shared` page can show private records only when it is filed under a group's life area, and then only that area's.
 - Pages are rendered from typed blocks with every value escaped, links are `https` only, and the response sends `Content-Security-Policy: default-src 'none'` (inline styles and `'self'`/`https:`/`data:` images only; `'self'` is for a page's own saved pictures), `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `nosniff`, and `no-store`. There is no script on a page.

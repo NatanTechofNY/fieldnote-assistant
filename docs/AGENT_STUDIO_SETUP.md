@@ -189,6 +189,8 @@ Three more client-side tools let the owner act in their group chats from their o
 
 Six more cover hosted web pages: `create_page`, `update_page`, `list_pages`, `revoke_page`, `get_poll_results`, and `send_to_contact`, with a Pages section in the prompt. They need `PUBLIC_BASE_URL` (or a saved webhook URL) so links can be built, and nothing else. Run **Sync Agent config** after pulling them. See [Hosted pages](TOOL_ENDPOINT_MAPPING.md#hosted-pages).
 
+Five more cover the owner's Alexa devices: `list_home_devices`, `home_device_status`, `control_home_device`, `run_alexa_routine`, and `speak_on_echo`, with a Home section in the prompt. They need the optional `alexa-mcp` dependency and a sign-in to Amazon (see [`ALEXA.md`](ALEXA.md#fieldnote--alexa)); without them each answers `Alexa control is not configured`. They are owner-only and Alexa+ calling Fieldnote is a different integration that never goes through Agent Studio. **Sync Agent config** is the step that publishes them, and it has to be run by hand.
+
 Task notes add one more client-side tool, `add_todo_comment`, and the todos index gained searchable `comments` and a retrievable `last_comment_at`. Run **Configure Algolia** (or `npm run setup:algolia`), then **Reindex** so existing todos pick up the new fields, then **Sync Agent config** so the agent gets the tool and the prompt's rules for it. The same **Sync Agent config** publishes the revised end-of-day reflection rules in the system prompt; until you run it after a deploy, the previous prompt keeps answering.
 
 Implement every mapping in `docs/TOOL_ENDPOINT_MAPPING.md`. The application handler registry must use the exact names and argument shapes. A safe handler must:

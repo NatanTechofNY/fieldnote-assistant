@@ -33,8 +33,10 @@ database is a correctness bug, not a performance tradeoff. This is also why the 
 single replica.
 
 **Routes are auth-gated by registration order.** `server/routes/auth.ts` is registered first, so
-anything mounted after it is protected by default. Only `/api/health`, `/api/webhooks/*`, and the
-hosted pages under `/p/*` are exempt, in the check at the top of that file. Adding a public route means editing that exemption
+anything mounted after it is protected by default. Only `/api/health`, `/api/webhooks/*`, the
+hosted pages under `/p/*`, and the Alexa paths in `isAlexaPublicPath()` (`/mcp`, `/oauth/token`, the
+`/.well-known/oauth-*` documents) are exempt, in the check at the top of that file. `/oauth/authorize` is not: approving
+an Alexa link takes the owner's session. Adding a public route means editing that exemption
 deliberately — think about what it hands an unauthenticated caller.
 
 **Agent tools bypass the REST API.** They execute in `server/tool-executor.ts`, reached from the
@@ -50,6 +52,14 @@ A new tool, a new list, or a new index the hosted search tool can reach has to h
 question asked in a group answers from the owner's private records. The cross-chat tools
 (`list_group_chats`, `send_to_group`, `react_in_group`) are in `OWNER_ONLY_TOOLS` for the same reason:
 a group must never reach the owner's other groups.
+
+**An Echo is a scoped, voice-only group.** Alexa+ reaches `/mcp` with a Household token; its turns carry `scope`
+(the `Household` life area, thread address `alexa:household`, no `group:` prefix on purpose) and `surface: "voice"`, and
+`executeAgentTool` refuses any tool outside `VOICE_TOOLS`. A tool is unreachable from an Echo until it is added to that set
+deliberately, and the Echo's MCP tools in `server/alexa-mcp-server.ts` are a separate list from the published ones. The five
+home tools (`list_home_devices`, `home_device_status`, `control_home_device`, `run_alexa_routine`, `speak_on_echo`) are in
+`OWNER_ONLY_TOOLS` and `DEVICE_TOOLS`: refused in a group, from an Echo, after any outside text, and on app turns, and they never
+operate locks, doors, garages, cameras or alarms. See [`docs/ALEXA.md`](docs/ALEXA.md).
 
 **Hosted pages are public by link.** `/p/*` serves pages without a session, so what a page may show
 is decided in `server/pages.ts` and `server/page-service.ts`, not by the gate: a `shared` page cannot

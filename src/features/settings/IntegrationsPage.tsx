@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { Archive, Bot, Check, Circle, Clock3, Database, EyeOff, FileText, History, ListChecks, LoaderCircle, MessageSquare, MessagesSquare, Moon, Newspaper, Pause, PenLine, Phone, Plug, Plus, RefreshCw, Send, SlidersHorizontal, Sparkles, SquareKanban, SunMoon, TriangleAlert, Users, Wrench, X, Zap } from "lucide-react";
+import { Archive, Bot, Check, Circle, Clock3, Database, EyeOff, FileText, History, ListChecks, LoaderCircle, MessageSquare, MessagesSquare, Moon, Newspaper, Pause, PenLine, Phone, Plug, Plus, RefreshCw, Send, SlidersHorizontal, Sparkles, Speaker, SquareKanban, SunMoon, TriangleAlert, Users, Wrench, X, Zap } from "lucide-react";
 import { api } from "../../api";
 import type {
   ExternalEvent, IntegrationState, SmsProvider, TrustedContact,
@@ -11,6 +11,7 @@ import { PageHead } from "../../components/layout/PageHead";
 import { ErrorState, Field, Loading, ThemeToggle, Toast } from "../../components/ui";
 import { useDemoMode, useRedact } from "../../lib/demo-mode";
 import { type ThemePreference, useTheme } from "../../lib/theme";
+import { AlexaSettings } from "./AlexaSettings";
 import { AtlassianSettings, DigestBriefsSettings } from "./AtlassianSettings";
 import { AskEditor } from "./AskEditor";
 import { LifeAreasSettings } from "./LifeAreasSettings";
@@ -856,6 +857,15 @@ function IntegrationsContent({ initialData }: { initialData: IntegrationState })
             notify={notify}
             refresh={refresh}
           />
+        </SettingsSection>
+        <SettingsSection
+          sectionId="alexa"
+          title="Alexa"
+          description="Let an Echo reach your Household list, and let the assistant run your lights, routines and speakers."
+          status="Household · devices"
+          icon={Speaker}
+        >
+          <AlexaSettings notify={notify}/>
         </SettingsSection>
         </div>}
         {visited.has("advanced") && <div className="settings-stack" hidden={activeTab !== "advanced"}>

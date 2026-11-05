@@ -247,6 +247,7 @@ const PROGRESS_REACTIONS: Record<string, string> = {
   list_confluence_spaces: "📄", list_confluence_pages: "📄", get_confluence_page: "📄", list_confluence_comments: "📄",
   search_store_products: "🛒",
   web_search: "🌐", read_web_page: "🌐",
+  list_home_devices: "💡", home_device_status: "💡", control_home_device: "💡", run_alexa_routine: "💡", speak_on_echo: "💡",
   view_image: "🖼️", save_pictures: "🖼️",
 };
 const GENERAL_PROGRESS_REACTION = "🔍";

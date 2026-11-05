@@ -1992,5 +1992,124 @@
         "additionalProperties": false
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_home_devices",
+      "description": "Lists the owner's Alexa smart-home devices, their groups (rooms) and their Echo devices, with the names every other home tool takes. Owner's own chat only; never in a group.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "home_device_status",
+      "description": "Reads one smart-home device's current state (on or off, brightness, reachable) by its name from list_home_devices.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "The device's name as list_home_devices shows it"
+          }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "control_home_device",
+      "description": "Switches a smart-home device, or every light in a group, on or off, or sets one device's brightness. Locks, doors, garages, cameras and alarms are refused. Only when the owner asks for it themselves.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "A device name, or a group (room) name, from list_home_devices"
+          },
+          "target_kind": {
+            "type": "string",
+            "enum": ["device", "group"],
+            "description": "device for one device; group for every light in that room"
+          },
+          "action": {
+            "type": ["string", "null"],
+            "enum": ["on", "off", null],
+            "description": "on or off; null when setting a brightness"
+          },
+          "brightness": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Percent, for one device; null when switching on or off"
+          }
+        },
+        "required": ["target", "target_kind", "action", "brightness"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "run_alexa_routine",
+      "description": "Starts one of the owner's Alexa routines by name. Only when the owner asks for it.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "The routine's name as the owner says it"
+          }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "speak_on_echo",
+      "description": "Has an Echo speak a short message aloud, such as an announcement the owner asked for. Never a command meant for Alexa itself.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "description": "What the Echo should say, in plain words"
+          },
+          "device": {
+            "type": ["string", "null"],
+            "maxLength": 100,
+            "description": "The Echo's name from list_home_devices; null for the default one"
+          }
+        },
+        "required": ["text", "device"],
+        "additionalProperties": false
+      }
+    }
   }
 ]

@@ -2,9 +2,9 @@
 
 ## How a tool call actually executes
 
-The agent has **54 tools**: 53 declared `client_side` in [`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json), plus one hosted search tool declared in [`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json).
+The agent has **59 tools**: 58 declared `client_side` in [`agent-studio/tools/client-tools.json`](../agent-studio/tools/client-tools.json), plus one hosted search tool declared in [`agent-studio/tools/algolia-search.json`](../agent-studio/tools/algolia-search.json).
 
-Despite the `client_side` type, none of them run in a browser. All 46 resolve to a single function, `executeAgentTool()` in [`server/tool-executor.ts`](../server/tool-executor.ts), which talks to SQLite (or, for Atlassian, Sendblue, Bright Data, and GIPHY, straight out to that provider's API). Only the transport differs:
+Despite the `client_side` type, none of them run in a browser. All 58 resolve to a single function, `executeAgentTool()` in [`server/tool-executor.ts`](../server/tool-executor.ts), which talks to SQLite (or, for Atlassian, Sendblue, Bright Data, GIPHY, and the owner's Alexa devices, straight out to that provider's API). Only the transport differs:
 
 | Channel | Path to the executor |
 |---|---|
@@ -72,6 +72,11 @@ The fixed local identity is `USER_ID` (`process.env.DEMO_USER_ID || "devcon-demo
 | `get_poll_results` | read | `GET /api/pages/:id/results` |
 | `revoke_page` | **write** | `DELETE /api/pages/:id` |
 | `send_to_contact` | **write** (SMS) | — |
+| `list_home_devices` | read (Alexa) | `GET /api/integrations/alexa` (status only) |
+| `home_device_status` | read (Alexa) | — |
+| `control_home_device` | **write** (a device) | — |
+| `run_alexa_routine` | **write** (a routine) | — |
+| `speak_on_echo` | **write** (an Echo speaks) | — |
 | `personal_data_search` | read | hosted by Algolia |
 
 `delete_todo`, `delete_memory`, and `delete_reminder` all require `confirmed === true` and throw otherwise.
@@ -296,6 +301,16 @@ Two tools send pictures into a text conversation ([`server/image-output.ts`](../
 - `send_image({ url, caption })` texts one picture now through the turn's `sendSms` (into the group when the turn came from one). It files it on the thread as an `assistant` row with `metadata_json.kind = "image"` and `mediaUrl`, and sets `sentText`, so a picture can be the whole answer. The URL must be one a tool in this conversation turned up: a `find_gif` result, or a `![…](…)` image on a page `read_web_page` read, remembered per thread for 30 minutes like search links. A URL the model composed is refused (400), for the same reason a page read is. Before sending, the URL is checked for https, an image extension, a `HEAD` (falling back to `GET`) that answers 200 with an `image/*` type, and a declared size under 10 MB. Those checks leave from this server rather than from Bright Data, so `publicFetch()` in [`server/public-fetch.ts`](../server/public-fetch.ts) resolves the host before every hop, following at most three redirects by hand, and refuses any that resolves to a loopback, private, link-local, or otherwise non-public address. After a group turn has called `stay_quiet`, `send_image`, `send_message`, and `send_product_cards` refuse. On the web channel it sends nothing and returns `{ channel: "web", sent: false, url }`.
 
 Both are in `GESTURE_TOOLS`, so a meme reply raises no progress tapback, and `send_image` is in `WRITE_TOOLS`, so a retried turn does not send it twice. Pictures people send *in* are described rather than passed to the agent; see [`SMS_AND_EVENTS.md`](SMS_AND_EVENTS.md#group-chats).
+
+## Home
+
+Five tools reach the owner's Echo devices and smart home through the community `alexa-mcp` server ([`server/alexa-control.ts`](../server/alexa-control.ts)): `list_home_devices`, `home_device_status`, `control_home_device({ target, target_kind: "device" | "group", action, brightness })`, `run_alexa_routine({ name })`, and `speak_on_echo({ text, device })`. Fieldnote is the MCP client of a child process it starts itself over stdio, not an Agent Studio MCP tool, so the executor's checks cover every call. It uses Amazon's private API, so any of it can stop working; see [`ALEXA.md`](ALEXA.md#fieldnote--alexa).
+
+All five are in `OWNER_ONLY_TOOLS` (refused in a group and from an Echo) and in `DEVICE_TOOLS`, which `executeAgentTool` also refuses on a turn that has read outside text (`readWeb` or `readUntrusted`) and on an app-composed turn, with the same `This turn read text someone else wrote …` / `… the app writing …` 409s as the Soul. Names are resolved by Fieldnote before anything is operated, locks, doors, garages, cameras and alarms are never operated (by name, `ALEXA_BLOCKED_DEVICES`, or by Alexa's device type), `speak_on_echo` refuses wake words, and `alexa_command` is never called. A daily cap (`ALEXA_DAILY_LIMIT`, default 100, `0` = off) counts calls and gives back one a policy refusal or a failure before Alexa was reached, but not a timeout. REST statuses: `Alexa refused: …` 403, an unresolved or ambiguous name 400, `Alexa control is not configured` or `turned off` 503, the cap 429, and any other `Alexa …` failure 502.
+
+There is no REST twin of these tools; `GET /api/integrations/alexa` reports only status, and `DELETE /api/integrations/alexa/link` unlinks Alexa+.
+
+The Alexa+ → Fieldnote direction is a separate MCP server at `/mcp` ([`server/alexa-mcp-server.ts`](../server/alexa-mcp-server.ts)) with eight tools of its own, none of which are among the 58 above. They call `executeAgentTool()` for `get_agenda`, `list_todos`, `get_todo`, `create_todo`, `set_todo_status`, `add_todo_comment`, `create_reminder` and `list_reminders` with `surface: "voice"` and the Household scope; the executor refuses any other tool for such a turn (`VOICE_TOOLS`). A change to one of those eight tools in the executor changes the Echo's behaviour too, and its REST twin stays the UI's. See [`ALEXA.md`](ALEXA.md#alexa--fieldnote).
 
 ## Digest briefs
 

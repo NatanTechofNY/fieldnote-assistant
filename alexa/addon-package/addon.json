@@ -1,0 +1,60 @@
+{
+  "manifestVersion": "1.0",
+  "storeListing": {
+    "distributionCountries": ["US"],
+    "locales": {
+      "en-US": {
+        "default": "DEFAULT",
+        "name": {
+          "value": "Fieldnote"
+        },
+        "shortDescription": "Check and add to your household's tasks, reminders and agenda.",
+        "fullDescription": "Fieldnote keeps your household's task list. Ask what is on the agenda today, hear what is still open, add a task, mark one done, or set a reminder. Reminders are texted to the owner's phone. Fieldnote only reaches the Household area you approve when you link your account; it cannot delete anything and never shows your other records.",
+        "examplePhrases": [
+          "What is on the household agenda today?",
+          "Add buy light bulbs to the household list",
+          "Remind me about the plumber tomorrow at 4 pm",
+          "Mark the laundry task done"
+        ],
+        "privacyAndCompliance": {
+          "privacyPolicyUrl": "https://fieldnote.example.com/privacy",
+          "termsOfUseUrl": "https://fieldnote.example.com/terms"
+        },
+        "mediaAssets": {
+          "icons": {
+            "light": [
+              { "size": "72x72", "uri": "https://fieldnote.example.com/alexa/icon-72x72.png" },
+              { "size": "64x64", "uri": "https://fieldnote.example.com/alexa/icon-64x64.png" },
+              { "size": "88x88", "uri": "https://fieldnote.example.com/alexa/icon-88x88.png" },
+              { "size": "126x126", "uri": "https://fieldnote.example.com/alexa/icon-126x126.png" },
+              { "size": "180x180", "uri": "https://fieldnote.example.com/alexa/icon-180x180.png" },
+              { "size": "241x241", "uri": "https://fieldnote.example.com/alexa/icon-241x241.png" }
+            ],
+            "dark": []
+          },
+          "carouselImages": [
+            {
+              "uri": "https://fieldnote.example.com/alexa/carousel-1.png",
+              "altText": "The household agenda for today, with two tasks and a reminder",
+              "size": "600x900"
+            }
+          ],
+          "bannerImages": []
+        }
+      }
+    }
+  },
+  "integrations": [
+    {
+      "type": "MCP",
+      "config": {
+        "endpoints": {
+          "default": {
+            "type": "HTTPS",
+            "uri": "https://fieldnote.example.com/mcp"
+          }
+        }
+      }
+    }
+  ]
+}

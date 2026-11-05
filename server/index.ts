@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { closeAlexaControl } from "./alexa-control.ts";
 import { createApp } from "./app.ts";
 import {
   attachmentsBytes, attachmentsDir, dropUnadoptedAttachments, sweepOrphanedAttachmentFiles,
@@ -52,6 +53,8 @@ if (selectedFlag) {
   });
   const shutdown = (): void => {
     stopWorker();
+    // The alexa-mcp child is long-lived; leaving it would orphan it past this process.
+    void closeAlexaControl();
     server.close(() => {
       db.close();
       process.exit(0);

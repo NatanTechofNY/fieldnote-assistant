@@ -21,6 +21,8 @@ import { registerActivityRoutes } from "./routes/activity.ts";
 import { registerAdminRoutes } from "./routes/admin.ts";
 import { registerAgentRoutes } from "./routes/agent.ts";
 import { registerAttachmentRoutes } from "./routes/attachments.ts";
+import { registerAlexaMcpRoutes } from "./routes/alexa-mcp.ts";
+import { registerAlexaOAuthRoutes } from "./routes/alexa-oauth.ts";
 import { registerAuthRoutes } from "./routes/auth.ts";
 import { registerConversationRoutes } from "./routes/conversations.ts";
 import { registerCheckinRoutes } from "./routes/checkins.ts";
@@ -59,6 +61,9 @@ export interface AppOptions {
  */
 const registerRoutes = [
   registerAuthRoutes,
+  // After the gate, which lets `/mcp`, the OAuth discovery documents and `/oauth/token` through: they check their own credentials.
+  registerAlexaOAuthRoutes,
+  registerAlexaMcpRoutes,
   registerHealthRoutes,
   registerIntegrationRoutes,
   registerWebhookRoutes,
