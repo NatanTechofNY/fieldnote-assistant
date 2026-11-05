@@ -29,7 +29,8 @@ import { isTransientFailure, TransientFailure } from "./transient.ts";
 import { sendQueuedUnthreadedResends } from "./unthreaded-resend.ts";
 import { composeMemorySweepTurn, SWEEP_SPACING_MS, sweepCandidates } from "./memory-sweep.ts";
 import { speakerNameInGroup } from "./group-members.ts";
-import { groupAddress, groupIdOfAddress, isReactionText } from "./group-thread.ts";
+import { isVoiceThread } from "./household.ts";
+import { groupAddress, groupIdOfAddress, isReactionText, isVoiceAddress } from "./group-thread.ts";
 import { runPageJobs } from "./page-worker.ts";
 import { ensureTodayPage } from "./page-service.ts";
 import { sweepPages, tryPublicPageUrl } from "./pages.ts";
@@ -976,6 +977,8 @@ async function refreshProfileOvernight(
 ): Promise<void> {
   if (await refreshOwnerProfile(db, search, date, runAgent)) return;
   for (const area of groupAreas(db)) {
+    // The Echo's Household has no room to describe: it is a scope, not a conversation.
+    if (isVoiceThread(db, area.thread_id)) continue;
     if (await refreshGroupProfile(db, search, date, area, runAgent)) return;
   }
 }
@@ -1145,13 +1148,16 @@ type CheckinAreaRow = {
 };
 
 function checkinAreas(db: Db): CheckinAreaRow[] {
-  return db.prepare(`
+  const areas = db.prepare(`
     SELECT la.id,la.name,la.thread_id,t.address,la.morning_checkin_time,la.evening_checkin_time,la.checkin_copy_to_owner,
       la.morning_checkin_prompt,la.evening_checkin_prompt
     FROM life_areas la JOIN channel_threads t ON t.id=la.thread_id
     WHERE la.user_id=? AND (la.morning_checkin_time IS NOT NULL OR la.evening_checkin_time IS NOT NULL)
     ORDER BY la.name
   `).all(USER_ID) as CheckinAreaRow[];
+  // The Household's thread is an Echo's stand-in, not a chat: a time set on its area has nobody to be sent to.
+  // `deliverGroupCheckin` would also stop at its missing group id; this keeps it from being claimed at all.
+  return areas.filter(area => !isVoiceAddress(area.address));
 }
 
 /**

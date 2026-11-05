@@ -1,13 +1,13 @@
 import { type Tools } from "react-instantsearch";
 import {
-  BookText, Check, Database, Globe, LoaderCircle, MessageSquareText, ShoppingBag, SquareKanban, TriangleAlert,
+  BookText, Check, Database, Globe, LoaderCircle, MessageSquareText, ShoppingBag, Speaker, SquareKanban, TriangleAlert,
 } from "lucide-react";
 
 type ToolLayoutProps = Parameters<NonNullable<Tools[string]["layoutComponent"]>>[0];
 
 /** The Atlassian, shopping, and web tools read outside SQLite, so the card names
  *  which system answered rather than assuming the local database. */
-type ToolSource = "SQLite" | "Jira" | "Confluence" | "Walgreens" | "Messages" | "Web";
+type ToolSource = "SQLite" | "Jira" | "Confluence" | "Walgreens" | "Messages" | "Web" | "Alexa";
 
 const sourceIcon: Record<ToolSource, typeof Database> = {
   SQLite: Database,
@@ -16,6 +16,7 @@ const sourceIcon: Record<ToolSource, typeof Database> = {
   Walgreens: ShoppingBag,
   Messages: MessageSquareText,
   Web: Globe,
+  Alexa: Speaker,
 };
 
 export const toolActivityMeta: Record<string, { active: string; done: string; source: ToolSource }> = {
@@ -77,6 +78,12 @@ export const toolActivityMeta: Record<string, { active: string; done: string; so
   remember_group_member: { active: "Noting who's who", done: "Group member remembered", source: "SQLite" },
   read_conversation: { active: "Reading a conversation", done: "Conversation read", source: "Messages" },
   stay_quiet: { active: "Staying quiet", done: "Stayed quiet", source: "Messages" },
+  // The owner's Echo devices and smart home. Owner-only on the server, so a group's turn gets a refusal it can answer in words.
+  list_home_devices: { active: "Checking your devices", done: "Devices found", source: "Alexa" },
+  home_device_status: { active: "Checking a device", done: "Device checked", source: "Alexa" },
+  control_home_device: { active: "Switching a device", done: "Device switched", source: "Alexa" },
+  run_alexa_routine: { active: "Running an Alexa routine", done: "Routine started", source: "Alexa" },
+  speak_on_echo: { active: "Speaking on an Echo", done: "Spoken on the Echo", source: "Alexa" },
 };
 
 function toolResultDetail(output: unknown): string | null {
@@ -94,7 +101,7 @@ function toolResultDetail(output: unknown): string | null {
         : record.title;
     }
     const counts = [
-      "todos", "reminders", "subtasks", "issues", "boards", "pages", "spaces", "comments", "users", "products", "cards", "results",
+      "todos", "reminders", "subtasks", "issues", "boards", "pages", "spaces", "comments", "users", "products", "cards", "results", "devices", "routines",
     ].reduce((total, key) => {
       const value = record[key];
       return total + (Array.isArray(value) ? value.length : 0);

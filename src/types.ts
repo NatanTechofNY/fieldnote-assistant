@@ -354,6 +354,12 @@ export interface Health {
 /** Which messaging API carries outbound texts and receives inbound ones. */
 export type SmsProvider = "twilio" | "sendblue";
 
+/** Both Alexa directions: Alexa+ linked to the Household area, and the owner's devices Fieldnote can operate. */
+export interface AlexaState {
+  linking: { configured: boolean; resource: string; linkedSince: string | null; area: string };
+  control: { configured: boolean; valid?: boolean; deviceCount?: number; error?: string };
+}
+
 /** Someone besides the recipient who may address the assistant in a shared group chat. */
 export type TrustedContact = { phone: string; name: string };
 

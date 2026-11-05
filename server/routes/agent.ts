@@ -54,7 +54,7 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       }
       // An unconfigured integration is the same shape of problem: retrying cannot
       // help, and the agent should say the tool is unavailable instead.
-      if (/ is not configured$|^Web access is turned off$/i.test(message)) return failure(res, 503, message);
+      if (/ is not configured$|^Web access is turned off$|^Alexa control is turned off$/i.test(message)) return failure(res, 503, message);
       // An upstream refusal names its own cause — a rotated token, a missing
       // license, a rate limit — and the generic handler would replace all of that
       // with "Internal server error", leaving the agent nothing to report.
@@ -75,7 +75,14 @@ export function registerAgentRoutes({ app, db, search }: RouteContext): void {
       if (/is too common a word to answer to|is the name of someone in the chat|^Pass reply_mode/.test(message)) {
         return failure(res, 400, message);
       }
-      if (/^Web access has reached its limit/.test(message)) return failure(res, 429, message);
+      if (/^Web access has reached its limit|^Alexa control has reached its limit/.test(message)) return failure(res, 429, message);
+      // The owner's own devices: a policy refusal is final, a name that did not resolve needs a different one,
+      // and an upstream failure names its own cause.
+      if (/^Alexa refused: /.test(message)) return failure(res, 403, message);
+      if (/^No (?:smart home device|group|routine|Echo) is called|^More than one (?:device|group|routine|Echo) matches|^Pass (?:action|either action|a brightness)|^Brightness is set on|^Keep it to \d+ characters|^There is nothing to say/.test(message)) {
+        return failure(res, 400, message);
+      }
+      if (/^Alexa /.test(message)) return failure(res, 502, message);
       throw error;
     }
   });

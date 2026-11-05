@@ -751,6 +751,20 @@ export const toolInput = {
     // "" clears the nickname; null leaves it alone.
     assistant_nickname: z.union([assistantNickname, z.literal("")]).nullable().optional(),
   }),
+  // The owner's Echo devices and smart home, through the community alexa-mcp server (server/alexa-control.ts).
+  list_home_devices: z.object({}).strict(),
+  home_device_status: z.object({ name: z.string().trim().min(1).max(100) }).strict(),
+  control_home_device: z.object({
+    target: z.string().trim().min(1).max(100),
+    target_kind: z.enum(["device", "group"]),
+    action: z.enum(["on", "off"]).nullable().optional(),
+    brightness: z.number().int().min(0).max(100).nullable().optional(),
+  }).strict(),
+  run_alexa_routine: z.object({ name: z.string().trim().min(1).max(100) }).strict(),
+  speak_on_echo: z.object({
+    text: z.string().trim().min(1).max(300),
+    device: z.string().trim().min(1).max(100).nullable().optional(),
+  }).strict(),
 } as const;
 
 export type ToolName = keyof typeof toolInput;

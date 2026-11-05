@@ -1,5 +1,5 @@
 import type {
-  AgentTurnMemory, AttachmentPage, BackgroundActivity, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
+  AgentTurnMemory, AlexaState, AttachmentPage, BackgroundActivity, Category, OwnerProfile, ChannelConversation, ChannelMessage, ConversationSearchResult, DigestBrief, DigestBriefResource, ReplyMode,
   ExternalEvent, Health, HostedPage, Insights, InsightsRange, IntegrationState, LifeArea, Memory, MemoryListResult, Message, MoodPoint, MoodTrendScope, Overview, ReflectionEvidence,
   ReflectionPreset, Reminder, ReviewEvidence, SearchHitType, SmsProvider, Todo, TodoComment, TodoCompletion, TodoStatus,
   PageBlockResult, UniversalSearchResult,
@@ -292,6 +292,8 @@ export const api = {
       body: JSON.stringify(input),
     }),
   disconnectAtlassian: () => request<{ disconnected: true }>("/integrations/atlassian", { method: "DELETE" }),
+  alexa: () => request<AlexaState>("/integrations/alexa", undefined, TOOL_TIMEOUT_MS),
+  unlinkAlexa: () => request<{ unlinked: true; revoked: number }>("/integrations/alexa/link", { method: "DELETE" }),
   pages: (includeExpired = false) => request<HostedPage[]>(`/pages${includeExpired ? "?include_expired=1" : ""}`),
   createPage: (input: { template: string; title?: string }) =>
     request<HostedPage>("/pages", { method: "POST", body: JSON.stringify(input) }, TOOL_TIMEOUT_MS),
