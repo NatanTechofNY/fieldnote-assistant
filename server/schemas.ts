@@ -514,7 +514,8 @@ export const pageCreate = z.object({
   title: pageTitle.nullable().optional(),
   blocks: z.array(pageBlockInput).max(40).nullable().optional(),
   items: z.array(pageLine).max(40).nullable().optional(),
-  slots: z.array(pageLine).max(12).nullable().optional(),
+  /** pick_a_time's times, held to a small grid when the blocks are checked, or trip's packing list. */
+  slots: z.array(pageLine).max(40).nullable().optional(),
   when: nullableIso,
   todo_id: nullableId,
   closes_at: nullableIso,

@@ -5,7 +5,7 @@
  */
 import type { z } from "zod";
 import { attachmentsForMemories } from "./attachments.ts";
-import { USER_ID } from "./db.ts";
+import { getTodo, id, now, queueIndexJob, USER_ID } from "./db.ts";
 import { groupIdOfAddress } from "./group-thread.ts";
 import { assertSendableImage } from "./image-output.ts";
 import {
@@ -78,6 +78,66 @@ const titleFrom = (blocks: PageBlock[]): string => {
 
 export type CreatedPage = { page: PageRow; wroteTodos: boolean };
 
+const sameItem = (title: string): string => title.trim().toLowerCase().replace(/\s+/g, " ");
+
+/**
+ * A live checklist handed its items is written as a parent todo in the page's
+ * group area with one subtask per item, so it is ticked from the link, on the
+ * board, and in search. With todo_id as well, the items not on that list yet
+ * are added to it, so sending a list back unchanged writes nothing. The stored
+ * block keeps only todo_id: the subtasks are the list.
+ */
+function writeChecklists(
+  db: Db,
+  blocks: PageBlock[],
+  scope: { lifeAreaId: string | null; threadId: string | null },
+  pageTitle: string,
+): { blocks: PageBlock[]; wroteTodos: boolean } {
+  let wroteTodos = false;
+  const insert = db.prepare(`
+    INSERT INTO todos(id,user_id,title,life_area_id,life_area_source,parent_id,status,reply_thread_id,created_at,updated_at)
+    VALUES(?,?,?,?,'agent',?,'pending',?,?,?)
+  `);
+  const written = blocks.map(block => {
+    if (block.type !== "live_checklist" || !block.items?.length) return block;
+    if (!scope.lifeAreaId) {
+      throw new PageError("A checklist people tick off belongs to a group chat: make it in the group, or name the group with thread_id. For a list of your own, make a todo with subtasks and pass its todo_id.");
+    }
+    const { items, ...rest } = block;
+    const timestamp = now();
+    const have = new Set<string>();
+    let parentId = block.todo_id;
+    if (parentId) {
+      const parent = getTodo(db, parentId);
+      if (!parent || parent.life_area_id !== scope.lifeAreaId) throw new PageError("That list is not one of this group's");
+      const steps = db.prepare("SELECT title FROM todos WHERE user_id=? AND parent_id=? AND status<>'cancelled'")
+        .all(USER_ID, parentId) as Array<{ title: string }>;
+      for (const step of steps) have.add(sameItem(step.title));
+      const fresh = items.filter(item => !have.has(sameItem(item)));
+      // A finished list that gains something to do is open again.
+      if (fresh.length && parent.status === "done") {
+        db.prepare("UPDATE todos SET status='pending',completed_at=NULL,updated_at=? WHERE id=?").run(timestamp, parentId);
+        queueIndexJob(db, "todo", parentId);
+      }
+    } else {
+      parentId = id("todo");
+      insert.run(parentId, USER_ID, (block.text || pageTitle || "Checklist").slice(0, 300), scope.lifeAreaId, null, scope.threadId, timestamp, timestamp);
+      queueIndexJob(db, "todo", parentId);
+      wroteTodos = true;
+    }
+    for (const item of items) {
+      if (have.has(sameItem(item))) continue;
+      have.add(sameItem(item));
+      const stepId = id("todo");
+      insert.run(stepId, USER_ID, item, scope.lifeAreaId, parentId, scope.threadId, timestamp, timestamp);
+      queueIndexJob(db, "todo", stepId);
+      wroteTodos = true;
+    }
+    return { ...rest, todo_id: parentId };
+  });
+  return { blocks: written, wroteTodos };
+}
+
 export async function createPageFromInput(
   db: Db,
   input: z.infer<typeof pageCreate>,
@@ -145,14 +205,20 @@ export async function createPageFromInput(
   }
   await assertPageImages(blocks);
   assertPagePictures(db, blocks, audience, scope.lifeAreaId);
-  const page = createPage(db, {
-    title, blocks, kind, template, audience,
-    lifeAreaId: scope.lifeAreaId, threadId: scope.threadId, groupId: scope.groupId, expiresInDays,
-  });
+  const shownTo = audience;
+  // One transaction, so a page that is refused leaves no list behind on the board.
+  const page = db.transaction(() => {
+    const lists = writeChecklists(db, blocks, scope, title);
+    wroteTodos ||= lists.wroteTodos;
+    return createPage(db, {
+      title, blocks: lists.blocks, kind, template, audience: shownTo,
+      lifeAreaId: scope.lifeAreaId, threadId: scope.threadId, groupId: scope.groupId, expiresInDays,
+    });
+  })();
   return { page, wroteTodos };
 }
 
-export async function updatePageFromInput(db: Db, row: PageRow, input: z.infer<typeof pageUpdate>): Promise<PageRow> {
+export async function updatePageFromInput(db: Db, row: PageRow, input: z.infer<typeof pageUpdate>): Promise<CreatedPage> {
   // A block sent back without its id keeps the one it had, matched by kind and words, so votes stay with the question
   // they were cast on when blocks are added or reordered around it.
   const existing = pageBlocks(row).filter(block => block.id);
@@ -176,7 +242,13 @@ export async function updatePageFromInput(db: Db, row: PageRow, input: z.infer<t
     await assertPageImages(blocks);
     assertPagePictures(db, blocks, row.audience, row.life_area_id);
   }
-  return updatePage(db, row, { title: input.title, blocks, expiresInDays: input.expires_in_days });
+  return db.transaction(() => {
+    const lists = blocks
+      ? writeChecklists(db, blocks, { lifeAreaId: row.life_area_id, threadId: row.thread_id }, input.title ?? row.title)
+      : { blocks: null, wroteTodos: false };
+    const page = updatePage(db, row, { title: input.title, blocks: lists.blocks, expiresInDays: input.expires_in_days });
+    return { page, wroteTodos: lists.wroteTodos };
+  })();
 }
 
 /** The owner's page for one local day, made once and reused: what the morning briefing links to. */

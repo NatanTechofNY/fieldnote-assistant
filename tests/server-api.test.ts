@@ -14593,6 +14593,59 @@ describe("hosted pages", () => {
     assert.equal(getTodo(db, outside.body.data.id)?.status, "pending");
   });
 
+  it("writes a group's tickable list from items, and adds only what is new when it is sent back", async () => {
+    const { api, db } = pageFixture();
+    const { context: group, areaId } = groupTurn(db, "thread_packing");
+    const stepsOf = (parentId: string) => db.prepare("SELECT id,title,status,life_area_id FROM todos WHERE parent_id=? ORDER BY created_at,rowid")
+      .all(parentId) as Array<{ id: string; title: string; status: string; life_area_id: string }>;
+
+    const made = await run(db, "create_page", {
+      title: "Florida packing",
+      blocks: [
+        { type: "live_checklist", text: "Essentials", items: ["Passports", "AirPods for each of us"] },
+        { type: "live_checklist", text: "Beach", items: ["2 swimsuits each", "Reef-safe sunscreen"] },
+      ],
+    }, group);
+    const [essentials, beach] = made.blocks as Array<{ id: string; type: string; todo_id: string; items?: string[] }>;
+    assert.ok(essentials.todo_id && beach.todo_id && essentials.todo_id !== beach.todo_id, "each section is its own list");
+    assert.equal(essentials.items, undefined, "the subtasks are the list, not the block");
+    assert.equal(getTodo(db, essentials.todo_id)?.title, "Essentials");
+    assert.deepEqual(stepsOf(essentials.todo_id).map(step => [step.title, step.life_area_id]), [["Passports", areaId], ["AirPods for each of us", areaId]]);
+
+    // Anyone with the link ticks it off, and the tick is the todo's.
+    const html = (await api.get(`/p/${slugOf(made.url)}`).expect(200)).text;
+    assert.match(html, /Reef-safe sunscreen/);
+    const passports = stepsOf(essentials.todo_id)[0];
+    await api.post(`/p/${slugOf(made.url)}/check`).type("form").send({ block: essentials.id, todo: passports.id, name: "Wifey" }).expect(303);
+    assert.equal(getTodo(db, passports.id)?.status, "done");
+
+    // Sent back with its todo_id, a list gains only the items it does not have.
+    await run(db, "update_page", {
+      id: made.id,
+      blocks: [
+        { type: "live_checklist", id: essentials.id, todo_id: essentials.todo_id, text: "Essentials", items: ["passports", "Phone chargers"] },
+        { type: "live_checklist", id: beach.id, todo_id: beach.todo_id, text: "Beach" },
+      ],
+    }, group);
+    assert.deepEqual(stepsOf(essentials.todo_id).map(step => step.title), ["Passports", "AirPods for each of us", "Phone chargers"]);
+    assert.equal(getTodo(db, passports.id)?.status, "done", "a ticked item stays ticked");
+
+    // The trip template's packing list is tickable on a group's page and plain on the owner's.
+    const trip = await run(db, "create_page", { template: "trip", title: "Miami", when: "2031-05-01T09:00:00.000Z", slots: ["Sandals"] }, group);
+    const packing = (trip.blocks as Array<{ type: string; todo_id?: string }>).find(block => block.type === "live_checklist");
+    assert.deepEqual(stepsOf(packing!.todo_id!).map(step => step.title), ["Sandals"]);
+    const mine = await run(db, "create_page", { template: "trip", title: "Miami", when: "2031-05-01T09:00:00.000Z", slots: ["Sandals"] }, ownerTurn(db));
+    assert.ok((mine.blocks as Array<{ type: string }>).some(block => block.type === "checklist"));
+
+    // With no group to file it under there is nowhere for the list to live, and nothing is written.
+    const before = (db.prepare("SELECT count(*) n FROM todos").get() as { n: number }).n;
+    await assert.rejects(
+      run(db, "create_page", { blocks: [{ type: "live_checklist", text: "Mine", items: ["Socks"] }] }, ownerTurn(db)),
+      /belongs to a group chat/,
+    );
+    assert.equal((db.prepare("SELECT count(*) n FROM todos").get() as { n: number }).n, before);
+  });
+
   it("keeps votes on the options that survive an edit", async () => {
     const { api, db } = pageFixture();
     const owner = ownerTurn(db);

@@ -1692,7 +1692,7 @@
                 "type": {
                   "type": "string",
                   "enum": ["heading", "text", "checklist", "link", "image", "todos", "poll", "availability", "live_checklist", "progress", "countdown", "itinerary", "stats", "habits", "rotation", "mood_chart", "mood_heatmap"],
-                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); image also takes attachment_ids; itinerary/checklist may take attachment_ids, one per item; todos use range; live_checklist/progress use todo_id; countdown uses when"
+                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); image also takes attachment_ids; itinerary/checklist may take attachment_ids, one per item; todos use range; progress uses todo_id; countdown uses when. checklist is plain bullets nobody can tick. live_checklist is boxes anyone with the link ticks off, on a group's page: give it items and text (it writes the list as group todos), or todo_id for a list that exists (items then add to it)"
                 },
                 "id": {
                   "type": ["string", "null"],
@@ -1707,7 +1707,7 @@
                   "items": {
                     "type": "string"
                   },
-                  "description": "Checklist lines, itinerary stops, stats as 'Label: value', or poll options"
+                  "description": "Checklist lines, a live_checklist's things to tick off, itinerary stops, stats as 'Label: value', or poll options"
                 },
                 "slots": {
                   "type": ["array", "null"],
@@ -1746,7 +1746,7 @@
                 },
                 "todo_id": {
                   "type": ["string", "null"],
-                  "description": "The parent todo a live_checklist or progress block follows"
+                  "description": "The parent todo a live_checklist or progress block follows; null on a new live_checklist given items, which makes its own"
                 },
                 "days": {
                   "type": ["integer", "null"],
@@ -1763,14 +1763,14 @@
             "items": {
               "type": "string"
             },
-            "description": "Template input. pick_a_time: days like 'Thu Oct 15'. shopping_list: the items. chore_rotation: 2+ people. trip: itinerary lines like 'Fri 7pm | Dinner'. meeting_prep: attendee names"
+            "description": "Template input. pick_a_time: days like 'Thu Oct 15'. shopping_list: the items people tick off, for any shared list (groceries, packing, what to bring). chore_rotation: 2+ people. trip: itinerary lines like 'Fri 7pm | Dinner'. meeting_prep: attendee names"
           },
           "slots": {
             "type": ["array", "null"],
             "items": {
               "type": "string"
             },
-            "description": "Template input. pick_a_time: times like '6pm'. trip: the packing list"
+            "description": "Template input. pick_a_time: times like '6pm'. trip: the packing list, which a group ticks off"
           },
           "when": {
             "type": ["string", "null"],
@@ -1836,7 +1836,7 @@
                 "type": {
                   "type": "string",
                   "enum": ["heading", "text", "checklist", "link", "image", "todos", "poll", "availability", "live_checklist", "progress", "countdown", "itinerary", "stats", "habits", "rotation", "mood_chart", "mood_heatmap"],
-                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); image also takes attachment_ids; itinerary/checklist may take attachment_ids, one per item; todos use range; live_checklist/progress use todo_id; countdown uses when"
+                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); image also takes attachment_ids; itinerary/checklist may take attachment_ids, one per item; todos use range; progress uses todo_id; countdown uses when. checklist is plain bullets nobody can tick. live_checklist is boxes anyone with the link ticks off, on a group's page: give it items and text (it writes the list as group todos), or todo_id for a list that exists (items then add to it)"
                 },
                 "id": {
                   "type": ["string", "null"],
@@ -1851,7 +1851,7 @@
                   "items": {
                     "type": "string"
                   },
-                  "description": "Checklist lines, itinerary stops, stats as 'Label: value', or poll options"
+                  "description": "Checklist lines, a live_checklist's things to tick off, itinerary stops, stats as 'Label: value', or poll options"
                 },
                 "slots": {
                   "type": ["array", "null"],
@@ -1890,7 +1890,7 @@
                 },
                 "todo_id": {
                   "type": ["string", "null"],
-                  "description": "The parent todo a live_checklist or progress block follows"
+                  "description": "The parent todo a live_checklist or progress block follows; null on a new live_checklist given items, which makes its own"
                 },
                 "days": {
                   "type": ["integer", "null"],

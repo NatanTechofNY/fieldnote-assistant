@@ -1118,7 +1118,9 @@ export async function executeAgentTool(
   if (name === "update_page") {
     const row = scopedPage(db, input.id as string, scope);
     if (!row) throw new Error(PAGE_NOT_FOUND);
-    return pageResult(db, await updatePageFromInput(db, row, input as never));
+    const { page, wroteTodos } = await updatePageFromInput(db, row, input as never);
+    if (wroteTodos) search.flushSoon();
+    return pageResult(db, page);
   }
   if (name === "list_pages") {
     const rows = listPages(db, {

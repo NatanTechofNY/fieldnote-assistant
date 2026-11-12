@@ -26,7 +26,9 @@ export function registerSharedPageRoutes({ app, db, search }: RouteContext): voi
     const body = pageUpdate.parse(req.body);
     const row = getPage(db, req.params.id);
     if (!row) return failure(res, 404, "Page not found");
-    return success(res, pageJson(db, await updatePageFromInput(db, row, body)));
+    const { page, wroteTodos } = await updatePageFromInput(db, row, body);
+    if (wroteTodos) search.flushSoon();
+    return success(res, pageJson(db, page));
   });
 
   app.delete("/api/pages/:id", (req, res) => {

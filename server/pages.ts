@@ -263,6 +263,8 @@ export function normalizeBlocks(inputs: Array<z.infer<typeof pageBlockInput>>): 
         need((block.items?.length ?? 0) * Math.max(block.slots?.length ?? 0, 1) <= 80, "has too many cells; use fewer days or slots");
         break;
       case "live_checklist":
+        need(block.todo_id || block.items?.length, "needs the things to tick off in items, or todo_id for a list that already exists");
+        break;
       case "progress":
         need(block.todo_id, "needs todo_id, the parent todo whose subtasks it shows");
         break;
