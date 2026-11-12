@@ -5,7 +5,7 @@
  */
 import type { z } from "zod";
 import { attachmentsForMemories } from "./attachments.ts";
-import { getTodo, id, now, queueIndexJob, USER_ID } from "./db.ts";
+import { getTodo, id, now, queueIndexJob, syncTodoReminders, USER_ID } from "./db.ts";
 import { groupIdOfAddress } from "./group-thread.ts";
 import { assertSendableImage } from "./image-output.ts";
 import {
@@ -14,7 +14,7 @@ import {
 } from "./pages.ts";
 import { OWNER_ONLY_TEMPLATES, templates, type TemplateScope } from "./page-templates/index.ts";
 import type { pageBlockInput, pageCreate, pageUpdate } from "./schemas.ts";
-import type { Db } from "./types.ts";
+import type { Db, TodoRow } from "./types.ts";
 
 /** Where the request came from. A group turn is fenced to its group; the owner's own chat is not. */
 export type PageOrigin = {
@@ -84,14 +84,17 @@ const sameItem = (title: string): string => title.trim().toLowerCase().replace(/
  * A live checklist handed its items is written as a parent todo in the page's
  * group area with one subtask per item, so it is ticked from the link, on the
  * board, and in search. With todo_id as well, the items not on that list yet
- * are added to it, so sending a list back unchanged writes nothing. The stored
- * block keeps only todo_id: the subtasks are the list.
+ * are added to it, and under `replace` (an edit of the page) the steps left out
+ * of the items are cancelled, so the list becomes what was sent. A step keeps
+ * its tick while its words stay the same, and sending a list back unchanged
+ * writes nothing. The stored block keeps only todo_id: the subtasks are the list.
  */
 function writeChecklists(
   db: Db,
   blocks: PageBlock[],
   scope: { lifeAreaId: string | null; threadId: string | null },
   pageTitle: string,
+  replace = false,
 ): { blocks: PageBlock[]; wroteTodos: boolean } {
   let wroteTodos = false;
   const insert = db.prepare(`
@@ -110,9 +113,19 @@ function writeChecklists(
     if (parentId) {
       const parent = getTodo(db, parentId);
       if (!parent || parent.life_area_id !== scope.lifeAreaId) throw new PageError("That list is not one of this group's");
-      const steps = db.prepare("SELECT title FROM todos WHERE user_id=? AND parent_id=? AND status<>'cancelled'")
-        .all(USER_ID, parentId) as Array<{ title: string }>;
-      for (const step of steps) have.add(sameItem(step.title));
+      const steps = db.prepare("SELECT id,title FROM todos WHERE user_id=? AND parent_id=? AND life_area_id=? AND status<>'cancelled'")
+        .all(USER_ID, parentId, scope.lifeAreaId) as Array<{ id: string; title: string }>;
+      const wanted = new Set(items.map(sameItem));
+      for (const step of steps) {
+        if (!replace || wanted.has(sameItem(step.title))) {
+          have.add(sameItem(step.title));
+          continue;
+        }
+        db.prepare("UPDATE todos SET status='cancelled',updated_at=? WHERE id=?").run(timestamp, step.id);
+        syncTodoReminders(db, getTodo(db, step.id) as TodoRow);
+        queueIndexJob(db, "todo", step.id);
+        wroteTodos = true;
+      }
       const fresh = items.filter(item => !have.has(sameItem(item)));
       // A finished list that gains something to do is open again.
       if (fresh.length && parent.status === "done") {
@@ -237,14 +250,20 @@ export async function updatePageFromInput(db: Db, row: PageRow, input: z.infer<t
     taken.add(`${block.type}${number}`);
     return { ...block, id: `${block.type}${number}` };
   });
-  const blocks = input.blocks ? normalizeBlocks(incoming as Array<z.infer<typeof pageBlockInput>>) : null;
+  // A list sent back without its todo_id is still the list it was, not a second one made beside it.
+  const withLists = incoming.map(block => {
+    if (block.type !== "live_checklist" || block.todo_id) return block;
+    const was = existing.find(old => old.id === block.id && old.type === "live_checklist" && old.todo_id);
+    return was ? { ...block, todo_id: was.todo_id } : block;
+  });
+  const blocks = input.blocks ? normalizeBlocks(withLists as Array<z.infer<typeof pageBlockInput>>) : null;
   if (blocks) {
     await assertPageImages(blocks);
     assertPagePictures(db, blocks, row.audience, row.life_area_id);
   }
   return db.transaction(() => {
     const lists = blocks
-      ? writeChecklists(db, blocks, { lifeAreaId: row.life_area_id, threadId: row.thread_id }, input.title ?? row.title)
+      ? writeChecklists(db, blocks, { lifeAreaId: row.life_area_id, threadId: row.thread_id }, input.title ?? row.title, true)
       : { blocks: null, wroteTodos: false };
     const page = updatePage(db, row, { title: input.title, blocks: lists.blocks, expiresInDays: input.expires_in_days });
     return { page, wroteTodos: lists.wroteTodos };

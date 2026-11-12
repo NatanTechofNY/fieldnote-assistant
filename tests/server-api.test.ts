@@ -14619,16 +14619,33 @@ describe("hosted pages", () => {
     await api.post(`/p/${slugOf(made.url)}/check`).type("form").send({ block: essentials.id, todo: passports.id, name: "Wifey" }).expect(303);
     assert.equal(getTodo(db, passports.id)?.status, "done");
 
-    // Sent back with its todo_id, a list gains only the items it does not have.
+    // An edit sends the whole list: a reworded item replaces the old one rather than sitting beside it.
+    const open = (parentId: string) => stepsOf(parentId).filter(step => step.status !== "cancelled").map(step => step.title);
     await run(db, "update_page", {
       id: made.id,
       blocks: [
-        { type: "live_checklist", id: essentials.id, todo_id: essentials.todo_id, text: "Essentials", items: ["passports", "Phone chargers"] },
+        { type: "live_checklist", id: essentials.id, todo_id: essentials.todo_id, text: "Essentials", items: ["passports", "AirPods", "Phone chargers"] },
         { type: "live_checklist", id: beach.id, todo_id: beach.todo_id, text: "Beach" },
       ],
     }, group);
-    assert.deepEqual(stepsOf(essentials.todo_id).map(step => step.title), ["Passports", "AirPods for each of us", "Phone chargers"]);
-    assert.equal(getTodo(db, passports.id)?.status, "done", "a ticked item stays ticked");
+    assert.deepEqual(open(essentials.todo_id), ["Passports", "AirPods", "Phone chargers"]);
+    assert.equal(getTodo(db, passports.id)?.status, "done", "an item whose words stay keeps its tick");
+    assert.deepEqual(open(beach.todo_id), ["2 swimsuits each", "Reef-safe sunscreen"], "a list sent without items is left as it is");
+    const shown = (await api.get(`/p/${slugOf(made.url)}`).expect(200)).text;
+    assert.doesNotMatch(shown, /AirPods for each of us/, "the step that came off is off the page");
+
+    // Sent back the same, it writes nothing; sent without its todo_id, it is still the same list.
+    const count = () => (db.prepare("SELECT count(*) n FROM todos").get() as { n: number }).n;
+    const total = count();
+    await run(db, "update_page", {
+      id: made.id,
+      blocks: [
+        { type: "live_checklist", id: essentials.id, todo_id: null, text: "Essentials", items: ["Passports", "AirPods", "Phone chargers"] },
+        { type: "live_checklist", id: beach.id, todo_id: beach.todo_id, text: "Beach", items: ["2 swimsuits each", "Reef-safe sunscreen"] },
+      ],
+    }, group);
+    assert.equal(count(), total);
+    assert.deepEqual(open(essentials.todo_id), ["Passports", "AirPods", "Phone chargers"]);
 
     // The trip template's packing list is tickable on a group's page and plain on the owner's.
     const trip = await run(db, "create_page", { template: "trip", title: "Miami", when: "2031-05-01T09:00:00.000Z", slots: ["Sandals"] }, group);

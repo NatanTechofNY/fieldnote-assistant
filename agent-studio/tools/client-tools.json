@@ -1836,7 +1836,7 @@
                 "type": {
                   "type": "string",
                   "enum": ["heading", "text", "checklist", "link", "image", "todos", "poll", "availability", "live_checklist", "progress", "countdown", "itinerary", "stats", "habits", "rotation", "mood_chart", "mood_heatmap"],
-                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); image also takes attachment_ids; itinerary/checklist may take attachment_ids, one per item; todos use range; progress uses todo_id; countdown uses when. checklist is plain bullets nobody can tick. live_checklist is boxes anyone with the link ticks off, on a group's page: give it items and text (it writes the list as group todos), or todo_id for a list that exists (items then add to it)"
+                  "description": "heading/text use text; checklist/itinerary/stats/poll/availability use items (or slots); link/image use url (+ text); image also takes attachment_ids; itinerary/checklist may take attachment_ids, one per item; todos use range; progress uses todo_id; countdown uses when. checklist is plain bullets nobody can tick. live_checklist is boxes anyone with the link ticks off, on a group's page: keep its todo_id and send items as the whole list it should now be, or todo_id alone to leave it as it is; a new one takes items and text and no todo_id"
                 },
                 "id": {
                   "type": ["string", "null"],
@@ -1851,7 +1851,7 @@
                   "items": {
                     "type": "string"
                   },
-                  "description": "Checklist lines, a live_checklist's things to tick off, itinerary stops, stats as 'Label: value', or poll options"
+                  "description": "Checklist lines, a live_checklist's whole list (anything left out comes off it), itinerary stops, stats as 'Label: value', or poll options"
                 },
                 "slots": {
                   "type": ["array", "null"],
@@ -1890,7 +1890,7 @@
                 },
                 "todo_id": {
                   "type": ["string", "null"],
-                  "description": "The parent todo a live_checklist or progress block follows; null on a new live_checklist given items, which makes its own"
+                  "description": "The parent todo a live_checklist or progress block follows; keep it on a live_checklist you edit, or its list is made again from scratch"
                 },
                 "days": {
                   "type": ["integer", "null"],
